@@ -85,7 +85,7 @@ section("C. 无令牌（未授权）：只读页可见，执行类/运维/设置
 //   「系统设置」反过来 —— needAuth，授权后才出现。
 eq(keys(NONE), ["live", "sim", "about"], "C1 可见 tab = 两个只读页 + 关于（顺序保持一致）");
 ok(visibleTabs(NONE).every((t) => !t.needAuth && !t.needAdmin), "C2 无令牌时不含任何受限页");
-for (const k of ["point", "program", "ops", "settings"]) {
+for (const k of ["point", "program", "sort", "ops", "settings"]) {
   ok(!keys(NONE).includes(k), `C3 "${k}" 对无令牌用户不可见（用户明确要求）`);
 }
 ok(keys(NONE).includes("about"), "C3b 「关于」对无令牌用户可见（是说明文档，不是操作入口）");
@@ -94,10 +94,11 @@ ok(!NONE.isAdmin && !NONE.controlActive, "C4 快照自检：无令牌 controlAct
 // ---------------------------------------------------------------------
 section("D. 操作员令牌：执行页与系统设置出现，运维审计仍隐藏");
 // ---------------------------------------------------------------------
-eq(keys(OP), ["live", "sim", "point", "program", "settings", "about"],
-   "D1 操作员可见 = 只读页 + 点位执行 + 程序执行 + 系统设置 + 关于");
+eq(keys(OP), ["live", "sim", "point", "program", "sort", "settings", "about"],
+   "D1 操作员可见 = 只读页 + 点位执行 + 程序执行 + 分拣 + 系统设置 + 关于");
 ok(keys(OP).includes("point") && keys(OP).includes("program"), "D2 拿到控制权限后执行页出现（不需要刷新）");
 ok(keys(OP).includes("settings"), "D2b 系统设置对操作员可见（可改非管理员项，管理员项由后端逐字段拦）");
+ok(keys(OP).includes("sort"), "D2c 分拣页对操作员可见（会下发运动，必须持控制令牌）");
 ok(!keys(OP).includes("ops"), "D3 运维审计对操作员隐藏（需管理员）");
 ok(OP.controlActive && !OP.isAdmin, "D4 快照自检：操作员有令牌但不是 admin");
 

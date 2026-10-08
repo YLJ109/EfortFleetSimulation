@@ -61,7 +61,7 @@ eq(SHORTCUT_GROUPS.filter((g) => !shortcutRows().some((r) => r.group === g)), []
    "A5 每个分组都至少有一个动作（空分组会在「关于」页留下空白块）");
 ok(shortcutRows().reduce((n, r) => n + r.items.length, 0) === SHORTCUTS.length,
    "A6 分组后条目总数 == 定义总数（没有动作被漏掉）");
-eq(TAB_KEY_COUNT, 7, "A7 数字键位数 = 7（与 tabs.js 的模块数一致）");
+eq(TAB_KEY_COUNT, 8, "A7 数字键位数 = 8（与 tabs.js 的模块数一致）");
 // 每个按键只能属于一个动作，否则"按 e 到底干什么"就变成看代码顺序了
 {
   const seen = new Map();
@@ -107,13 +107,13 @@ ok(isTypingTarget(null) === false && isTypingTarget(undefined) === false, "C11 �
 ok(isTypingTarget({ tagName: "input" }) === true, "C12 小写 tagName 也认（大小写不敏感）");
 
 // ---------------------------------------------------------------------
-section("D. 数字键 1~7：切模块");
+section("D. 数字键 1~8：切模块");
 // ---------------------------------------------------------------------
-for (const n of [1, 2, 3, 4, 5, 6, 7]) {
+for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) {
   eq(resolveKey(key(String(n)), ctx()), "tab:" + n, `D1 按 ${n} → tab:${n}`);
 }
-for (const bad of ["0", "8", "9", "12", "3abc", "abc", "", "  "]) {
-  eq(resolveKey(key(bad), ctx()), "", `D2 非 1~7 的输入 ${JSON.stringify(bad)} 不当作切模块`);
+for (const bad of ["0", "9", "10", "12", "3abc", "abc", "", "  "]) {
+  eq(resolveKey(key(bad), ctx()), "", `D2 非 1~8 的输入 ${JSON.stringify(bad)} 不当作切模块`);
 }
 eq(resolveKey(key("1", { repeat: true }), ctx()), "tab:1", "D3 数字键允许长按重复（连续切页是有意为之）");
 

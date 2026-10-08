@@ -980,6 +980,97 @@ def _reject_if_run_active(what: str) -> None:
                     "或等它跑完" % (", ".join(active[:2]), what)))
 
 
+# =====================================================================
+# ★ 2026-10-08 执行上下文（RunContext）
+#   给"非文件类"的长流程（如三色分拣：9 件 × 十几次动作）复用**同一套**
+#   取消 / 暂停 / 进度 设施。
+#
+#   ★ 为什么必须复用而不是另起一套：界面上只有一个「停止执行」和一个进度轮询。
+#     若分拣自建状态，就会出现两套互不相干的"运行中"——停止按钮停不掉它、
+#     run-state 也看不到它，这是真机能出事的缺口（机器人还在动，界面说空闲）。
+# =====================================================================
+class RunContext:
+    """一次长流程的执行上下文。用法：
+
+        ctx = new_run("sorting", "三色分拣")
+        try:
+            while ...:
+                if ctx.cancelled(): break
+                ctx.progress(stage="取料", piece=i, total=9)
+                ...
+                if ctx.sleep(1.0): break        # 可暂停、可打断的等待
+        finally:
+            ctx.finish("done" | "cancelled" | "error")
+    """
+
+    def __init__(self, run_id: str, name: str, kind: str = "sorting"):
+        self.run_id = run_id
+        self.name = name
+        self.kind = kind
+        _cancel_expired()
+        with _RUN_CANCEL_LOCK:
+            _RUN_CANCEL.pop(run_id, None)
+            _RUN_PAUSE.pop(run_id, None)
+            for k in [k for k, v in _RUN_PROGRESS.items() if not v.get("running")]:
+                _RUN_PROGRESS.pop(k, None)
+        _RUN_ACTIVE[run_id] = {"filename": name, "kind": kind, "started_at": time.time()}
+        global _LAST_RUN_ID
+        _LAST_RUN_ID = run_id
+        _set_progress(run_id, name=name, kind=kind, running=True, paused=False,
+                      index=0, total=0, stage="", phase="starting")
+
+    def cancelled(self) -> bool:
+        return _is_cancelled(self.run_id)
+
+    def wait_pause(self) -> bool:
+        """已暂停则阻塞在步边界；返回 True = 期间被停止。"""
+        return _wait_if_paused(self.run_id)
+
+    def sleep(self, sec: float) -> bool:
+        """可暂停（冻结计时）、可打断的等待；返回 True = 被停止。"""
+        return _sleep_pausable(sec, self.run_id)
+
+    def progress(self, **kw) -> None:
+        _set_progress(self.run_id, **kw)
+
+    def finish(self, phase: str = "done") -> None:
+        with _RUN_CANCEL_LOCK:
+            _RUN_ACTIVE.pop(self.run_id, None)
+            _RUN_CANCEL.pop(self.run_id, None)
+            _RUN_PAUSE.pop(self.run_id, None)
+        _set_progress(self.run_id, running=False, paused=False, phase=phase)
+
+
+def new_run(name: str, kind: str = "sorting") -> RunContext:
+    """开一次长流程（同类流程同时只允许一路 —— 见 api/sorting.py 的单例闸）。"""
+    return RunContext("run-%d" % time.time_ns(), name, kind)
+
+
+def request_cancel(run_id: Optional[str] = None, filename: Optional[str] = None) -> List[str]:
+    """请求停止：给"停止执行"/"中止"共用的落地实现（公开给其它模块调用）。
+
+    返回被标记的 run_id 列表。语义与原 /control/run-cancel 完全一致：
+    只打标记，真正的停止发生在执行循环的**步边界**与 motion.command 的 abort_check 里。
+    """
+    _cancel_expired()
+    with _RUN_CANCEL_LOCK:
+        active = list(_RUN_ACTIVE.keys())
+    hit: List[str] = []
+    if run_id:
+        with _RUN_CANCEL_LOCK:
+            _RUN_CANCEL[run_id] = time.time()
+        hit = [run_id]
+    else:
+        for r in active:
+            info = _RUN_ACTIVE.get(r) or {}
+            if filename and info.get("filename") != filename:
+                continue
+            with _RUN_CANCEL_LOCK:
+                _RUN_CANCEL[r] = time.time()
+            hit.append(r)
+    return hit
+
+
 class RunCancelIn(BaseModel):
     run_id: Optional[str] = Field(default=None, max_length=64)
     filename: Optional[str] = Field(default=None, max_length=200)

@@ -15,6 +15,7 @@ import SimMonitor from "./components/SimMonitor.vue";
 import PointExecView from "./components/PointExecView.vue";
 import ProgramExecView from "./components/ProgramExecView.vue";
 import EventsView from "./components/EventsView.vue";
+import SortingView from "./components/SortingView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import AboutView from "./components/AboutView.vue";
 import AnnouncePanel from "./components/AnnouncePanel.vue";
@@ -504,6 +505,7 @@ onBeforeUnmount(() => {
       <SimMonitor v-show="robot.activeView === 'sim'" />
       <PointExecView v-show="robot.activeView === 'point'" />
       <ProgramExecView v-show="robot.activeView === 'program'" />
+      <SortingView v-show="robot.activeView === 'sort'" />
       <EventsView v-show="robot.activeView === 'ops'" />
       <!-- 系统设置 / 关于：纯数据页，没有 3D 容器。
            它们也走 v-show 保活（设置页填了一半切走再切回来，草稿不能丢）。 -->

@@ -22,7 +22,7 @@ export const SHORTCUT_GROUPS = ["导航", "视图", "执行", "安全"];
 /**
  * 快捷键清单（唯一事实来源：解析表 + 「关于」页的说明都读它）。
  *   id     —— 动作标识，App.vue 按它分派
- *   keys   —— 触发键（KeyboardEvent.key 的小写形式；数字键用 1~7）
+ *   keys   —— 触发键（KeyboardEvent.key 的小写形式；数字键用 1~8，范围见 TAB_KEY_COUNT）
  *   label  —— 界面上显示的键帽文字
  *   group  —— 分组
  *   desc   —— 一句话说明
@@ -67,7 +67,7 @@ export const SHORTCUTS = [
 export const SHORTCUT_BY_ID = Object.fromEntries(SHORTCUTS.map((s) => [s.id, s]));
 
 /** 数值键位数（= 最大可直达模块数）。 */
-export const TAB_KEY_COUNT = 7;
+export const TAB_KEY_COUNT = 8;
 
 const IGNORE_TAGS = { INPUT: 1, TEXTAREA: 1, SELECT: 1, OPTION: 1 };
 
@@ -108,8 +108,11 @@ export function resolveKey(ev, ctx = {}) {
 
   const k = String(ev.key || "");
 
-  // ---- 1~7：切模块。用正则而不是字符串比较，避免 "12" / "3abc" 这类边界混进来 ----
-  if (/^[1-7]$/.test(k)) return "tab:" + k;
+  // ---- 数字键切模块：范围由 TAB_KEY_COUNT **推导**，不再写死 ----
+  //   ★ 踩过的坑：模块数从 7 加到 8 时忘了改这里的 [1-7]，按 8 完全没反应
+  //     （由 tools/verify_shortcuts.mjs 的 D1/K3 抓到）。用长度 + 区间判断，
+  //     既避开 "12" / "3abc" 这类多字符边界，又永远跟模块数一致。
+  if (k.length === 1 && k >= "1" && k <= String(TAB_KEY_COUNT)) return "tab:" + k;
 
   const low = k.toLowerCase();
   if (low === "e") return ev.repeat ? "" : "toggle_side";
@@ -138,8 +141,15 @@ export function resolveKey(ev, ctx = {}) {
 
 /** 从 `tab:N` 取序号（1 起）；不是切模块动作返回 0。 */
 export function tabIndexOf(action) {
-  const m = /^tab:([1-7])$/.exec(String(action || ""));
-  return m ? Number(m[1]) : 0;
+  // ★ 范围由 TAB_KEY_COUNT 推导，不写死数字 —— 原先这里是 `/^tab:([1-7])$/`，
+  //   模块加到 8 后 `tab:8` 解不出来（verify_shortcuts K3 抓到）。
+  //   同一个坑在 resolveKey 里也有一份，两处都已改成推导。
+  const s = String(action || "");
+  if (s.slice(0, 4) !== "tab:") return 0;
+  const body = s.slice(4);
+  if (!/^\d+$/.test(body)) return 0;
+  const n = Number(body);
+  return n >= 1 && n <= TAB_KEY_COUNT ? n : 0;
 }
 
 /**

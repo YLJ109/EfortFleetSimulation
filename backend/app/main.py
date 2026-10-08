@@ -27,6 +27,7 @@ from app.api import (
     robot,
     safety,
     settings,
+    sorting,
     system,
     vision,
     ws,
@@ -240,6 +241,8 @@ app.include_router(settings.router)
 # ★ 实时语音字幕（腾讯云 ASR）：HTTP 配置查询 + WebSocket 音频/字幕双向代理
 app.include_router(asr.router)
 app.include_router(asr.ws_router)
+# ★ 三色方块分拣（独立页）：38 点位体检 + 分拣引擎（复用同一套停止/暂停/进度设施）
+app.include_router(sorting.router)
 
 
 # 存活探针/根信息：必须在静态挂载之前注册，否则被 mount("/") 拦截。

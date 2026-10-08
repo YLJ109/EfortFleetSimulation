@@ -18,8 +18,8 @@
 // ★ 这里只决定"显不显示入口"，绝不承担权限判定：每个写接口仍然由后端
 //   require_control(401) / require_admin(403) 把关。前端藏入口是体验，不是安全边界。
 //
-// ★ 数字键 1~7 对应「从左到右第 N 个**可见**模块」。授权齐全时 1~7 恰好就是上面
-//   7 个模块；没权限时后面的不显示、序号顺延（解析与断言见 src/shortcuts.js）。
+// ★ 数字键 1~8 对应「从左到右第 N 个**可见**模块」。授权齐全时 1~8 恰好就是上面
+//   8 个模块；没权限时后面的不显示、序号顺延（解析与断言见 src/shortcuts.js）。
 // =====================================================================
 
 /** 被收回权限时的回落页。必须排在 TABS 第一个，且永不需要令牌。 */
@@ -36,13 +36,14 @@ export const TABS = [
   { key: "sim", icon: "layers", label: "模拟仿真" },
   { key: "point", icon: "target", label: "点位执行", needAuth: true },
   { key: "program", icon: "play", label: "程序执行", needAuth: true },
+  { key: "sort", icon: "layers", label: "分拣", needAuth: true },
   { key: "ops", icon: "activity", label: "运维审计", needAdmin: true },
   { key: "settings", icon: "sliders", label: "系统设置", needAuth: true },
   { key: "about", icon: "info", label: "关于" },
 ];
 
 /** 数字键能直达的模块数（与 src/shortcuts.js 的 TAB_KEY_COUNT 必须一致）。 */
-export const TAB_KEY_COUNT = 7;
+export const TAB_KEY_COUNT = 8;
 
 /**
  * 某个 tab 对当前权限是否开放。
