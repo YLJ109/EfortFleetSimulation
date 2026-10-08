@@ -25,7 +25,8 @@ import { useAuthStore } from "./auth.js";
 import { useRobotStore } from "./robot.js";
 import { useSafetyStore } from "./safety.js";
 import { useRcReadyStore } from "./rcReady.js";
-import { setGhostPose, showGhost, highlightJoint, evalSafety } from "../three/manager.js";
+import { setGhostPose, setGhostPoseB, showGhost, showGhostB, highlightJoint,
+         evalSafety } from "../three/manager.js";
 import { STATE_RANK } from "../three/safety.js";
 import { DEFAULT_ONLY_JOINT, JOINT_LOCK_TOL_DEG } from "../core/safetyConst.js";
 
@@ -54,7 +55,8 @@ export const useExecStore = defineStore("exec", {
     // ---- 数据 ----
     points: [],
     /** ★ 点位执行新需求：被「点选」常驻跟随的点位 id（残影钉在该点位姿，直到点别的点/离开）。 */
-    pinnedPointId: null,
+    pinnedPointId: null,       // 残影 A 选中的点位（安全判定以它为准）
+    pinnedPointIdB: null,      // ★ 残影 B：仅用于"两个点位对比"，不参与围栏判定
     programs: [],
     files: [],
     pointsErr: "",
@@ -653,6 +655,28 @@ export const useExecStore = defineStore("exec", {
       }
     },
     unpinPoint() { this.pinnedPointId = null; },
+
+    /**
+     * ★ 残影 B（对比用）：把第二个残影摆到另一个点位，与 A 同屏对比。
+     *   **刻意不参与围栏/地面判定** —— 安全结论永远只反映 A（当前正在评估的目标），
+     *   否则界面上"红/绿"到底说的是哪个残影就说不清了。
+     */
+    pinPointB(p) {
+      if (p && p.joints && p.joints.length === 6) {
+        setGhostPoseB(p.joints);
+        showGhostB(true);
+        this.pinnedPointIdB = p.id;
+      } else {
+        this.pinnedPointIdB = null;
+        showGhostB(false);
+      }
+    },
+    unpinPointB() { this.pinnedPointIdB = null; showGhostB(false); },
+    /** 两个残影一起收掉（离页/切视图时用）。 */
+    hideGhosts() {
+      showGhost(false); showGhostB(false); highlightJoint(-1);
+      this.pinnedPointId = null; this.pinnedPointIdB = null;
+    },
 
     /**
      * **下发门控**：把残影摆到目标位姿，立刻量一次围栏/地面 —— 不撞才放行。

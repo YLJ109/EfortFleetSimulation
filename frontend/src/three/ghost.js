@@ -20,7 +20,9 @@ import { buildRobot } from "../robot/robotModel.js";
 import { buildEndEffector } from "./endEffector.js";
 
 export const GHOST_OPACITY = 0.26;      // 半透明程度（越小越"虚"）
-export const GHOST_COLOR = 0x2f9bff;    // 统一淡蓝，和实体机的灰白明显区分
+export const GHOST_COLOR = 0x2f9bff;    // 残影 A：淡蓝，和实体机的灰白明显区分
+// ★ 残影 B（对比用）：淡橙。两个残影同屏时必须**一眼分开**，否则看不出哪个是哪个。
+export const GHOST_COLOR_B = 0xff9a3d;
 export const GHOST_ALARM_COLOR = 0xff3b30; // 目标位姿危险/碰撞时的报警色（整体泛红）
 const GHOST_K = 10;                     // 残影自身的一阶收敛速率（比实机略慢，"飘"过去更易读）
 
@@ -31,7 +33,7 @@ const GHOST_K = 10;                     // 残影自身的一阶收敛速率（�
  *            dispose():void, meshCount:number}}
  */
 
-export function createGhost(dh, mounting = "floor", liftY = 0) {
+export function createGhost(dh, mounting = "floor", liftY = 0, colorHex = GHOST_COLOR) {
   const model = buildRobot(dh, mounting);
 
   // ★ 需求：残影也要显示 J6 上的那个末端工具（吸盘 + 两块矩形立板），并跟随 J6 一起动。
@@ -61,10 +63,10 @@ export function createGhost(dh, mounting = "floor", liftY = 0) {
       c.transparent = true;
       c.opacity = GHOST_OPACITY;
       c.depthWrite = false;              // ★ 不写深度：不遮挡实体机，也不会被自己穿帮
-      if (c.color) c.color = new THREE.Color(GHOST_COLOR);
+      if (c.color) c.color = new THREE.Color(colorHex);
       if ("metalness" in c) c.metalness = 0.0;
       if ("roughness" in c) c.roughness = 1.0;
-      if ("emissive" in c) { c.emissive = new THREE.Color(GHOST_COLOR); c.emissiveIntensity = 0.35; }
+      if ("emissive" in c) { c.emissive = new THREE.Color(colorHex); c.emissiveIntensity = 0.35; }
       tint.push(c);
       return c;
     });

@@ -17,7 +17,7 @@ import { FALLBACK_DH } from "../config.js";
 import { buildCell, PLATFORM_H, PLATFORM_TOP_SIZE } from "./cell.js";
 import { buildLab } from "./lab.js";
 import { SafetyFence, STATE_RANK } from "./safety.js";
-import { createGhost } from "./ghost.js";
+import { createGhost, GHOST_COLOR_B } from "./ghost.js";
 import { buildOwnerMap } from "./jointOwner.js";
 import { SKIN_BODY, SKIN_HARD, SKIN_JOINT, SKIN_LOGO, SKIN_METAL, skinMat } from "./materials.js";
 import { buildEndEffector } from "./endEffector.js";
@@ -37,7 +37,11 @@ let official = null;     // 官方数模（可动） ×1
 let fence = null;        // 安全围栏
 let cell = null;         // 地板 + 网格 + 阴影 + 地标线
 let lab = null;          // 实验室房间(14m)外壳 + 道具
-let ghost = null;        // 残影(预演分身)：程序化模型半透明版，负责回答"要去的地方会不会撞"
+let ghost = null;        // 残影 A(预演分身)：程序化模型半透明版，负责回答"要去的地方会不会撞"
+// ★ 残影 B（对比用）：让"两个点位同时看"成为可能（如 正上位 vs 原料位、A槽 vs B槽）。
+//   它与 A **同源同构**（同一个 createGhost，只换颜色），但**不参与围栏判定** ——
+//   安全结论永远只反映 A（= 当前正在评估的那个目标），避免两个残影把结论搅混。
+let ghostB = null;
 let sim = null;          // 模拟摆放物体沙盒
 let activeDh = null;
 let activeMounting = "floor";
@@ -361,6 +365,11 @@ export function initRobots(dh, mounting = "floor") {
     ghost = createGhost(dhOk, activeMounting, baseLiftY());
     scene.add(ghost.root);
   }
+  if (!ghostB) {
+    ghostB = createGhost(dhOk, activeMounting, baseLiftY(), GHOST_COLOR_B);
+    ghostB.setVisible(false);           // 默认藏着，需要对比时才由界面打开
+    scene.add(ghostB.root);
+  }
   applyAppearance();
 }
 
@@ -493,6 +502,7 @@ export function renderFrame() {
   lastFrameMs = now;
   stepSmoothing(dt);                 // 姿态平滑逼近 → 动作丝滑
   if (ghost) ghost.step(dt);         // 残影预演：把自己的姿态"飘"到目标点位
+  if (ghostB) ghostB.step(dt);        // 对比残影同理（平滑飘过去）
   controls.update();
   if (lab) lab.updateVisibility(camera, dt);   // 智能剖切：挡视线的墙/天花板自动淡出
   updateSafety(now / 1000);
@@ -515,6 +525,14 @@ export function setGhostPose(qDeg) {
 }
 
 /** 显隐残影。 */
+export function setGhostPoseB(qDeg) {
+  if (ghostB) ghostB.setPose(qDeg);
+}
+export function showGhostB(v) {
+  if (ghostB) ghostB.setVisible(v);
+}
+export function ghostBVisible() { return !!(ghostB && ghostB.visible); }
+
 export function showGhost(v) {
   if (ghost) ghost.setVisible(v);
 }
@@ -856,7 +874,7 @@ export function disposeAll() {
   // 审计修复 P0-ui-3：撤掉切视图遗留的尺寸补救 rAF，避免单例置空后仍去渲染
   if (sizeFixRaf) { cancelAnimationFrame(sizeFixRaf); sizeFixRaf = 0; }
   // 1) 各子模块自清（从场景摘除自己的 group，并释放自有资源）
-  [sim, fence, ghost, lab, cell].forEach((m) => {
+  [sim, fence, ghost, ghostB, lab, cell].forEach((m) => {
     try { if (m && m.dispose) m.dispose(); } catch (e) { /* 忽略 */ }
   });
   // 2) 兜底清扫场景内残留的几何/材质/贴图
@@ -878,7 +896,7 @@ export function disposeAll() {
   // 4) 单例引用全部置空
   renderer = null; scene = null; camera = null; controls = null; envTex = null;
   robot = null; official = null; fence = null; cell = null; lab = null;
-  ghost = null; sim = null; activeDh = null;
+  ghost = null; ghostB = null; sim = null; activeDh = null;
   qReady = false; lastFrameMs = 0; lastSafetyKey = "";
   lastPixelRatio = 0;
   glState = "ok";

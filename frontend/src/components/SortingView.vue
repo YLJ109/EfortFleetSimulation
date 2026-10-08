@@ -74,7 +74,8 @@ const isTaught = (name) => !!(chk.value && chk.value.ok) || !missing.value.has(n
 // ★ 为什么接残影：只看一行数字看不出"这个点到底摆在哪"。悬停/点选让 3D 里的残影
 //   直接摆到该点位姿 —— 示教对不对、有没有撞工装，一眼就看得出来。
 //   复用 exec store 里现成的 hoverPoint（临时预演）/ pinPoint（常驻选中），不另造轮子。
-const pinnedName = ref("");
+const pinnedName = ref("");    // 残影 A（安全判定以它为准）
+const pinnedBName = ref("");   // ★ 残影 B（仅用于两个点位对比）
 
 /** 按名字取点位（exec.points 是 /points 的全量列表，loadPoints 后可用）。 */
 const ptOf = (name) => (exec.points || []).find((p) => p.name === name) || null;
@@ -103,10 +104,21 @@ function unhover() {
   else exec.unhoverPoint();
 }
 
-/** 点名字 → 残影**常驻**跟随该点（再点一次取消）。 */
-function pin(name) {
+/**
+ * 点名字 → 残影**常驻**跟随该点（再点一次取消）。
+ * ★ **Shift + 点** → 摆到**第二个残影**（淡橙），实现"两个点位同屏对比"。
+ *   为什么要分两个：同一个位置只放一个残影时，无法回答"从正上方落到槽位会不会撞"，
+ *   两个残影同屏才能一眼看出落差/干涉。B 只做视觉对比，**不参与围栏判定**。
+ */
+function pin(name, ev) {
   const p = ptOf(name);
   if (!p) return;
+  const toB = !!(ev && ev.shiftKey);
+  if (toB) {
+    if (pinnedBName.value === name) { pinnedBName.value = ""; exec.unpinPointB(); }
+    else { pinnedBName.value = name; exec.pinPointB(p); }
+    return;
+  }
   if (pinnedName.value === name) {
     pinnedName.value = "";
     exec.unpinPoint();
@@ -116,15 +128,33 @@ function pin(name) {
     exec.pinPoint(p);
   }
 }
+function clearPin(side) {
+  if (side === "a") { pinnedName.value = ""; exec.unpinPoint(); exec.hideGhost(); }
+  else { pinnedBName.value = ""; exec.unpinPointB(); }
+}
 const pinnedPoint = computed(() => (pinnedName.value ? ptOf(pinnedName.value) : null));
+const pinnedB = computed(() => (pinnedBName.value ? ptOf(pinnedBName.value) : null));
+/** 两点距离（mm）—— 同屏对比时最想知道的就是"差多少"。 */
+const distAB = computed(() => {
+  const a = pinnedPoint.value, b = pinnedB.value;
+  if (!a || !b) return null;
+  if (a.kind === "cartesian" || b.kind === "cartesian") return null;
+  const ja = a.joints, jb = b.joints;
+  if (!ja || !jb || ja.length !== 6 || jb.length !== 6) return null;
+  let s2 = 0;
+  for (let i = 0; i < 6; i++) { const d = Number(jb[i]) - Number(ja[i]); s2 += d * d; }
+  return Math.sqrt(s2);
+});
 
 /** 示教/清空后要同时刷新体检与点位坐标（残影也跟着更新）。 */
 async function refreshPoints() {
   await loadCheck();
   await exec.loadPoints();
-  if (pinnedName.value) {
-    const p = ptOf(pinnedName.value);
-    if (p) exec.pinPoint(p); else { pinnedName.value = ""; exec.hideGhost(); }
+  for (const [nm, side] of [[pinnedName, "a"], [pinnedBName, "b"]]) {
+    if (!nm.value) continue;
+    const p = ptOf(nm.value);
+    if (!p) { clearPin(side); continue; }
+    if (side === "a") exec.pinPoint(p); else exec.pinPointB(p);
   }
 }
 
@@ -271,7 +301,7 @@ watch(() => robot.activeView, (v) => {
   else if (!timer) { timer = setInterval(poll, 800); }
 });
 onMounted(() => { loadCheck(); exec.loadPoints(); poll(); timer = setInterval(poll, 800); });
-onBeforeUnmount(() => { if (timer) clearInterval(timer); exec.hideGhost(); });
+onBeforeUnmount(() => { if (timer) clearInterval(timer); exec.hideGhosts(); });
 </script>
 
 <template>
@@ -376,19 +406,30 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); exec.hideGhost(); });
 
     <!-- ================= 点位 ================= -->
     <template v-else>
-      <div class="card sel-card" v-if="pinnedPoint">
-        <h3><Icon name="target" :size="15" /> 当前选中 · {{ pinnedName }}
-          <span class="h3-sub">残影已常驻在 3D 里</span>
+      <div class="card sel-card">
+        <h3><Icon name="layers" :size="15" /> 残影对比
+          <span class="h3-sub">点名字=A(蓝) · Shift+点=B(橙)</span>
         </h3>
-        <div class="sel-grid">
-          <span v-for="(v, i) in pinnedPoint.joints" :key="'j' + i" class="sel-j">
-            J{{ i + 1 }}<b>{{ Number(v).toFixed(2) }}</b>
-          </span>
+        <div class="grow a" v-if="pinnedPoint">
+          <i class="gdot"></i>
+          <span class="gname">A · {{ pinnedName }}</span>
+          <span class="gj">{{ pinnedPoint.joints.map((v) => Number(v).toFixed(1)).join("  ") }}</span>
+          <button class="mini-btn" @click="clearPin('a')">✕</button>
         </div>
-        <p class="small muted">
-          点名字 = 残影常驻（再点一次取消）；鼠标停在任意点位格上 = 临时预演。
+        <p v-else class="small muted">A 未选 —— 点任意点位名即可摆上（蓝）</p>
+        <div class="grow b" v-if="pinnedB">
+          <i class="gdot"></i>
+          <span class="gname">B · {{ pinnedBName }}</span>
+          <span class="gj">{{ pinnedB.joints.map((v) => Number(v).toFixed(1)).join("  ") }}</span>
+          <button class="mini-btn" @click="clearPin('b')">✕</button>
+        </div>
+        <p v-else class="small muted">B 未选 —— Shift + 点点位名摆上（橙，用于对比）</p>
+        <p v-if="distAB !== null" class="small">
+          两残影关节角距离 <b>{{ distAB.toFixed(2) }}</b>（6 轴欧氏距离，越小越接近）
         </p>
+        <p class="small muted">A 参与围栏/地面判定；B 只做位置对比，不影响安全结论。</p>
       </div>
+
       <div class="card">
         <h3><Icon name="target" :size="15" /> 示教工具
           <span class="h3-sub">把机器人动到位 → 右格点「存」</span>
@@ -428,9 +469,9 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); exec.hideGhost(); });
             <div v-for="sl in cell.slots" :key="sl.name" class="slot"
                  @mouseenter="hover(sl.name)" @mouseleave="unhover()">
               <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
-              <span class="sname" :class="{ pinned: pinnedName === sl.name }"
+              <span class="sname" :class="{ pinned: pinnedName === sl.name, pinnedb: pinnedBName === sl.name }"
                     :title="sl.name + ' · ' + coordText(ptOf(sl.name))"
-                    @click="pin(sl.name)">{{ sl.label }}</span>
+                    @click="pin(sl.name, $event)">{{ sl.label }}</span>
               <button class="mini-btn" :disabled="!canTeach || pointBusy === sl.name"
                       title="把机器人当前位置存为该点位" @click="teach(sl.name)">
                 <Icon name="check" :size="12" /> 存
@@ -463,9 +504,9 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); exec.hideGhost(); });
             <div v-for="sl in cell.slots" :key="sl.name" class="slot"
                  @mouseenter="hover(sl.name)" @mouseleave="unhover()">
               <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
-              <span class="sname" :class="{ pinned: pinnedName === sl.name }"
+              <span class="sname" :class="{ pinned: pinnedName === sl.name, pinnedb: pinnedBName === sl.name }"
                     :title="sl.name + ' · ' + coordText(ptOf(sl.name))"
-                    @click="pin(sl.name)">{{ sl.label }}</span>
+                    @click="pin(sl.name, $event)">{{ sl.label }}</span>
               <button class="mini-btn" :disabled="!canTeach || pointBusy === sl.name"
                       title="把机器人当前位置存为该点位" @click="teach(sl.name)">
                 <Icon name="check" :size="12" /> 存
@@ -492,9 +533,9 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); exec.hideGhost(); });
         <div class="slot wide" v-for="sl in extraSlots" :key="sl.name"
              @mouseenter="hover(sl.name)" @mouseleave="unhover()">
           <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
-          <span class="sname" :class="{ pinned: pinnedName === sl.name }"
+          <span class="sname" :class="{ pinned: pinnedName === sl.name, pinnedb: pinnedBName === sl.name }"
                 :title="sl.name + ' · ' + coordText(ptOf(sl.name))"
-                @click="pin(sl.name)">{{ sl.label }}<span class="muted"> · {{ sl.name }}</span></span>
+                @click="pin(sl.name, $event)">{{ sl.label }}<span class="muted"> · {{ sl.name }}</span></span>
           <button class="mini-btn" :disabled="!canTeach || pointBusy === sl.name"
                   title="把机器人当前位置存为该点位" @click="teach(sl.name)">
             <Icon name="check" :size="12" /> 存点
@@ -560,24 +601,38 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); exec.hideGhost(); });
 .jog-axes { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; }
 .jog-axes button { padding: 4px 0; font-size: 12px; }
 .jog-axes button.on { border-color: var(--accent); color: var(--accent); }
-.teach-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-.tcell { border: 1px solid var(--line); border-radius: 8px; padding: 5px 6px; }
-.tcell-h { font-size: 12px; color: var(--txt); margin-bottom: 3px; }
-.slot { display: flex; align-items: center; gap: 3px; padding: 2px 0; }
-.slot.wide { padding: 5px 0; }
+.teach-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.tcell { border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; }
+.tcell-h { font-size: 14px; font-weight: 500; color: var(--txt); margin-bottom: 6px; }
+.slot { display: flex; align-items: center; gap: 5px; padding: 3px 0; }
+.slot.wide { padding: 7px 0; }
 .sdot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: none; }
 .sdot.on { background: var(--ok, #2f9e6f); }
-.sname { flex: 1; min-width: 0; font-size: 11px; color: var(--muted);
+.sname { flex: 1; min-width: 0; font-size: 13px; color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mini-btn { padding: 1px 5px; font-size: 11px; border-radius: 5px; }
+.sname.pinnedb { color: #ff9a3d; font-weight: 500; }
+.mini-btn { padding: 3px 8px; font-size: 12px; border-radius: 6px; }
+.sdot { width: 9px; height: 9px; }
 .sname { cursor: pointer; }
 .sname:hover { color: var(--accent); }
 .sname.pinned { color: var(--accent); font-weight: 500; }
-.coord { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 1px 0 2px 10px; }
+.coord { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 2px 0 3px 12px; }
 .coord b { color: var(--txt); font-weight: 400; margin-right: 4px; }
 .coord.wide { padding-left: 0; }
 .sel-card { border-color: var(--accent); }
+.grow { display: flex; align-items: center; gap: 6px; padding: 5px 7px; margin: 3px 0;
+  border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
+.grow.a { border-color: #2f9bff66; }
+.grow.b { border-color: #ff9a3d66; }
+.grow .gdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.grow.a .gdot { background: #2f9bff; }
+.grow.b .gdot { background: #ff9a3d; }
+.grow .gname { flex: none; color: var(--txt); }
+.grow .gj { flex: 1; min-width: 0; color: var(--muted); font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.grow .mini-btn { flex: none; }
+.grow .mini-btn { flex: none; }
 .sel-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
 .sel-j { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between;
   gap: 4px; border: 1px solid var(--line); border-radius: 5px; padding: 2px 5px; }

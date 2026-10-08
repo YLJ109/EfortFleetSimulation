@@ -11,7 +11,8 @@
 // 运行： node tools/verify_ghost.mjs
 // =====================================================================
 import * as THREE from "three";
-import { createGhost, GHOST_OPACITY, GHOST_ALARM_COLOR } from "../src/three/ghost.js";
+import { createGhost, GHOST_OPACITY, GHOST_ALARM_COLOR,
+         GHOST_COLOR, GHOST_COLOR_B } from "../src/three/ghost.js";
 import { buildRobot } from "../src/robot/robotModel.js";
 import { FALLBACK_DH } from "../src/config.js";
 
@@ -24,6 +25,23 @@ function ok(name, cond, extra = "") {
 const boxOf = (root) => {
   root.updateMatrixWorld(true);
   return new THREE.Box3().setFromObject(root);
+};
+/** 统计残影里的材质数量（用于"每个材质都满足约束"的断言）。 */
+const matsCount = (g) => {
+  let n = 0;
+  g.root.traverse((o) => { if (o.isMesh) n++; });
+  return n;
+};
+/** 是否所有材质都满足条件（残影的渲染约束是**每个材质都得满足**）。 */
+const matAll = (g, fn) => {
+  let all = true;
+  g.root.traverse((o) => {
+    if (!o.isMesh) return;
+    (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => {
+      if (m && !fn(m)) all = false;
+    });
+  });
+  return all;
 };
 const sizeOf = (root) => {
   const b = boxOf(root);
@@ -187,6 +205,44 @@ console.log("\n[E] setAlarm 泛红（且不动透明与深度写入）");
   g.setAlarm(false);
   ok("重复 setAlarm(false) 幂等（不产生副作用）", g.alarmed === false);
   g.dispose();
+}
+
+// ---------------------------------------------------------------------
+console.log("");
+console.log("E. 双残影（对比用）：第二个残影必须与第一个同构但异色");
+// ---------------------------------------------------------------------
+{
+  const hexOf = (g) => {
+    let h = null;
+    g.root.traverse((o) => {
+      if (h !== null || !o.isMesh) return;
+      const m = Array.isArray(o.material) ? o.material[0] : o.material;
+      if (m && m.color) h = m.color.getHex();
+    });
+    return h;
+  };
+  const a = createGhost(FALLBACK_DH, "floor", 0);
+  const b = createGhost(FALLBACK_DH, "floor", 0, GHOST_COLOR_B);
+
+  const sa = sizeOf(a.root), sb = sizeOf(b.root);
+  ok("B 与 A 包围盒同量级（同构，不是被缩放的克隆）",
+     Math.abs(sa.x - sb.x) < 1e-6 && Math.abs(sa.y - sb.y) < 1e-6
+     && Math.abs(sa.z - sb.z) < 1e-6, JSON.stringify([sa, sb]));
+
+  ok("A 用淡蓝 GHOST_COLOR", hexOf(a) === GHOST_COLOR, hexOf(a));
+  ok("B 用淡橙 GHOST_COLOR_B", hexOf(b) === GHOST_COLOR_B, hexOf(b));
+  ok("A/B 颜色必须不同（同屏要能一眼分开）", hexOf(a) !== hexOf(b));
+
+  ok("B 也是半透明且不写深度（与 A 同一套渲染约束）",
+     matsCount(b) > 0 && matAll(b, (m) => m.transparent && m.depthWrite === false),
+     "mats=" + matsCount(b));
+
+  ok("B 默认不可见（由界面按需打开，不自己乱显）", b.visible === false, String(b.visible));
+
+  // ★ 别写 ok(..., true) 这种恒真断言 —— 那等于没测。这里真调一遍并捕获异常。
+  let threw = "";
+  try { a.dispose(); b.dispose(); } catch (e) { threw = String(e); }
+  ok("两个残影都能 dispose（不抛异常）", threw === "", threw);
 }
 
 console.log("");
