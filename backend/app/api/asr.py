@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.ws import _deny, _origin_ok, _wait_token
 from app.core.logger import get_logger
-from app.services.asr_tencent import asr_config, build_url, parse_result
+from app.services.asr_tencent import asr_config, build_url, error_hint, parse_result
 from app.services.events import emit as emit_event
 
 log = get_logger("asr")
@@ -90,15 +90,23 @@ async def _pump_up(ws: WebSocket, cloud) -> None:
 
 
 async def _pump_down(ws: WebSocket, cloud) -> None:
-    """云端 → 浏览器：把 slice_type/final 归一化成字幕事件。"""
+    """云端 → 浏览器：把 slice_type/final 归一化成字幕事件。
+
+    ★ 云端返回非 0 错误码时**必须把原因原样送到界面并结束会话** ——
+      这类错误（如 4003 账号未开通）云端会立刻断链，如果这里只是 continue，
+      前端最终只看到"连接已断开"，用户完全不知道要去开通服务。
+    """
     async for raw in cloud:
         if isinstance(raw, (bytes, bytearray)):
             continue
         ev = parse_result(raw if isinstance(raw, str) else raw.decode("utf-8", "replace"))
         if not ev["ok"]:
-            await _send(ws, {"type": "error", "code": ev["code"],
-                             "message": ev["message"] or "云端返回错误"})
-            continue
+            msg = error_hint(ev["code"], ev["message"])
+            await _send(ws, {"type": "error", "code": ev["code"], "message": msg})
+            emit_event("asr", "warn", "asr.cloud_error",
+                       "语音识别云端错误：%s" % msg,
+                       {"code": ev["code"], "cloud_message": ev["message"]})
+            return          # 非 0 码视为会话终止，别让界面只看到"连接已断开"
         if not ev["text"] and ev["slice"] < 0:
             continue                        # 心跳/状态帧，不产生字幕
         await _send(ws, {"type": "result", "text": ev["text"],
@@ -173,6 +181,16 @@ async def ws_asr(ws: WebSocket):
                 await _send(ws, {"type": "error",
                                  "message": "已达单次识别上限 %.0f 分钟，已自动停止"
                                             % (_max_sec() / 60.0)})
+            # ★★ 收尾宽限：用户按「停止」时 `_pump_up` 会立刻结束（它只是发了 end），
+            #    但云端随后还会回最后一帧（slice=2 整句结束 + final）。
+            #    若此时立刻 cancel(down)，**用户按停止前那句就永远定不了稿** ——
+            #    界面上一直停在灰色"正在说"。所以给 down 最多 2 秒把尾帧收完。
+            if down in pending and up in done:
+                try:
+                    await asyncio.wait_for(down, timeout=2.0)
+                    pending.discard(down)
+                except Exception:
+                    pass
             for t in pending:
                 t.cancel()
     except Exception as e:  # noqa: BLE001

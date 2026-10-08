@@ -106,10 +106,24 @@ export const useAsrStore = defineStore("asr", {
               reject(new Error(d.message || "云端拒绝"));
             }
           };
-          ws.onclose = () => {
+          // ★★ 关闭原因必须具体，不能一律"连接已断开" ★★
+          //   现场教训（2026-10-08）：账号未开通实时语音识别时，云端回 4003 并立刻断链，
+          //   而界面只显示"语音识别连接已断开" → 用户完全不知道要去控制台开通服务。
+          //   规则：云端已给过明确错误（this.err 非空）就**原样保留**，只在没有原因时才兜底。
+          ws.onclose = (ev) => {
             clearTimeout(to);
-            if (this.active) this._teardown("语音识别连接已断开");
-            else reject(new Error("连接被拒绝（检查是否已有另一路识别在进行）"));
+            const code = ev && ev.code;
+            const byCode = code === 4401 ? "控制令牌无效或已过期，请重新登录后再试"
+              : code === 4400 ? "语音识别未启用或未配置密钥（见项目根 .env）"
+              : code === 4429 ? "已有另一路语音识别在进行（同一时间只允许一路）"
+              : code === 4500 ? "连接腾讯云失败（服务器无法访问 asr.cloud.tencent.com？）"
+              : "";
+            if (this.active || this.connecting) {
+              if (!this.err) this.err = byCode || "语音识别连接已断开";
+              this._teardown("");
+            } else {
+              reject(new Error(byCode || "连接被拒绝"));
+            }
           };
           ws.onerror = () => { clearTimeout(to); reject(new Error("无法连接语音识别服务")); };
         });

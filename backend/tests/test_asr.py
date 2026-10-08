@@ -185,3 +185,53 @@ def test_asr_module_has_no_robot_control_imports():
     src = inspect.getsource(api_mod)
     for bad in ("motion", "jog", "guard_check", "rc_jog", "estop"):
         assert not re.search(r"\b%s\b" % bad, src), "ASR 模块引用了控制链路：%s" % bad
+
+
+# ---------------------------------------------------------------- 5. 错误码人话
+def test_error_hint_maps_known_codes():
+    """★ 错误码必须翻译成能照做的人话。
+
+    现场（2026-10-08）：账号未开通服务时云端回 4003 并立刻断链，
+    原因被吞掉 → 界面只有"连接已断开"，用户无从下手。
+    """
+    h = A.error_hint(4003, "账号未开通本服务，请在控制台开通服务")
+    assert "未开通" in h and "4003" in h
+    assert "开通" in h, "必须告诉用户去控制台开通"
+    assert "鉴权" in A.error_hint(4002)
+    assert "采样率" in A.error_hint(4007) or "格式" in A.error_hint(4007)
+
+
+def test_error_hint_falls_back_to_cloud_message():
+    """表里没有的码 → 用云端原文；连原文都没有 → 通用文案 + 码。"""
+    assert A.error_hint(9999, "云端自定义原因") == "云端自定义原因（code 9999）"
+    assert "code 8888" in A.error_hint(8888, "")
+
+
+def test_error_hint_never_raises_on_bad_input():
+    for bad in (None, "abc", -1, 0):
+        assert isinstance(A.error_hint(bad, ""), str)
+
+
+# ---------------------------------------------------------------- 5. 错误码人话
+def test_error_hint_maps_known_codes():
+    """★ 错误码必须翻译成能照做的人话。
+
+    现场（2026-10-08）：账号未开通服务时云端回 4003 并立刻断链，
+    原因被吞掉 → 界面只有"连接已断开"，用户无从下手。
+    """
+    h = A.error_hint(4003, "账号未开通本服务，请在控制台开通服务")
+    assert "未开通" in h and "4003" in h
+    assert "开通" in h, "必须告诉用户去控制台开通"
+    assert "鉴权" in A.error_hint(4002)
+    assert "采样率" in A.error_hint(4007) or "格式" in A.error_hint(4007)
+
+
+def test_error_hint_falls_back_to_cloud_message():
+    """表里没有的码 → 用云端原文；连原文都没有 → 通用文案 + 码。"""
+    assert A.error_hint(9999, "云端自定义原因") == "云端自定义原因（code 9999）"
+    assert "code 8888" in A.error_hint(8888, "")
+
+
+def test_error_hint_never_raises_on_bad_input():
+    for bad in (None, "abc", -1, 0):
+        assert isinstance(A.error_hint(bad, ""), str)

@@ -138,6 +138,40 @@ def parse_result(raw: str) -> Dict:
             "code": code, "message": msg}
 
 
+# 腾讯云实时语音识别错误码 → 现场能直接照做的人话。
+# ★ 为什么必须有这张表（2026-10-08 现场）：账号没开通服务时云端回
+#   {"code":4003,"message":"账号未开通本服务，请在控制台开通服务"} 并**立刻断链**，
+#   而这个原因被吞掉后，界面只显示"语音识别连接已断开" —— 用户根本无从下手。
+ERROR_HINTS = {
+    4001: "参数不合法（检查引擎/采样率等参数）",
+    4002: "鉴权失败：SecretId / SecretKey 或签名不正确",
+    4003: "★ 账号未开通「实时语音识别」服务 —— 请到腾讯云控制台开通该服务后重试",
+    4004: "资源包已用尽或计费未就绪（检查腾讯云余额/资源包）",
+    4005: "请求过于频繁，请稍后重试",
+    4006: "腾讯云服务内部错误，请稍后重试",
+    4007: "音频格式不匹配（需 16k / 16bit / 单声道 PCM）",
+    4008: "音频数据错误",
+    4009: "静音超时（长时间无语音，云端已收尾）",
+    4010: "音频时长超限",
+    4011: "并发超限（同一账号同时识别路数过多）",
+    4012: "音频解码失败（采样率/位深不符）",
+}
+
+
+def error_hint(code: int, message: str = "", default: str = "云端返回错误") -> str:
+    """错误码 → 可照做的人话；表里没有就退回云端原文，最后才是通用文案。"""
+    try:
+        c = int(code)
+    except (TypeError, ValueError):
+        c = -1
+    hint = ERROR_HINTS.get(c)
+    if hint:
+        return "%s（code %d）" % (hint, c)
+    if message:
+        return "%s（code %d）" % (message, c)
+    return "%s（code %d）" % (default, c)
+
+
 def pcm_bytes_per_frame(ms: int = 40, sample_rate: int = 16000) -> int:
     """一帧音频应有字节数（16bit 单声道）。40ms @16k = 1280 字节。"""
     return int(sample_rate * (ms / 1000.0)) * 2
