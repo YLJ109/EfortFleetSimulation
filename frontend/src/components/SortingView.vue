@@ -19,6 +19,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import MonitorLayout from "./MonitorLayout.vue";
 import RcReadyCard from "./RcReadyCard.vue";
+import CameraPanel from "./CameraPanel.vue";   // ★ 复用现成的摄像头窗口，绝不重做
 import Icon from "./Icon.vue";
 import { apiControl } from "../net/control.js";
 import { useAuthStore } from "../stores/auth.js";
@@ -308,6 +309,11 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); exec.hideGhosts(); });
   <MonitorLayout view="sort">
     <template #hud>
       <div class="exec-hud">分拣 · 三色方块 · {{ running ? "运行中" : "空闲" }}</div>
+      <!-- ★ 摄像头画面：直接复用「真实监控/程序执行」同一个 CameraPanel 组件
+           （同一个相机服务、同一套开关/设备选择/检测框），**没有另做一份**。
+           views[0]='sort' 是本页（面板归属），带上 'live' 让真实监控页共用同一实例，
+           避免"同一台相机被两个面板各开一路"。 -->
+      <CameraPanel :views="['sort', 'live']" />
     </template>
 
     <!-- ① 就绪：直接复用现成卡片（一键就绪 / 取消 / 明细） -->
