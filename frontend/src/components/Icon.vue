@@ -62,6 +62,9 @@ const ICONS = {
   // ---- 阶段 5：播报中心 / 操作引导 / 视觉 ----
   volume: '<path d="M11 5L6 9H3v6h3l5 4z" fill="currentColor" stroke="none"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>',
   volumeOff: '<path d="M11 5L6 9H3v6h3l5 4z" fill="currentColor" stroke="none"/><path d="M22 9l-6 6M16 9l6 6"/>',
+  // ★ 实时语音字幕：麦克风开/关（线性图标，与其它图标同款描边风格）
+  mic: '<path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10a7 7 0 0 1-14 0"/><path d="M12 17v5"/>',
+  micOff: '<path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10a7 7 0 0 1-14 0"/><path d="M12 17v5"/><path d="M4 4l16 16"/>',
   bell: '<path d="M18 8a6 6 0 1 0-12 0c0 7-3 8-3 8h18s-3-1-3-8"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
   siren: '<path d="M12 3v3M5 6l2 2M19 6l-2 2M4 13h16"/><rect x="6" y="13" width="12" height="7" rx="2"/><path d="M9 20h6"/>',
   megaphone: '<path d="M3 11v2a2 2 0 0 0 2 2h1l8 5V6L6 11H5a2 2 0 0 0-2 2z"/><path d="M18 8a5 5 0 0 1 0 8"/>',

@@ -536,13 +536,36 @@ class CameraService:
         return self.open_async(idx=idx, cam_type=cam_type)
 
     # ---------- 相机 (异步) ----------
+    def _auto_target(self):
+        """无历史记录时**自动选相机**：优先海康网口，没有则用 USB。
+
+        ★ 为什么必须要有这个（2026-10-08 现场反馈"USB 相机连不上"）：
+          `open_async(cam_type=None)` 原本在无 last_open 时**无脑回落 "mvs"**（海康网口），
+          于是 USB 摄像头用户第一次点「打开」必然撞上
+          "未找到海康网口相机（请检查网线/网卡 192.168.1.x）" ——
+          相机明明在设备列表里、单独选它就能开，表现得却像"USB 相机坏了"。
+          更糟的是 last_open 只在内存里：**视觉服务每重启一次，这个坑就复现一次**。
+          所以这里改成先枚举一遍再决定走哪一路。
+        返回 (idx, cam_type)；两路都没有时返回 (None, "mvs")，让原错误提示照旧给出排查指引。
+        """
+        try:
+            devs = self.list_devices()
+        except Exception:
+            devs = []
+        for want in ("mvs", "opencv"):          # 有网口优先用网口，没有再退 USB
+            hit = [d for d in devs if d.get("cam_type") == want]
+            if hit:
+                return hit[0].get("idx"), want
+        return None, "mvs"
+
     def open_async(self, idx=None, cam_type=None):
-        """打开相机。cam_type=None 表示"自动"：复用上一次成功打开的设备类型/索引。
+        """打开相机。cam_type=None 表示"自动"：复用上一次成功打开的设备类型/索引，
+        没有历史时**枚举一次自动选**（见 _auto_target）——而不是无脑当海康网口。
 
         ★ 两路相机（海康 GigE / 普通 USB）打开逻辑完全分开：
           - 指定 opencv → 只走 cv2.VideoCapture，绝不会报"检查网线"；
           - 指定 mvs    → 只走 MVS 枚举，才可能报"检查网线/网卡"。
-          - 不指定      → 沿用 last_open（首次回落 mvs），从而"USB 关了再开还是 USB"。
+          - 不指定      → 沿用 last_open（USB 关了再开还是 USB）；无历史时自动选。
         """
         with self.lock:
             # 如果相机已打开且运行正常，直接返回成功
@@ -554,12 +577,16 @@ class CameraService:
             # 如果正在关闭中，等待关闭完成后再打开
             if self.closing:
                 return False, "正在关闭中，请稍候再试"
-            # ---- 解析"自动"目标：复用上次设备，避免 USB 相机被误走 MVS 网口逻辑 ----
+            # ---- 解析"自动"目标：优先复用上次设备（USB 关了再开还是 USB）----
             if cam_type is None:
                 last = self.last_open or {}
-                cam_type = last.get("cam_type") or "mvs"
+                cam_type = last.get("cam_type")
                 if idx is None:
                     idx = last.get("idx")
+        # ★ 自动选择必须在**锁外**做：list_devices() 自己会取 self.lock（不可重入）
+        if cam_type is None:
+            idx, cam_type = self._auto_target()
+        with self.lock:
             self.opening = True
             self.error = ""
             # ★ 同步占位: 响应返回前就登记, 让随后的 /devices 探测跳过这台相机

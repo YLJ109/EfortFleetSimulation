@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import (
+    asr,
     auth,
     control,
     events,
@@ -236,6 +237,9 @@ app.include_router(system.router)
 app.include_router(vision.router)
 app.include_router(frames.router)
 app.include_router(settings.router)
+# ★ 实时语音字幕（腾讯云 ASR）：HTTP 配置查询 + WebSocket 音频/字幕双向代理
+app.include_router(asr.router)
+app.include_router(asr.ws_router)
 
 
 # 存活探针/根信息：必须在静态挂载之前注册，否则被 mount("/") 拦截。

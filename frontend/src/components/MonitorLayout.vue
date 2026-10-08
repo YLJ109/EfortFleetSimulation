@@ -20,6 +20,7 @@ import { useExecStore } from "../stores/exec.js";
 import { useAuthStore } from "../stores/auth.js";
 import SafetyPanel from "./SafetyPanel.vue";
 import SafetyChip from "./SafetyChip.vue";
+import AsrSubtitle from "./AsrSubtitle.vue";   // ★ 实时语音字幕层（贴 3D 视口底部）
 import Icon from "./Icon.vue";
 
 const props = defineProps({
@@ -195,6 +196,9 @@ function onGripUp() {
            放在这里而不是 App.vue：.view 就是 3D 视口本身，位置自动跟随
            右栏拖宽/折叠与窄屏堆叠，不需要 JS 去算右栏宽度。 -->
       <SafetyChip />
+      <!-- ★ 实时语音字幕：与 SafetyChip 同一套"视口浮层"做法（.view 本身就是定位上下文），
+           自动跟随右栏拖宽/折叠与窄屏堆叠。识别文本只用于显示，不参与机器人控制。 -->
+      <AsrSubtitle />
     </div>
 
     <!-- 右栏手柄：拖动调宽 / 单击折叠 / 双击复位 -->

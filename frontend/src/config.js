@@ -15,6 +15,13 @@ export function apiUrl(path) {
   return `${location.origin}/api${path}`;
 }
 
+// ★ 实时语音字幕（腾讯云 ASR）：音频上行 / 字幕下行。
+//   与事件流同款：令牌走**带内握手**首帧，不放查询串（避免进后端访问日志）。
+export function asrWsUrl() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${location.host}/ws/asr`;
+}
+
 // 视觉检测服务地址(独立进程, 默认 :8100)。
 // 端口可用构建期变量 VITE_CAMERA_PORT 覆盖(见 frontend/.env.example)。
 const CAMERA_PORT = import.meta.env?.VITE_CAMERA_PORT || "8100";
