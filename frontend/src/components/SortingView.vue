@@ -1,49 +1,83 @@
 <script setup>
 // =====================================================================
-// 分拣页（三色方块分拣 · 38 个示教点位 · 经控制器 210 执行）
+// 分拣页（左：仿真机器人 · 右：点位设置与分拣操作）
 //
-//   流程：A 区逐个取料 → 送 C 区摄像头停顿判色 → 按颜色放 B 区
-//         （第 1 列红 / 第 2 列绿 / 第 3 列蓝）
-//   异常（吸不到 / 空跑 / 检测不到 / 该列已满）→ **立即停止 → 回开始/结束点**
-//   不做任何自动恢复；不引入真空反馈硬件（现场没有）。
+//   左侧：MonitorLayout 的 3D 视口（与其它页共用同一个 scene/canvas），
+//         示教时看着机器人动，右边点「存点 / 到点」。
+//   右侧：① 就绪（复用现成 RcReadyCard：一键就绪）  ② 页签「执行 / 点位」
+//         · 执行：参数 + 空跑/开始/停止 + 进度 + 判色 + 三列占用
+//         · 点位：精简点动 + A/B 各 9 格 × 2 槽（正上位 & 料位）+ C + 开始/结束点
+//                 每个点位槽：存点（记当前位置）/ 到点（复核）/ 清空
 //
-//   方案：docs/方案-三色方块分拣页（38点位·经210执行）.md
-//   后端：/api/sorting/points（体检）、/start（可 dry_run 空跑）、/state、/cancel
+//   38 个点位：A1–A9+A1上–A9上(18) + B1–B9+B1上–B9上(18) + C检测(1) + 开始/结束点(1)
+//   方案：docs/方案-分拣页改版（左仿真·右点位设置与分拣操作）.md
+//   后端：/api/sorting/{points,teach,goto,point,start,state,cancel}
 //
-//   ★ 空跑（dry_run）只校验点位与读帧判色，**绝不下发运动** —— 第一次务必先空跑。
+//   ★ 示教只写配置（不下发运动）；「到点」是运动，走围栏互锁/轴锁/速度夹取，可被打断。
+//   ★ 分拣运行期间：存点/到点/点动都会被后端拒绝（抢同一个 40135 触发位）。
 // =====================================================================
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
+import MonitorLayout from "./MonitorLayout.vue";
+import RcReadyCard from "./RcReadyCard.vue";
 import Icon from "./Icon.vue";
 import { apiControl } from "../net/control.js";
 import { useAuthStore } from "../stores/auth.js";
+import { useRobotStore } from "../stores/robot.js";
+import { useExecStore, JOG_STEPS } from "../stores/exec.js";
 
 const auth = useAuthStore();
+const robot = useRobotStore();
+const exec = useExecStore();
 
-const chk = ref(null);          // 点位体检（38 点位）
+const tab = ref("run");           // run | point
+const chk = ref(null);            // 38 点位体检
 const chkErr = ref("");
-const st = ref(null);           // 后端分拣进度快照
+const st = ref(null);             // 分拣进度
 const running = ref(false);
 const busy = ref(false);
 const msg = ref("");
 const err = ref("");
+const showMiss = ref(false);
 
-// 参数（与后端 StartIn 对齐）
-const dryRun = ref(true);       // ★ 默认空跑：先不动机器
-const speed = ref(5);
+// 运行参数（与后端 StartIn 对齐）
+const dryRun = ref(true);         // ★ 默认空跑：先不动机器
 const dwellMs = ref(1000);
 const frames = ref(3);
 const blowMs = ref(400);
 const maxPieces = ref(9);
 
+// 示教
+const axis = ref(6);              // 当前点动轴
+const pointBusy = ref("");
+const pointMsg = ref("");
+
 let timer = null;
 
+const A_SLOTS = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9"];
+const B_SLOTS = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9"];
+
+/** 每个格子的两个点位槽：正上位 + 料位（A 叫原料位、B 叫放料位）。 */
+const aCells = A_SLOTS.map((s) => ({ key: s, slots: [
+  { name: s + "上", label: "正上位" }, { name: s, label: "原料位" }] }));
+const bCells = B_SLOTS.map((s) => ({ key: s, slots: [
+  { name: s + "上", label: "正上位" }, { name: s, label: "放料位" }] }));
+const extraSlots = [
+  { name: "C检测", label: "摄像头位" },
+  { name: "开始/结束点", label: "开始/结束" },
+];
+
+/** 未示教名单（体检结果里就是"缺哪些"）→ 用来判断每个点位槽的状态。 */
+const missing = computed(() => new Set((chk.value && chk.value.missing) || []));
+const isTaught = (name) => !!(chk.value && chk.value.ok) || !missing.value.has(name);
+
+// ---------- 接口 ----------
 async function loadCheck() {
   chkErr.value = "";
   try {
     const r = await apiControl("/sorting/points");
     if (r.status === 401 || r.status === 403) { chkErr.value = "需要控制令牌"; return; }
     const d = await r.json();
-    if (r.ok) chk.value = d; else chkErr.value = d.detail || ("HTTP " + r.status);
+    if (r.ok) { chk.value = d; } else { chkErr.value = d.message || ("HTTP " + r.status); }
   } catch (e) { chkErr.value = "体检失败：" + ((e && e.message) || e); }
 }
 
@@ -57,13 +91,7 @@ async function poll() {
   } catch (e) { /* 轮询失败不影响流程 */ }
 }
 
-/** 统一取出后端的错误文案与"缺哪些点位"。
- *
- *  ★ 后端全局异常处理器会包一层 `{code, message, detail}`，而 `message` **既可能是
- *    字符串，也可能是对象**（`HTTPException(detail={...})` 时整个对象被塞进 message，
- *    detail 反而是 null）。两种形状都要认 —— 否则最有用的一句"缺 38 个点位"会被吞掉，
- *    只剩"启动失败 HTTP 400"，用户不知道差什么。
- */
+/** 统一取后端错误文案（异常体是 {code,message,detail}，message 可能是对象）。 */
 function errText(d, status) {
   const asStr = (v) => (typeof v === "string" ? v
     : (v && typeof v.message === "string" ? v.message : ""));
@@ -81,7 +109,7 @@ async function start() {
     const r = await apiControl("/sorting/start", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        dry_run: dryRun.value, speed_pct: speed.value, dwell_ms: dwellMs.value,
+        dry_run: dryRun.value, speed_pct: exec.speed, dwell_ms: dwellMs.value,
         frames: frames.value, blow_ms: blowMs.value, max_pieces: maxPieces.value,
       }),
     });
@@ -92,6 +120,7 @@ async function start() {
         ? base + "（缺：" + miss.slice(0, 8).join("、")
           + (miss.length > 8 ? " 等 " + miss.length + " 个" : "") + "）"
         : base;
+      showMiss.value = true;
       return;
     }
     st.value = d.state || null;
@@ -106,19 +135,57 @@ async function stop() {
   busy.value = true;
   try {
     await apiControl("/sorting/cancel", { method: "POST" });
-    msg.value = "已请求停止（会在当前动作结束后停，并回开始/结束点）";
+    msg.value = "已请求停止（当前动作结束后停，并回开始/结束点）";
   } catch (e) { err.value = "停止异常：" + ((e && e.message) || e); }
   finally { busy.value = false; }
 }
 
-onMounted(() => {
-  loadCheck();
-  poll();
-  timer = setInterval(() => { if (!running.value) poll(); else poll(); }, 800);
-});
-onBeforeUnmount(() => { if (timer) clearInterval(timer); });
+/** 存点：把机器人**当前位置**存为该点位（运行中禁用）。 */
+async function teach(name) {
+  if (!window.confirm("把机器人当前位置存为「" + name + "」？\n（已示教过将覆盖）")) return;
+  pointBusy.value = name; pointMsg.value = "";
+  try {
+    const r = await apiControl("/sorting/teach", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { pointMsg.value = "存点失败：" + errText(d, r.status).base; return; }
+    pointMsg.value = "已保存 " + name + "：" + (d.joints || []).map((v) => Number(v).toFixed(1)).join(", ");
+    await loadCheck();
+  } catch (e) { pointMsg.value = "存点异常：" + ((e && e.message) || e); }
+  finally { pointBusy.value = ""; }
+}
 
-// ---------- 展示辅助 ----------
+/** 到点：移到该点位复核（★ 是运动）。 */
+async function goto(name) {
+  pointBusy.value = name; pointMsg.value = "正在移到 " + name + " …";
+  try {
+    const r = await apiControl("/sorting/goto", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const d = await r.json().catch(() => ({}));
+    pointMsg.value = r.ok ? ("已到 " + name) : ("到点失败：" + errText(d, r.status).base);
+  } catch (e) { pointMsg.value = "到点异常：" + ((e && e.message) || e); }
+  finally { pointBusy.value = ""; }
+}
+
+async function clearPoint(name) {
+  if (!window.confirm("清空点位「" + name + "」？该点位将从点位库删除。")) return;
+  pointBusy.value = name; pointMsg.value = "";
+  try {
+    const r = await apiControl("/sorting/point?name=" + encodeURIComponent(name),
+                               { method: "DELETE" });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { pointMsg.value = "清空失败：" + errText(d, r.status).base; return; }
+    pointMsg.value = "已清空 " + name;
+    await loadCheck();
+  } catch (e) { pointMsg.value = "清空异常：" + ((e && e.message) || e); }
+  finally { pointBusy.value = ""; }
+}
+
+// ---------- 展示 ----------
 const stage = computed(() => (st.value && st.value.stage) || "—");
 const piece = computed(() => (st.value && st.value.piece) || 0);
 const total = computed(() => (st.value && st.value.total) || maxPieces.value);
@@ -128,230 +195,295 @@ const confNow = computed(() => (st.value && st.value.conf) || 0);
 const targetNow = computed(() => (st.value && st.value.target) || "");
 const placement = computed(() => (st.value && st.value.placement) || []);
 const stopReason = computed(() => (st.value && st.value.error) || "");
+const missingCount = computed(() => (chk.value ? chk.value.missing.length : 38));
 const canStart = computed(() => auth.controlActive && !busy.value && !running.value
   && !!(chk.value && chk.value.ok));
-
-/** B 区槽位 → 是否已放 + 颜色（给 3×3 网格上色） */
+const canTeach = computed(() => auth.controlActive && !running.value);
 const bCell = computed(() => {
   const map = {};
-  for (const c of placement.value || []) {
-    for (const s of (c.used || [])) map[s] = c.color;
-  }
+  for (const c of placement.value || []) for (const s of (c.used || [])) map[s] = c.color;
   return map;
 });
-const A_SLOTS = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9"];
-/** A 区已取：按"做到第几件"推（第 i 件对应 A{i}），正在做的那个高亮 */
-function aState(i) {
-  if (!running.value && !st.value) return "";
-  const n = i + 1;
-  if (n < piece.value) return "done";
-  if (n === piece.value) return "on";
-  return "";
-}
-function colorClass(c) {
-  return c === "红" ? "c-red" : c === "绿" ? "c-green" : c === "蓝" ? "c-blue" : "";
-}
+const colorClass = (c) => (c === "红" ? "c-red" : c === "绿" ? "c-green" : c === "蓝" ? "c-blue" : "");
+
+function onAxis(d) { exec.jogPress(axis.value, d); }
+
+watch(() => robot.activeView, (v) => {
+  if (v !== "sort") { if (timer) { clearInterval(timer); timer = null; } }
+  else if (!timer) { timer = setInterval(poll, 800); }
+});
+onMounted(() => { loadCheck(); poll(); timer = setInterval(poll, 800); });
+onBeforeUnmount(() => { if (timer) clearInterval(timer); });
 </script>
 
 <template>
-  <div class="srt">
-    <div class="srt-top">
-      <span class="srt-mark"><Icon name="layers" :size="20" /></span>
-      <div class="srt-ht">
-        <div class="srt-title">三色方块分拣</div>
-        <div class="srt-sub">
-          A 区取料 → C 区摄像头判色 → B 区按颜色放料（第 1 列红 / 第 2 列绿 / 第 3 列蓝）；
-          异常即停并回开始/结束点
-        </div>
-      </div>
-      <span class="srt-badge" :class="{ on: running, dry: dryRun }">
-        {{ running ? "运行中" : "空闲" }}{{ dryRun ? " · 空跑" : "" }}
-      </span>
+  <MonitorLayout view="sort">
+    <template #hud>
+      <div class="exec-hud">分拣 · 三色方块 · {{ running ? "运行中" : "空闲" }}</div>
+    </template>
+
+    <!-- ① 就绪：直接复用现成卡片（一键就绪 / 取消 / 明细） -->
+    <RcReadyCard />
+
+    <!-- ② 页签：一屏一件事，右栏保持简单 -->
+    <div class="seg mini srt-seg">
+      <button :class="{ on: tab === 'run' }" @click="tab = 'run'">执行</button>
+      <button :class="{ on: tab === 'point' }" @click="tab = 'point'">点位</button>
     </div>
 
-    <!-- 点位体检 -->
-    <div class="card" :class="{ bad: chk && !chk.ok }">
-      <h3><Icon :name="chk && chk.ok ? 'check' : 'alert'" :size="15" /> 点位体检
-        <span class="h3-sub" v-if="chk">{{ chk.found }}/{{ chk.total }}</span>
-        <span class="h3-refresh" title="重新体检" @click="loadCheck"><Icon name="refresh" :size="13" /></span>
-      </h3>
-      <p v-if="chkErr" class="small err">{{ chkErr }}</p>
-      <template v-else-if="chk">
-        <p v-if="chk.ok" class="small ok">38 个点位齐备，可以开跑。</p>
-        <p v-else class="small err">
-          缺 {{ chk.missing.length }} 个点位，先到「点位执行」页补齐（缺一个都不允许启动）：
+    <!-- ================= 执行 ================= -->
+    <template v-if="tab === 'run'">
+      <div class="card">
+        <h3><Icon :name="chk && chk.ok ? 'check' : 'alert'" :size="15" /> 点位体检
+          <span class="h3-sub" v-if="chk">{{ chk.found }}/{{ chk.total }}</span>
+          <span class="h3-refresh" title="重新体检" @click="loadCheck"><Icon name="refresh" :size="13" /></span>
+        </h3>
+        <p v-if="chkErr" class="small err">{{ chkErr }}</p>
+        <template v-else-if="chk">
+          <p v-if="chk.ok" class="small ok">38 个点位齐备，可以开跑。</p>
+          <p v-else class="small err">
+            缺 {{ missingCount }} 个点位 —— 切到「点位」页就地示教，缺一个都不允许启动。
+            <button class="lnk" @click="showMiss = !showMiss">{{ showMiss ? "收起" : "看缺哪些" }}</button>
+          </p>
+          <div v-if="!chk.ok && showMiss" class="chips">
+            <span v-for="m in chk.missing" :key="m" class="chip warn">{{ m }}</span>
+          </div>
+        </template>
+      </div>
+
+      <div class="card">
+        <h3><Icon name="sliders" :size="15" /> 运行参数</h3>
+        <p class="small muted">速度用右上角那一份（全项目唯一速度口径）：<b>{{ exec.speed }}%</b></p>
+        <div class="pf-row">
+          <label>C 区停顿</label>
+          <input type="number" min="0" max="10000" step="100" v-model.number="dwellMs" :disabled="running" />
+          <span class="unit">ms</span>
+          <label class="ml">抓帧</label>
+          <input type="number" min="1" max="9" v-model.number="frames" :disabled="running" />
+          <span class="unit">帧</span>
+        </div>
+        <div class="pf-row">
+          <label>放料吹气</label>
+          <input type="number" min="0" max="3000" step="50" v-model.number="blowMs" :disabled="running" />
+          <span class="unit">ms</span>
+          <label class="ml">本轮件数</label>
+          <input type="number" min="1" max="9" v-model.number="maxPieces" :disabled="running" />
+          <span class="unit">件</span>
+        </div>
+        <div class="btns">
+          <button class="primary" :disabled="!canStart" @click="start">
+            <Icon name="play" :size="13" /> {{ running ? "运行中…" : "开始" }}
+          </button>
+          <button class="rec-on" :disabled="!running && !busy" @click="stop">
+            <Icon name="stop" :size="13" /> 停止
+          </button>
+          <label class="dry-toggle">
+            <input type="checkbox" v-model="dryRun" :disabled="running" />
+            空跑（只校验点位与判色，<b>不下发运动</b>）
+          </label>
+        </div>
+        <p v-if="err" class="small err"><Icon name="alert" :size="12" /> {{ err }}</p>
+        <p v-else-if="msg" class="small ok">{{ msg }}</p>
+        <p v-if="running" class="small muted">
+          「停止」在当前动作结束后生效（运动/吸放中途不停，那是急停的语义），随后回开始/结束点。
         </p>
-        <div v-if="!chk.ok" class="chips">
-          <span v-for="m in chk.missing" :key="m" class="chip warn">{{ m }}</span>
+      </div>
+
+      <div class="card">
+        <h3><Icon name="activity" :size="15" /> 运行状态
+          <span class="h3-sub">{{ running ? "运行中" : "空闲" }}</span>
+        </h3>
+        <div class="row"><span class="k">阶段</span><span class="v">{{ stage }}</span></div>
+        <div class="row"><span class="k">进度</span>
+          <span class="v">{{ piece }}/{{ total }} 件{{ dryRun ? "（空跑）" : "" }}</span>
         </div>
-        <p class="small muted">
-          需要：A1–A9 与其“上”、B1–B9 与其“上”、C检测、开始/结束点（共 38）。
-        </p>
-      </template>
-    </div>
-
-    <!-- 参数 -->
-    <div class="card">
-      <h3><Icon name="sliders" :size="15" /> 运行参数</h3>
-      <div class="pf-row">
-        <label>速度</label>
-        <span class="ro">{{ speed }}%（与右上角全局速度同源）</span>
-        <input type="range" min="5" max="100" v-model.number="speed" :disabled="running" />
-      </div>
-      <div class="pf-row">
-        <label>C 区停顿</label>
-        <input type="number" min="0" max="10000" step="100" v-model.number="dwellMs" :disabled="running" />
-        <span class="unit">ms</span>
-        <label style="margin-left:14px">抓帧</label>
-        <input type="number" min="1" max="9" v-model.number="frames" :disabled="running" />
-        <span class="unit">帧</span>
-      </div>
-      <div class="pf-row">
-        <label>放料吹气</label>
-        <input type="number" min="0" max="3000" step="50" v-model.number="blowMs" :disabled="running" />
-        <span class="unit">ms</span>
-        <label style="margin-left:14px">本轮件数</label>
-        <input type="number" min="1" max="9" v-model.number="maxPieces" :disabled="running" />
-        <span class="unit">件</span>
-      </div>
-      <div class="btns" style="margin-top:8px">
-        <button class="primary" :disabled="!canStart" @click="start">
-          <Icon name="play" :size="13" /> {{ running ? "运行中…" : "开始" }}
-        </button>
-        <button class="rec-on" :disabled="!running && !busy" @click="stop">
-          <Icon name="stop" :size="13" /> 停止
-        </button>
-        <label class="dry-toggle">
-          <input type="checkbox" v-model="dryRun" :disabled="running" />
-          空跑（只校验点位与判色，<b>不下发运动</b>）
-        </label>
-      </div>
-      <p v-if="err" class="small err"><Icon name="alert" :size="12" /> {{ err }}</p>
-      <p v-else-if="msg" class="small ok">{{ msg }}</p>
-      <p v-if="running" class="small muted">
-        「停止」会在**当前动作结束后**生效（点动/吸放中途不停，那是急停的语义），然后回开始/结束点。
-      </p>
-    </div>
-
-    <!-- 进度 + 判色 -->
-    <div class="card">
-      <h3><Icon name="activity" :size="15" /> 运行状态
-        <span class="h3-sub">{{ running ? "运行中" : "空闲" }}</span>
-      </h3>
-      <div class="row"><span class="k">阶段</span><span class="v">{{ stage }}</span></div>
-      <div class="row"><span class="k">进度</span>
-        <span class="v">{{ piece }}/{{ total }} 件{{ dryRun ? "（空跑）" : "" }}</span>
-      </div>
-      <div class="prog-bar"><i :style="{ width: progressPct + '%' }"></i></div>
-      <div class="row" style="margin-top:8px">
-        <span class="k">本次判色</span>
-        <span class="v">
-          <span v-if="colorNow" class="dotc" :class="colorClass(colorNow)"></span>
-          {{ colorNow || "—" }}
-          <span v-if="confNow" class="muted">conf {{ Number(confNow).toFixed(2) }}</span>
-        </span>
-      </div>
-      <div class="row"><span class="k">落料槽位</span><span class="v">{{ targetNow || "—" }}</span></div>
-      <div v-if="stopReason" class="teach-res err" style="margin-top:8px">
-        <Icon name="alert" :size="13" /> 已停止：{{ stopReason }}
-      </div>
-    </div>
-
-    <!-- A 区 3×3 -->
-    <div class="card">
-      <h3><Icon name="target" :size="15" /> A 区 · 原料（取料顺序 1→9）</h3>
-      <div class="grid3">
-        <div v-for="(s, i) in A_SLOTS" :key="s" class="cell" :class="aState(i)">
-          <span class="sl">{{ s }}</span>
-          <span class="sm">{{ aState(i) === 'done' ? '已取' : aState(i) === 'on' ? '取料中' : '待取' }}</span>
+        <div class="prog-bar"><i :style="{ width: progressPct + '%' }"></i></div>
+        <div class="row mt"><span class="k">本次判色</span>
+          <span class="v">
+            <span v-if="colorNow" class="dotc" :class="colorClass(colorNow)"></span>
+            {{ colorNow || "—" }}
+            <span v-if="confNow" class="muted">conf {{ Number(confNow).toFixed(2) }}</span>
+          </span>
         </div>
+        <div class="row"><span class="k">落料槽位</span><span class="v">{{ targetNow || "—" }}</span></div>
+        <div class="cols">
+          <span v-for="c in placement" :key="c.color" class="colstat">
+            <i class="dotc" :class="colorClass(c.color)"></i>{{ c.color }}
+            {{ c.filled }}/{{ c.capacity }}<b v-if="c.full"> 满</b>
+          </span>
+        </div>
+        <div v-if="stopReason" class="res err"><Icon name="alert" :size="13" /> 已停止：{{ stopReason }}</div>
       </div>
-    </div>
+    </template>
 
-    <!-- B 区 3×3（列=颜色） -->
-    <div class="card">
-      <h3><Icon name="layers" :size="15" /> B 区 · 放料（列 1 红 · 列 2 绿 · 列 3 蓝）</h3>
-      <div class="grid3">
-        <div v-for="s in ['B1','B2','B3','B4','B5','B6','B7','B8','B9']" :key="s"
-             class="cell" :class="bCell[s] ? colorClass(bCell[s]) : ''">
-          <span class="sl">{{ s }}</span>
-          <span class="sm">{{ bCell[s] || "空" }}</span>
+    <!-- ================= 点位 ================= -->
+    <template v-else>
+      <div class="card">
+        <h3><Icon name="target" :size="15" /> 示教工具
+          <span class="h3-sub">把机器人动到位 → 右格点「存」</span>
+        </h3>
+        <div class="jog-axes">
+          <button v-for="n in 6" :key="'ax' + n" :class="{ on: axis === n }"
+                  :disabled="!canTeach" @click="axis = n">J{{ n }}</button>
+        </div>
+        <div class="btns">
+          <button :disabled="!canTeach" title="按住连续点动；点一下走一个步长"
+                  @pointerdown.prevent="onAxis(-1)" @pointerup="exec.jogRelease()"
+                  @pointerleave="exec.jogRelease()">
+            <Icon name="chevronDown" :size="14" /> 反向
+          </button>
+          <button :disabled="!canTeach" title="按住连续点动；点一下走一个步长"
+                  @pointerdown.prevent="onAxis(1)" @pointerup="exec.jogRelease()"
+                  @pointerleave="exec.jogRelease()">
+            <Icon name="chevronUp" :size="14" /> 正向
+          </button>
+          <span class="unit">步长</span>
+          <div class="seg mini">
+            <button v-for="s in JOG_STEPS" :key="'st' + s" :class="{ on: exec.jogStepDeg === s }"
+                    :disabled="!canTeach" @click="exec.jogStepDeg = s">{{ s }}°</button>
+          </div>
+        </div>
+        <p class="small muted">点动受轴锁/围栏/速度约束；分拣运行中会被拒绝。</p>
+        <p v-if="pointMsg" class="small ok">{{ pointMsg }}</p>
+      </div>
+
+      <div class="card">
+        <h3><Icon name="layers" :size="15" /> A 区 · 原料
+          <span class="h3-sub">每格 2 点：正上位 + 原料位</span>
+        </h3>
+        <div class="teach-grid">
+          <div v-for="cell in aCells" :key="'a' + cell.key" class="tcell">
+            <div class="tcell-h">{{ cell.key }}</div>
+            <div v-for="sl in cell.slots" :key="sl.name" class="slot">
+              <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
+              <span class="sname" :title="sl.name">{{ sl.label }}</span>
+              <button class="mini-btn" :disabled="!canTeach || pointBusy === sl.name"
+                      title="把机器人当前位置存为该点位" @click="teach(sl.name)">
+                <Icon name="check" :size="12" /> 存
+              </button>
+              <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
+                      title="移到该点位复核" @click="goto(sl.name)">
+                <Icon name="target" :size="12" /> 到
+              </button>
+              <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
+                      title="删除该点位" @click="clearPoint(sl.name)">
+                <Icon name="trash" :size="12" />
+              </button>
+            </div>
+          </div>
         </div>
       </div>
-      <div class="cols">
-        <span v-for="c in placement" :key="c.color" class="colstat">
-          <i class="dotc" :class="colorClass(c.color)"></i>{{ c.color }}
-          {{ c.filled }}/{{ c.capacity }}<b v-if="c.full"> 满</b>
-        </span>
+
+      <div class="card">
+        <h3><Icon name="layers" :size="15" /> B 区 · 放料
+          <span class="h3-sub">列 1 红 · 列 2 绿 · 列 3 蓝</span>
+        </h3>
+        <div class="teach-grid">
+          <div v-for="cell in bCells" :key="'b' + cell.key" class="tcell"
+               :class="bCell[cell.key] ? colorClass(bCell[cell.key]) : ''">
+            <div class="tcell-h">{{ cell.key }}<i v-if="bCell[cell.key]" class="dotc" :class="colorClass(bCell[cell.key])"></i></div>
+            <div v-for="sl in cell.slots" :key="sl.name" class="slot">
+              <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
+              <span class="sname" :title="sl.name">{{ sl.label }}</span>
+              <button class="mini-btn" :disabled="!canTeach || pointBusy === sl.name"
+                      title="把机器人当前位置存为该点位" @click="teach(sl.name)">
+                <Icon name="check" :size="12" /> 存
+              </button>
+              <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
+                      title="移到该点位复核" @click="goto(sl.name)">
+                <Icon name="target" :size="12" /> 到
+              </button>
+              <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
+                      title="删除该点位" @click="clearPoint(sl.name)">
+                <Icon name="trash" :size="12" />
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
-  </div>
+
+      <div class="card">
+        <h3><Icon name="camera" :size="15" /> C 区 与 开始/结束点</h3>
+        <div class="slot wide" v-for="sl in extraSlots" :key="sl.name">
+          <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
+          <span class="sname">{{ sl.label }}<span class="muted"> · {{ sl.name }}</span></span>
+          <button class="mini-btn" :disabled="!canTeach || pointBusy === sl.name"
+                  title="把机器人当前位置存为该点位" @click="teach(sl.name)">
+            <Icon name="check" :size="12" /> 存点
+          </button>
+          <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
+                  title="移到该点位复核" @click="goto(sl.name)">
+            <Icon name="target" :size="12" /> 到点
+          </button>
+          <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
+                  title="删除该点位" @click="clearPoint(sl.name)">
+            <Icon name="trash" :size="12" />
+          </button>
+        </div>
+        <p class="small muted">「开始/结束点」是一个点：一轮开始先去、结束与异常都回这里。</p>
+      </div>
+    </template>
+  </MonitorLayout>
 </template>
 
 <style scoped>
-.srt { padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow: auto; }
-.srt-top { display: flex; align-items: center; gap: 12px; }
-.srt-mark { display: inline-flex; color: var(--accent); }
-.srt-ht { flex: 1; min-width: 0; }
-.srt-title { font-size: 16px; font-weight: 700; color: var(--txt); }
-.srt-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-.srt-badge { padding: 3px 9px; border-radius: 999px; font-size: 12px;
-  border: 1px solid var(--line); color: var(--muted); }
-.srt-badge.on { color: #fff; background: var(--ok, #2f9e6f); border-color: transparent; }
-.srt-badge.dry { }
-.card { border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+.srt-seg { margin: 2px 0; }
+.card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
   background: var(--panel); }
-.card.bad { border-color: var(--err, #e05252); }
-.card h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 8px;
+.card h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 6px;
   font-size: 14px; color: var(--txt); }
 .h3-sub { font-size: 11px; color: var(--muted); font-weight: 400; }
 .h3-refresh { margin-left: auto; cursor: pointer; color: var(--muted); }
 .h3-refresh:hover { color: var(--accent); }
-.row { display: flex; gap: 10px; font-size: 13px; padding: 2px 0; }
-.row .k { width: 76px; color: var(--muted); flex: none; }
+.row { display: flex; gap: 10px; font-size: 13px; padding: 1px 0; }
+.row.mt { margin-top: 6px; }
+.row .k { width: 72px; color: var(--muted); flex: none; }
 .row .v { color: var(--txt); }
 .small { font-size: 12px; line-height: 1.6; margin: 4px 0 0; }
 .muted { color: var(--muted); }
 .ok { color: var(--ok, #2f9e6f); }
 .err { color: var(--err, #e05252); }
-.chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 0; }
+.lnk { background: none; border: none; color: var(--accent); cursor: pointer;
+  font-size: 12px; padding: 0 2px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .chip { font-size: 11px; padding: 1px 6px; border-radius: 4px;
   border: 1px solid var(--line); color: var(--muted); }
 .chip.warn { color: #ffb4b4; border-color: #e0525255; }
-.pf-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; }
-.pf-row label { color: var(--muted); min-width: 62px; }
-.pf-row input[type="range"] { flex: 1; }
-.pf-row input[type="number"] { width: 84px; padding: 3px 6px; border-radius: 6px;
+.pf-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; font-size: 13px; }
+.pf-row label { color: var(--muted); }
+.pf-row label.ml { margin-left: 12px; }
+.pf-row input[type="number"] { width: 76px; padding: 3px 6px; border-radius: 6px;
   border: 1px solid var(--line); background: var(--panel); color: var(--txt); }
-.pf-row .ro { color: var(--txt); }
 .unit { color: var(--muted); font-size: 12px; }
-.btns { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.btns { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .dry-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
   color: var(--muted); cursor: pointer; }
-.prog-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 6px; }
+.prog-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 4px; }
 .prog-bar > i { display: block; height: 100%; background: var(--accent); }
-.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
-.cell { border: 1px solid var(--line); border-radius: 8px; padding: 8px 6px;
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
-  background: var(--bg, transparent); min-height: 52px; justify-content: center; }
-.cell .sl { font-size: 13px; color: var(--txt); }
-.cell .sm { font-size: 11px; color: var(--muted); }
-.cell.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.cell.done { opacity: .55; }
-.cell.c-red { border-color: #e24b4a; }
-.cell.c-red .sm { color: #f7c1c1; }
-.cell.c-green { border-color: #639922; }
-.cell.c-green .sm { color: #c0dd97; }
-.cell.c-blue { border-color: #378add; }
-.cell.c-blue .sm { color: #b5d4f4; }
-.dotc { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
-  margin-right: 4px; background: var(--muted); vertical-align: 0; }
+.cols { display: flex; gap: 12px; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.colstat b { color: var(--warn, #d98a2b); margin-left: 3px; }
+.res { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 8px;
+  padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); }
+.res.err { color: #ffb4b4; border-color: #e0525255; }
+.jog-axes { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; }
+.jog-axes button { padding: 4px 0; font-size: 12px; }
+.jog-axes button.on { border-color: var(--accent); color: var(--accent); }
+.teach-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.tcell { border: 1px solid var(--line); border-radius: 8px; padding: 5px 6px; }
+.tcell-h { font-size: 12px; color: var(--txt); margin-bottom: 3px; }
+.slot { display: flex; align-items: center; gap: 3px; padding: 2px 0; }
+.slot.wide { padding: 5px 0; }
+.sdot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: none; }
+.sdot.on { background: var(--ok, #2f9e6f); }
+.sname { flex: 1; min-width: 0; font-size: 11px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-btn { padding: 1px 5px; font-size: 11px; border-radius: 5px; }
+.tcell.c-red { border-color: #e24b4a; }
+.tcell.c-green { border-color: #639922; }
+.tcell.c-blue { border-color: #378add; }
+.dotc { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-left: 4px; background: var(--muted); }
 .dotc.c-red { background: #e24b4a; }
 .dotc.c-green { background: #639922; }
 .dotc.c-blue { background: #378add; }
-.cols { display: flex; gap: 14px; margin-top: 8px; font-size: 12px; color: var(--muted); }
-.colstat b { color: var(--warn, #d98a2b); margin-left: 4px; }
-.teach-res { display: flex; align-items: center; gap: 6px; font-size: 12px;
-  padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); }
-.teach-res.err { color: #ffb4b4; border-color: #e0525255; }
 </style>

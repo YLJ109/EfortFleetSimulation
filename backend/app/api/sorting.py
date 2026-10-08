@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from typing import Dict, List, Optional
@@ -29,11 +30,13 @@ from app.api.auth import require_control
 from app.api.control import new_run, request_cancel
 from app.core.config import get_config
 from app.core.logger import get_logger
-from app.db.crud import list_points
+from app.db.crud import (create_point, delete_point, list_points,
+                        update_point)
 from app.db.database import SessionLocal
 from app.services import camera_client
 from app.services import sorting as S
 from app.services.events import emit as emit_event
+from app.services.collector import collector
 from app.services.motion import motion, real_write_enabled
 from app.services.safety_guard import check as guard_check
 from app.utils.joints import parse_joints
@@ -336,3 +339,132 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
                    {"phase": phase, "reason": stop_reason, "dry_run": dry,
                     "placement": S.placement_summary(placement)},
                    actor="control")
+
+
+# ---------------------------------------------------------------- 点位示教
+# ★ 为什么这几个接口要**白名单**：本页只该管分拣的 38 个点。若允许写任意名字，
+#   一次手滑就能在点位库里造出没人认识的条目，而分拣引擎仍然"照名字找点"，
+#   出问题时极难排查。把"能写什么"限死，配合 /points 的体检形成闭环。
+_WHITELIST = {p["name"] for p in S.expected_points()}
+
+
+class TeachIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+    joints: Optional[List[float]] = Field(default=None, min_length=6, max_length=6,
+                                          description="留空则取**当前实时关节角**（示教用）")
+    note: str = Field(default="", max_length=200)
+
+
+class NameIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64)
+
+
+def _require_sorted_name(name: str) -> str:
+    n = (name or "").strip()
+    if n not in _WHITELIST:
+        raise HTTPException(400, detail="不允许的点位名：%s（只能操作分拣的 38 个点）" % (n or "空"))
+    return n
+
+
+def _live_joints() -> List[float]:
+    """取**当前实际姿态**（实时采集）用于示教；采集不可用时回退到执行引擎最近目标。"""
+    snap = collector.get_latest()
+    if snap:
+        try:
+            return [round(float(snap["j%d" % i]), 3) for i in range(1, 7)]
+        except Exception:
+            pass
+    st = motion.state()
+    if st.get("last_target"):
+        return [round(float(v), 3) for v in st["last_target"]]
+    raise HTTPException(503, detail="拿不到当前姿态（机器人未连接/无实时数据），无法示教")
+
+
+@router.post("/teach")
+def api_teach(body: TeachIn, tok: str = Depends(require_control)):
+    """把当前位姿（或显式给的关节角）保存为该点位；已存在则**覆盖**。
+
+    示教 = 配置写，不产生运动。运行中禁止（避免跑到一半把目标位改了）。
+    """
+    name = _require_sorted_name(body.name)
+    with _gate:
+        if _job.get("thread") and _job["thread"].is_alive():
+            raise HTTPException(409, detail="分拣正在运行，先「停止」再改点位")
+    j = [round(float(v), 3) for v in (body.joints or _live_joints())]
+    if len(j) != 6:
+        raise HTTPException(400, detail="关节角必须是 6 个数值")
+    payload = json.dumps(j, ensure_ascii=False)
+    db = SessionLocal()
+    try:
+        row = next((p for p in list_points(db) if p.name == name), None)
+        if row is None:
+            row = create_point(db, name=name, group="分拣", kind="joint",
+                               joints_json=payload, note=body.note or "分拣示教")
+            action = "created"
+        else:
+            update_point(db, row.id, group="分拣", kind="joint",
+                         joints_json=payload, note=body.note or row.note)
+            action = "updated"
+    finally:
+        db.close()
+    emit_event("sorting", "info", "sorting.teach",
+               "示教点位 %s（%s）" % (name, "新建" if action == "created" else "覆盖"),
+               {"name": name, "joints": j, "action": action}, actor="control")
+    return {"ok": True, "name": name, "joints": j, "action": action}
+
+
+@router.post("/goto")
+def api_goto(body: NameIn, tok: str = Depends(require_control)):
+    """移动到该示教点位（复核示教用）。★ 这是**运动**：走围栏互锁 + 轴锁 + 速度夹取。
+
+    分拣运行期间禁止（与手动点动同一套互锁理由：抢同一个 40135 触发位）。
+    """
+    name = _require_sorted_name(body.name)
+    with _gate:
+        if _job.get("thread") and _job["thread"].is_alive():
+            raise HTTPException(409, detail="分拣正在运行，先「停止」再手动到点")
+    db = SessionLocal()
+    try:
+        row = next((p for p in list_points(db) if p.name == name), None)
+    finally:
+        db.close()
+    if row is None:
+        raise HTTPException(404, detail="点位「%s」尚未示教" % name)
+    ok, reason, _snap = guard_check()
+    if not ok:
+        raise HTTPException(409, detail="安全围栏互锁：%s" % reason)
+    try:
+        j = parse_joints(row.joints, where="点位「%s」" % name)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    try:
+        sp = int(get_config().get("control", "default_speed_pct", default=5) or 5)
+    except Exception:
+        sp = 5
+    sp = max(5, min(100, sp))
+    r = motion.command([float(v) for v in j], sp, 0)
+    if not r.get("ok"):
+        raise HTTPException(502, detail="移动到「%s」失败：%s" % (name, r.get("error")))
+    emit_event("sorting", "info", "sorting.goto", "手动到点：%s" % name,
+               {"name": name, "speed_pct": sp}, actor="control")
+    return {"ok": True, "name": name, "speed_pct": sp}
+
+
+@router.delete("/point")
+def api_del_point(name: str, tok: str = Depends(require_control)):
+    """删除某个分拣点位（仅限 38 个白名单名字）。"""
+    n = _require_sorted_name(name)
+    with _gate:
+        if _job.get("thread") and _job["thread"].is_alive():
+            raise HTTPException(409, detail="分拣正在运行，先「停止」再改点位")
+    db = SessionLocal()
+    try:
+        row = next((p for p in list_points(db) if p.name == n), None)
+        if row is None:
+            raise HTTPException(404, detail="点位「%s」不存在" % n)
+        delete_point(db, row.id)
+    finally:
+        db.close()
+    emit_event("sorting", "warn", "sorting.point_deleted", "删除分拣点位：%s" % n,
+               {"name": n}, actor="control")
+    return {"ok": True, "name": n}
