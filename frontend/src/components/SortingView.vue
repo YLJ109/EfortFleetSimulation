@@ -70,6 +70,64 @@ const extraSlots = [
 const missing = computed(() => new Set((chk.value && chk.value.missing) || []));
 const isTaught = (name) => !!(chk.value && chk.value.ok) || !missing.value.has(name);
 
+// ---------- 点位坐标 与 残影 ----------
+// ★ 为什么接残影：只看一行数字看不出"这个点到底摆在哪"。悬停/点选让 3D 里的残影
+//   直接摆到该点位姿 —— 示教对不对、有没有撞工装，一眼就看得出来。
+//   复用 exec store 里现成的 hoverPoint（临时预演）/ pinPoint（常驻选中），不另造轮子。
+const pinnedName = ref("");
+
+/** 按名字取点位（exec.points 是 /points 的全量列表，loadPoints 后可用）。 */
+const ptOf = (name) => (exec.points || []).find((p) => p.name === name) || null;
+
+/** 点位存的是什么：关节角或直角坐标（kind=cartesian 的点存 tcp）。 */
+function coordText(p) {
+  if (!p) return "未示教";
+  if (p.kind === "cartesian" && p.tcp) {
+    const t = p.tcp;
+    const f = (v) => (v === null || v === undefined ? "-" : Number(v).toFixed(1));
+    return "XYZ " + f(t.x) + " " + f(t.y) + " " + f(t.z) + " / RPY " + f(t.rx) + " " + f(t.ry) + " " + f(t.rz);
+  }
+  const j = p.joints;
+  if (!j || !j.length) return "无坐标";
+  return j.map((v) => Number(v).toFixed(1)).join("  ");
+}
+
+/** 悬停 → 残影临时预演该点。 */
+function hover(name) {
+  const p = ptOf(name);
+  if (p) exec.hoverPoint(p);
+}
+function unhover() {
+  // 常驻选中的那个要保留，别被移开鼠标清掉
+  if (pinnedName.value) { const p = ptOf(pinnedName.value); if (p) exec.pinPoint(p); }
+  else exec.unhoverPoint();
+}
+
+/** 点名字 → 残影**常驻**跟随该点（再点一次取消）。 */
+function pin(name) {
+  const p = ptOf(name);
+  if (!p) return;
+  if (pinnedName.value === name) {
+    pinnedName.value = "";
+    exec.unpinPoint();
+    exec.hideGhost();
+  } else {
+    pinnedName.value = name;
+    exec.pinPoint(p);
+  }
+}
+const pinnedPoint = computed(() => (pinnedName.value ? ptOf(pinnedName.value) : null));
+
+/** 示教/清空后要同时刷新体检与点位坐标（残影也跟着更新）。 */
+async function refreshPoints() {
+  await loadCheck();
+  await exec.loadPoints();
+  if (pinnedName.value) {
+    const p = ptOf(pinnedName.value);
+    if (p) exec.pinPoint(p); else { pinnedName.value = ""; exec.hideGhost(); }
+  }
+}
+
 // ---------- 接口 ----------
 async function loadCheck() {
   chkErr.value = "";
@@ -152,7 +210,7 @@ async function teach(name) {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) { pointMsg.value = "存点失败：" + errText(d, r.status).base; return; }
     pointMsg.value = "已保存 " + name + "：" + (d.joints || []).map((v) => Number(v).toFixed(1)).join(", ");
-    await loadCheck();
+    await refreshPoints();
   } catch (e) { pointMsg.value = "存点异常：" + ((e && e.message) || e); }
   finally { pointBusy.value = ""; }
 }
@@ -180,7 +238,7 @@ async function clearPoint(name) {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) { pointMsg.value = "清空失败：" + errText(d, r.status).base; return; }
     pointMsg.value = "已清空 " + name;
-    await loadCheck();
+    await refreshPoints();
   } catch (e) { pointMsg.value = "清空异常：" + ((e && e.message) || e); }
   finally { pointBusy.value = ""; }
 }
@@ -212,8 +270,8 @@ watch(() => robot.activeView, (v) => {
   if (v !== "sort") { if (timer) { clearInterval(timer); timer = null; } }
   else if (!timer) { timer = setInterval(poll, 800); }
 });
-onMounted(() => { loadCheck(); poll(); timer = setInterval(poll, 800); });
-onBeforeUnmount(() => { if (timer) clearInterval(timer); });
+onMounted(() => { loadCheck(); exec.loadPoints(); poll(); timer = setInterval(poll, 800); });
+onBeforeUnmount(() => { if (timer) clearInterval(timer); exec.hideGhost(); });
 </script>
 
 <template>
@@ -318,6 +376,19 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); });
 
     <!-- ================= 点位 ================= -->
     <template v-else>
+      <div class="card sel-card" v-if="pinnedPoint">
+        <h3><Icon name="target" :size="15" /> 当前选中 · {{ pinnedName }}
+          <span class="h3-sub">残影已常驻在 3D 里</span>
+        </h3>
+        <div class="sel-grid">
+          <span v-for="(v, i) in pinnedPoint.joints" :key="'j' + i" class="sel-j">
+            J{{ i + 1 }}<b>{{ Number(v).toFixed(2) }}</b>
+          </span>
+        </div>
+        <p class="small muted">
+          点名字 = 残影常驻（再点一次取消）；鼠标停在任意点位格上 = 临时预演。
+        </p>
+      </div>
       <div class="card">
         <h3><Icon name="target" :size="15" /> 示教工具
           <span class="h3-sub">把机器人动到位 → 右格点「存」</span>
@@ -354,9 +425,12 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); });
         <div class="teach-grid">
           <div v-for="cell in aCells" :key="'a' + cell.key" class="tcell">
             <div class="tcell-h">{{ cell.key }}</div>
-            <div v-for="sl in cell.slots" :key="sl.name" class="slot">
+            <div v-for="sl in cell.slots" :key="sl.name" class="slot"
+                 @mouseenter="hover(sl.name)" @mouseleave="unhover()">
               <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
-              <span class="sname" :title="sl.name">{{ sl.label }}</span>
+              <span class="sname" :class="{ pinned: pinnedName === sl.name }"
+                    :title="sl.name + ' · ' + coordText(ptOf(sl.name))"
+                    @click="pin(sl.name)">{{ sl.label }}</span>
               <button class="mini-btn" :disabled="!canTeach || pointBusy === sl.name"
                       title="把机器人当前位置存为该点位" @click="teach(sl.name)">
                 <Icon name="check" :size="12" /> 存
@@ -369,6 +443,10 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); });
                       title="删除该点位" @click="clearPoint(sl.name)">
                 <Icon name="trash" :size="12" />
               </button>
+            </div>
+            <div v-for="sl in cell.slots" :key="'c-' + sl.name" class="coord"
+                 :title="sl.name + ' · ' + coordText(ptOf(sl.name))">
+              <b>{{ sl.label }}</b>{{ coordText(ptOf(sl.name)) }}
             </div>
           </div>
         </div>
@@ -382,9 +460,12 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); });
           <div v-for="cell in bCells" :key="'b' + cell.key" class="tcell"
                :class="bCell[cell.key] ? colorClass(bCell[cell.key]) : ''">
             <div class="tcell-h">{{ cell.key }}<i v-if="bCell[cell.key]" class="dotc" :class="colorClass(bCell[cell.key])"></i></div>
-            <div v-for="sl in cell.slots" :key="sl.name" class="slot">
+            <div v-for="sl in cell.slots" :key="sl.name" class="slot"
+                 @mouseenter="hover(sl.name)" @mouseleave="unhover()">
               <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
-              <span class="sname" :title="sl.name">{{ sl.label }}</span>
+              <span class="sname" :class="{ pinned: pinnedName === sl.name }"
+                    :title="sl.name + ' · ' + coordText(ptOf(sl.name))"
+                    @click="pin(sl.name)">{{ sl.label }}</span>
               <button class="mini-btn" :disabled="!canTeach || pointBusy === sl.name"
                       title="把机器人当前位置存为该点位" @click="teach(sl.name)">
                 <Icon name="check" :size="12" /> 存
@@ -398,15 +479,22 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); });
                 <Icon name="trash" :size="12" />
               </button>
             </div>
+            <div v-for="sl in cell.slots" :key="'c-' + sl.name" class="coord"
+                 :title="sl.name + ' · ' + coordText(ptOf(sl.name))">
+              <b>{{ sl.label }}</b>{{ coordText(ptOf(sl.name)) }}
+            </div>
           </div>
         </div>
       </div>
 
       <div class="card">
         <h3><Icon name="camera" :size="15" /> C 区 与 开始/结束点</h3>
-        <div class="slot wide" v-for="sl in extraSlots" :key="sl.name">
+        <div class="slot wide" v-for="sl in extraSlots" :key="sl.name"
+             @mouseenter="hover(sl.name)" @mouseleave="unhover()">
           <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
-          <span class="sname">{{ sl.label }}<span class="muted"> · {{ sl.name }}</span></span>
+          <span class="sname" :class="{ pinned: pinnedName === sl.name }"
+                :title="sl.name + ' · ' + coordText(ptOf(sl.name))"
+                @click="pin(sl.name)">{{ sl.label }}<span class="muted"> · {{ sl.name }}</span></span>
           <button class="mini-btn" :disabled="!canTeach || pointBusy === sl.name"
                   title="把机器人当前位置存为该点位" @click="teach(sl.name)">
             <Icon name="check" :size="12" /> 存点
@@ -419,6 +507,10 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); });
                   title="删除该点位" @click="clearPoint(sl.name)">
             <Icon name="trash" :size="12" />
           </button>
+        </div>
+        <div class="coord wide" v-for="sl in extraSlots" :key="'c-' + sl.name"
+             :title="sl.name + ' · ' + coordText(ptOf(sl.name))">
+          <b>{{ sl.name }}</b>{{ coordText(ptOf(sl.name)) }}
         </div>
         <p class="small muted">「开始/结束点」是一个点：一轮开始先去、结束与异常都回这里。</p>
       </div>
@@ -478,6 +570,18 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); });
 .sname { flex: 1; min-width: 0; font-size: 11px; color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mini-btn { padding: 1px 5px; font-size: 11px; border-radius: 5px; }
+.sname { cursor: pointer; }
+.sname:hover { color: var(--accent); }
+.sname.pinned { color: var(--accent); font-weight: 500; }
+.coord { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 1px 0 2px 10px; }
+.coord b { color: var(--txt); font-weight: 400; margin-right: 4px; }
+.coord.wide { padding-left: 0; }
+.sel-card { border-color: var(--accent); }
+.sel-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.sel-j { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between;
+  gap: 4px; border: 1px solid var(--line); border-radius: 5px; padding: 2px 5px; }
+.sel-j b { color: var(--txt); font-variant-numeric: tabular-nums; font-weight: 500; }
 .tcell.c-red { border-color: #e24b4a; }
 .tcell.c-green { border-color: #639922; }
 .tcell.c-blue { border-color: #378add; }
