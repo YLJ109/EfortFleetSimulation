@@ -55,6 +55,8 @@ export const useCameraStore = defineStore("camera", {
     colorCapable: (s) => !!(s.status?.vision?.color_capable),
     /** 三色识别置信度阈值（0~1），未生效默认 0.35。 */
     colorConf: (s) => s.status?.vision?.min_conf ?? 0.35,
+    // ★ 目标检测置信度阈值（YOLO）：/status 的 conf。误报多就往上调。
+    detConf: (s) => s.status?.conf ?? 0.5,
     /** 三色识别目标（红/绿/蓝）。 */
     colorTargets: (s) => s.status?.vision?.targets || ["红", "绿", "蓝"],
     /** 颜色识别累计次数（"目标"统计用；YOLO 关掉后 det_count 恒为 0）。 */
@@ -179,9 +181,12 @@ export const useCameraStore = defineStore("camera", {
       try { await this.camPost("/config", { model }); } catch (e) { this.error = e.message; return; }
       await this.refresh();
     },
-    /** 置信度阈值（0.05 ~ 0.95）。 */
+    /** ★ 目标检测置信度阈值（0.05 ~ 0.95）。
+     *  调高 = 误报更少、但可能漏检（现场"检测误报偏多"就用这个）；
+     *  对应摄像头面板的「检测置信度 ≥ x%」滑杆，落点是相机服务 POST /config {conf}。 */
     async setConf(conf) {
-      try { await this.camPost("/config", { conf }); } catch (e) { this.error = e.message; }
+      try { await this.camPost("/config", { conf }); } catch (e) { this.error = e.message; return; }
+      await this.refresh();   // 立刻回读，滑杆上的数字马上跟着变
     },
     async setImgsz(imgsz) {
       try { await this.camPost("/config", { imgsz }); } catch (e) { this.error = e.message; }

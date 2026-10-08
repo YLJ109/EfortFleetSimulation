@@ -253,6 +253,20 @@ def _enum_devices():
     return device_list, found
 
 
+def _env_float(name: str, default: float, lo: float, hi: float) -> float:
+    """读环境变量里的浮点配置，越界/垃圾值一律回退到默认（不让服务起不来）。
+
+    ★ 为什么要有这个（2026-10-08 现场反馈"图像检测误报比较多"）：
+      检测置信度 conf 原先是**源码里硬编码的 0.25**（YOLO 出厂值），
+      没有任何外部入口 → ① 误报多时只能改代码；② 视觉服务一重启就回到 0.25
+      （和之前 TTL 硬编码是同一类坑）。现在默认提到 0.5，并可用 .env 覆盖。
+    """
+    try:
+        v = float(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        v = default
+    return max(lo, min(hi, v))
+
 def _open_camera(device_list, idx):
     cam = MvCamera()
     info = cast(device_list.pDeviceInfo[idx], POINTER(MV_CC_DEVICE_INFO)).contents
@@ -328,7 +342,10 @@ class CameraService:
         self.yolo_name = "yolo26n.pt"
         self.yolo_model = None
         self.yolo_loading = False
-        self.conf = 0.25
+        # ★ 目标检测置信度阈值：默认 0.5（原 0.25 误报偏多）。
+        #   现场可改 .env 的 EFORT_CAM_CONF，或运行时 POST /config {"conf":…}，
+        #   也可以在摄像头面板的「检测置信度」滑杆上直接调。
+        self.conf = _env_float("EFORT_CAM_CONF", 0.5, 0.05, 0.95)
         self.imgsz = 640
         self.det_ms = 0.0
         self.det_count = 0
@@ -357,7 +374,8 @@ class CameraService:
         self.roi = None                 # (x, y, w, h) 小图坐标
         self.color_min_interval = 0.8   # 同色重复触发节流(秒)
         self.save_on_detect = True      # 触发时是否落盘三件套
-        self.color_conf = 0.28          # 三色置信度阈值: conf<此值的目标不画框/不记录
+        # 三色识别置信度阈值（conf<此值不画框/不记录）；可用 EFORT_CAM_COLOR_CONF 覆盖
+        self.color_conf = _env_float("EFORT_CAM_COLOR_CONF", 0.28, 0.05, 0.95)
         # ★ 审计修复 P0-cam-3: 检测阈值表(面积/短边/HSV/色相)，可由
         #   POST /vision/config {"thr": {...}} 覆盖子集；默认 = vision_color.DEFAULT_THR。
         self.vision_thr = (dict(vc.DEFAULT_THR) if _VC_OK else {})

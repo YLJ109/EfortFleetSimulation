@@ -542,6 +542,18 @@ async function retryService() {
         </label>
       </div>
 
+      <!-- ★ 目标检测置信度（YOLO）：误报多就往上调；与下面「三色置信度」是两套判据 -->
+      <div class="control-row conf-row">
+        <label class="control-label">
+          检测置信度&nbsp;≥&nbsp;<b>{{ (cam.detConf * 100).toFixed(0) }}%</b>
+        </label>
+        <input class="conf-slider" type="range" min="15" max="95" step="5"
+               :value="(cam.detConf * 100).toFixed(0)"
+               :disabled="cam.serviceDown"
+               title="目标检测置信度：低于此值的框不画、不记录（调高可减少误报，太高会漏检）"
+               @change="cam.setConf($event.target.value / 100)" />
+      </div>
+
       <!-- 三色识别目标 + 置信度阈值 -->
       <div class="control-row conf-row" v-if="cam.colorSupported && cam.colorCapable">
         <label class="control-label">

@@ -9,6 +9,7 @@ import { useUiStore } from "./stores/ui.js";
 import { switchView, renderFrame, resizeView, onSafety, applyRobotPose, disposeAll, onGlState } from "./three/manager.js";
 import Icon from "./components/Icon.vue";
 import { useAuthStore } from "./stores/auth.js";
+import { useAsrStore } from "./stores/asr.js";
 import RealMonitor from "./components/RealMonitor.vue";
 import SimMonitor from "./components/SimMonitor.vue";
 import PointExecView from "./components/PointExecView.vue";
@@ -66,6 +67,7 @@ const safetySub = computed(() => safetySubOf(safety.value));
 
 // ---------- 控制权限（阶段 1） ----------
 const auth = useAuthStore();
+const asr = useAsrStore();
 const pw = ref("");
 const pwInput = ref(null);
 function requestControl() { auth.requestLogin(); }
@@ -406,6 +408,7 @@ onMounted(async () => {
   //   心跳就不会启动 → 倒计时看起来"冻住"。这里再兜一次。
   if (auth.controlActive) auth.startTtlTick();
   onSafety((s) => { safety.value = s; safe.ingest(s); });
+  asr.loadConfig();        // 语音字幕配置（是否启用/有没有密钥）→ 底栏按钮才能如实提示
   await robot.loadMeta();  // 初始化机器人模型（子组件 onMounted 已登记容器）
   robot.connect();         // 建立 WebSocket（连上后由上面的 watch 拉起轮询）
   await safe.load();       // 拉取安全围栏配置并应用到 3D
@@ -424,6 +427,21 @@ onMounted(async () => {
   //   纯键盘操作的用户不会点鼠标，所以 pointerdown 与 keydown 都要挂。
   window.addEventListener("pointerdown", unlockAudio, { once: true });
   window.addEventListener("keydown", unlockAudio, { once: true });
+});
+
+/** 语音字幕开关：一次点击 = 开/关（换页不中断，配置在挂载时拉过）。 */
+function toggleAsr() {
+  if (asr.active || asr.connecting) asr.stop();
+  else { asr.loadConfig(); asr.start(); }
+}
+/** 底栏按钮的悬停说明 —— 失败原因如实写出来，不静默。 */
+const asrTip = computed(() => {
+  if (!auth.controlActive) return "需要控制令牌（点右侧「请求控制」）";
+  if (asr.err) return asr.err;
+  if (!asr.available) return asr.reason || "语音识别未启用";
+  if (asr.connecting) return "正在连接云端…";
+  if (asr.active) return "语音字幕：识别中（点击停止）";
+  return "语音字幕：点击开始（说话实时转文字，显示在 3D 画面底部）";
 });
 
 onBeforeUnmount(() => {
@@ -543,6 +561,19 @@ onBeforeUnmount(() => {
                 :title="annOff ? '播报已关闭（点击配置）' : '播报中心：音效 / 中文语音'">
           <Icon :name="annOff ? 'volumeOff' : 'volume'" :size="15" />
         </button>
+        <!-- ★ 实时语音字幕开关（与播报按钮同款底栏样式）：
+             说话实时转文字，识别结果以电影字幕叠在 3D 视口底部。
+             识别文本只用于显示，不参与任何控制。 -->
+        <!-- ★ 不做 disabled：按钮始终可点 —— 没权限/没配密钥时点一下就在右侧
+             显示具体原因（需要控制令牌 / 未配置密钥 / 非安全源无法用麦克风），
+             灰着不响应才是最让人困惑的。 -->
+        <button class="ann-btn asr-btn" :class="{ off: !asr.active && !asr.connecting, rec: asr.active || asr.connecting }"
+                @click="toggleAsr" :title="asrTip">
+          <Icon :name="asr.active || asr.connecting ? 'mic' : 'micOff'" :size="15" />
+        </button>
+        <span v-if="asr.err" class="asr-err" :title="asr.err" @click="asr.clearErr()">
+          <Icon name="alert" :size="12" /> {{ asr.err }}
+        </span>
         <template v-if="auth.controlActive">
           <span class="ctrl-badge" :class="{ op: !auth.isAdmin }"
                 :title="auth.isAdmin
@@ -667,6 +698,13 @@ onBeforeUnmount(() => {
 .ann-btn { flex: none; width: 30px; height: 30px; padding: 0; display: inline-flex;
   align-items: center; justify-content: center; color: var(--accent); }
 .ann-btn.off { color: var(--muted); opacity: .75; }
+/* ★ 语音字幕：识别中用红色（与播报的"静音灰"区分开）；错误文字贴在按钮右侧 */
+.ann-btn.rec { color: #fff; background: #c0392b; border-color: #c0392b;
+  animation: asrPulse 1.6s ease-in-out infinite; }
+@keyframes asrPulse { 0%,100% { opacity: 1; } 50% { opacity: .62; } }
+.asr-err { display: inline-flex; align-items: center; gap: 4px; max-width: 280px;
+  font-size: 11px; color: #ffb4b4; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .modal-mask { position: fixed; inset: 0; z-index: 200; background: rgba(8, 10, 14, .62);  backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; }
 .modal { width: 360px; max-width: 92vw; background: var(--panel); border: 1px solid var(--line);
