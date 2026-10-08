@@ -156,9 +156,9 @@ def _hue_vote(bgr_roi, s_min=None, v_min=None):
     if n < 40:
         return ("", 0.0)
     H = hsv[..., 0][sel]
-    nr = int(((H < 12) | (H >= 168)).sum())   # 红带（含偏粉红）
+    nr = int(((H < 12) | (H >= 160)).sum())   # 红带（扩到 160 容纳高饱和品红/玫红）
     ng = int(((H >= 35) & (H < 90)).sum())    # 绿带
-    nb = int(((H >= 95) & (H < 145)).sum())   # 蓝带(含偏青/亮蓝; USB 相机/偏色时蓝常落到 H 95~110)
+    nb = int(((H >= 95) & (H < 135)).sum())   # 蓝带（收窄上限 145→135，不再吞紫/青）
     m = max(nr, ng, nb)
     if m == 0:
         return ("", 0.0)                       # 全落在三色带之外 → 非三色
@@ -909,18 +909,42 @@ class VisionEngine:
         # ★ 审计修复 P0-cam-3: 色相投票的 S/V 门槛走可配置阈值表
         name, ratio_color = _hue_vote(roi, s_min=self.thr["hue_s_min"],
                                       v_min=self.thr["hue_v_min"])
-        lab = [round(float(v), 2)
-               for v in cv2.cvtColor(roi, cv2.COLOR_BGR2LAB).reshape(-1, 3).mean(axis=0)]
+        dom = dominant_lab(work, sub)
+        de = None
+        alt = None
+        alt_de = None
+        chroma = 0.0
+        name_l = "未知"
+        lab_conf = 0.0
+        lab_arr = [round(float(v), 2)
+                   for v in cv2.cvtColor(roi, cv2.COLOR_BGR2LAB).reshape(-1, 3).mean(axis=0)]
+        if dom["ok"]:
+            cr = classify_rgb(dom["lab"])
+            name_l = cr["name"]
+            de = cr["de"]
+            alt = cr["alt"]
+            alt_de = cr["alt_de"]
+            chroma = cr["chroma"]
+            lab_conf = cr["conf"]
+            lab_arr = [round(float(v), 2) for v in dom["lab"]]
         if not name:
-            return {"name": "未知", "hex": None, "conf": 0.0, "alt": None,
+            return {"name": "未知", "hex": None, "conf": 0.0, "alt": alt,
                     "reason": "非红绿蓝三色", "ratio": round(fill, 3),
-                    "fill": round(fill, 3), "lab": lab}
-        # 置信度 = 色相一致率(多数色带占比) × 方正度(矩形越"实"越可信)
-        conf = round(float(ratio_color * (0.5 + 0.5 * min(1.0, max(0.0, fill)))), 3)
+                    "fill": round(fill, 3), "lab": lab_arr,
+                    "de": de, "alt_de": alt_de, "chroma": chroma}
+        # 置信度 = HSV 一致性 × 方正度，再与 Lab ΔE 置信取较严者（交叉门控更稳）
+        hsv_conf = float(ratio_color * (0.5 + 0.5 * min(1.0, max(0.0, fill))))
+        conf = round(float(min(hsv_conf, lab_conf)), 3) if dom["ok"] else round(hsv_conf, 3)
+        reason = ""
+        if name_l != name:
+            reason = "HSV/Lab 分歧(%s)" % name_l
+        elif fill < 0.72:
+            reason = "杂色（建议复核）"
         return {"name": name, "hex": {"红": "#E02020", "绿": "#1FA74A", "蓝": "#1F4FD8"}[name],
-                "conf": conf, "alt": None,
-                "reason": "杂色（建议复核）" if fill < 0.72 else "",
-                "ratio": round(fill, 3), "fill": round(fill, 3), "lab": lab}
+                "conf": conf, "alt": alt,
+                "reason": reason,
+                "ratio": round(fill, 3), "fill": round(fill, 3), "lab": lab_arr,
+                "de": de, "alt_de": alt_de, "chroma": chroma}
 
 
 # =====================================================================

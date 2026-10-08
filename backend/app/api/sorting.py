@@ -66,7 +66,10 @@ class StartIn(BaseModel):
     frames: int = Field(default=3, ge=1, le=9, description="停顿后抓几帧判色")
     min_conf: Optional[float] = Field(default=None, ge=0.0, le=1.0,
                                       description="留空则用视觉服务当前阈值")
-    blow_ms: int = Field(default=400, ge=0, le=3000, description="放料吹气时长")
+    # ★ 2026-10-08 语义变更：放气已改成**保持到回起点**，所以这个值不再表示"吹多久"，
+    #   而是"放气后留在 B 正上方多久再走"（默认 0）。让件先落稳、避免边吹边移带偏。
+    blow_ms: int = Field(default=0, ge=0, le=3000,
+                         description="放气后留在原位的时间（ms，默认 0=立刻回起点）")
     max_pieces: int = Field(default=9, ge=1, le=9, description="本轮做几件（调试可设 1）")
 
 
@@ -241,21 +244,12 @@ def _capture(ctx, frames: int, min_conf: float, stage: str) -> Dict:
     return v
 
 
-def _release_part(ctx, dry: bool, blow_ms: int, stage: str) -> None:
-    """放料时的脱件序列：停止吸 → 放(吹) → 等 → 停止放。
-
-    ★ 为什么要吹一下（现场实测）：只关真空阀，工件会因残余负压/密封**吸住不掉**。
-    """
-    _air(ctx, "release", dry, stage)
-    if blow_ms > 0:
-        _air(ctx, "blow", dry, stage)
-        ctx.sleep(blow_ms / 1000.0)
-        _air(ctx, "unblow", dry, stage)
-
-
 def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -> None:
     dry = bool(body.dry_run)
     speed = int(body.speed_pct)
+    # ★ 放气是**保持型**（回起点才停），所以异常/取消时**必须主动关掉**，
+    #   否则会一直吹着气停在半路 —— 费气、而且现场听到"一直在吹"会以为卡死。
+    blow_on = False
     start = S.START_POINT
     cam = S.CAMERA_POINT
     placement = S.new_placement()
@@ -277,8 +271,10 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
             _move(ctx, pmap, a_slot + "上", speed, dry, "取料·上方")
             _move(ctx, pmap, a_slot, speed, dry, "取料·下落")
             _air(ctx, "suck", dry, "取料·吸")
-            # 2) 抬起 → 送检
+            # 2) 抬起 → **停止吸**（★ 用户实测：关了真空阀件**照样吸着** ——
+            #    杯内残余负压仍有密封力；真正脱件靠后面的"放气"吹断负压）
             _move(ctx, pmap, a_slot + "上", speed, dry, "抬起")
+            _air(ctx, "release", dry, "停止吸")
             _move(ctx, pmap, cam, speed, dry, "送检")
             # 3) 停顿 + 抓帧判色
             _set(stage="停顿")
@@ -295,24 +291,40 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
                 raise _Stop("%s" % plan["detail"], "选槽", idx)
             tgt = plan["slot"]
             _set(target=tgt)
-            # 5) 放料
-            _move(ctx, pmap, tgt + "上", speed, dry, "放料·上方")
-            _move(ctx, pmap, tgt, speed, dry, "放料·下落")
-            _release_part(ctx, dry, int(body.blow_ms), "放料·脱件")
+            # 5) 放料（★ 用户 2026-10-08 口径：**只到 B 槽正上方，不下落到槽位**，
+            #    件靠停止吸 + 吹气掉下去 —— 少一次下落/抬起，节拍更短）
+            _move(ctx, pmap, tgt + "上", speed, dry, "放料·正上方")
+            #    只吹气：停止吸已在上游做过，这一步就是"吹断残余负压 → 件落下"
+            _air(ctx, "blow", dry, "放料·放气")
+            blow_on = True
+            # 放气后**留在原位**等一会儿再走（默认 0 = 不等）：
+            # 让件先落进槽里，避免一边吹一边移动把件带偏。
+            if int(body.blow_ms) > 0:
+                ctx.sleep(int(body.blow_ms) / 1000.0)
             S.place(placement, v["color"], tgt)
             _set(placement=S.placement_summary(placement))
-            _move(ctx, pmap, tgt + "上", speed, dry, "放料·抬起")
+            # 6) ★ 吹气**保持**，回到起点后才停（用户："放气，然后回到起点，然后停止放气"）
+            _move(ctx, pmap, start, speed, dry, "回起点")
+            _air(ctx, "unblow", dry, "停止放气")
+            blow_on = False
             emit_event("sorting", "info", "sorting.piece",
                        "第 %d 件：%s → %s（conf %.2f）" % (idx, v["color"], tgt, v["conf"]),
                        {"piece": idx, "color": v["color"], "slot": tgt,
                         "conf": v["conf"], "votes": v["votes"], "dry_run": dry},
                        actor="control")
 
-        # 收尾：回开始/结束点（正常也要回）
+        # 收尾：循环内每件已回起点，这里只在"没跑完就正常结束"时兜一次（幂等）
         if not stop_reason:
             _set(stage="收尾·回开始/结束点")
             _move(ctx, pmap, start, speed, dry, "收尾回原点")
     except _Stop as e:
+        # ★ 异常先收掉还开着的吹气（best-effort，失败不影响主线报告）
+        if blow_on and not dry:
+            try:
+                _air(ctx, "unblow", False, "异常·停止放气")
+            except Exception:  # noqa: BLE001
+                pass
+            blow_on = False
         stop_reason = e.reason
         stop_piece = e.piece or int((_job.get("state") or {}).get("piece") or 0)
         if "停止" in e.reason:

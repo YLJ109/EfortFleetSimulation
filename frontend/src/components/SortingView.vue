@@ -357,8 +357,9 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer); exec.hideGhosts(); });
           <span class="unit">帧</span>
         </div>
         <div class="pf-row">
-          <label>放料吹气</label>
-          <input type="number" min="0" max="3000" step="50" v-model.number="blowMs" :disabled="running" />
+          <label>放气后停留</label>
+          <input type="number" min="0" max="3000" step="50" v-model.number="blowMs" :disabled="running"
+                 title="吹气是保持型（回起点才停）；这里设的是放气后留在原位多久再走，默认 0" />
           <span class="unit">ms</span>
           <label class="ml">本轮件数</label>
           <input type="number" min="1" max="9" v-model.number="maxPieces" :disabled="running" />

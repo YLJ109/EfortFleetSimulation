@@ -57,6 +57,20 @@ def _timeout() -> float:
         return 5.0
 
 
+# ★★ 相机服务永远是**本机**（默认 127.0.0.1:8100）：请求必须**绕开 HTTP 代理**。
+#   踩过的坑（2026-10-08）：本机 shell 里设了 https_proxy（如 127.0.0.1:56638），
+#   urllib 默认会把**连本机 8100 的请求也丢给代理** → 代理拒绝/中止连接
+#   → WinError 10053 → 相机服务"不可达"、11 条 vision 用例整片红。
+#   项目里早就把这条写进纪律（真机脚本必须禁代理），但生产代码这里一直没做 —— 现在补上。
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+# ★★ 相机服务永远是**本机**（默认 127.0.0.1:8100）：请求必须**绕开 HTTP 代理**。
+#   踩过的坑（2026-10-08）：本机 shell 里设了 https_proxy（如 127.0.0.1:56638），
+#   urllib 默认会把**连本机 8100 的请求也丢给代理** → 代理拒绝/中止连接
+#   → WinError 10053 → 相机服务"不可达"、11 条 vision 用例整片红。
+#   项目里早就把这条写进纪律（真机脚本必须禁代理），但生产代码这里一直没做 —— 现在补上。
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 def _request(method: str, path: str, body: Optional[dict] = None,
              timeout: Optional[float] = None, base: Optional[str] = None) -> Tuple[int, Any, Optional[str]]:
     """返回 (status, 解析后的内容, 错误信息)。
@@ -75,7 +89,7 @@ def _request(method: str, path: str, body: Optional[dict] = None,
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout or _timeout()) as r:
+        with _NO_PROXY_OPENER.open(req, timeout=timeout or _timeout()) as r:
             raw = r.read()
             ctype = r.headers.get("Content-Type")
             if "application/json" in (ctype or ""):
