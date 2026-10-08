@@ -431,6 +431,21 @@ onMounted(async () => {
 });
 
 /** 语音字幕开关：一次点击 = 开/关（换页不中断，配置在挂载时拉过）。 */
+/** 底栏「一键就绪」：未就绪 → 就绪（幂等，已就绪点它不做任何事）。 */
+async function onReadyClick() {
+  if (rc.ready) return;      // 已就绪不重复下发，避免无谓的停/启
+  await rc.doReady();
+}
+/** 取消就绪：停机 + 清触发，**保持伺服上电**（"发了指令没动"后最常用的复位手段）。 */
+async function onCancelReady() {
+  await rc.cancelReady(false);
+}
+/** 伺服下电：停程序并断伺服。与"取消就绪"分开，因为断电后手臂可能下沉。 */
+async function onServoOff() {
+  if (!window.confirm("伺服下电会让手臂失去支撑（可能因重力下沉）。\n确认现场安全后再继续？")) return;
+  await rc.cancelReady(true);
+}
+
 function toggleAsr() {
   if (asr.active || asr.connecting) asr.stop();
   else { asr.loadConfig(); asr.start(); }
@@ -577,12 +592,32 @@ onBeforeUnmount(() => {
           <Icon name="alert" :size="12" /> {{ asr.err }}
         </span>
         <template v-if="auth.controlActive">
-          <span class="ctrl-badge" :class="{ op: !auth.isAdmin }"
-                :title="auth.isAdmin
-                  ? '已获得管理员控制权限：可操控机器人、修改围栏配置、清理审计日志'
-                  : '已获得操作员控制权限：只能操控机器人，改配置/清审计需管理员'">
-            <Icon name="shield" :size="14" /> {{ rc.ready ? "控制中" : "已授权 · 待一键就绪" }}<span v-if="auth.roleLabel"> · {{ auth.roleLabel }}</span> · {{ auth.ttlText }}
-          </span>
+          <!-- ★ 一键就绪入口放**底栏**（任何页面都能点）：
+               原先只有「点位执行」「分拣」两页的**可折叠右栏**里有它就绪按钮，
+               程序执行/真实监控页完全没有入口 —— 现场反映"也没有一键就绪啊"。
+               一键就绪是所有运动的前置，不该埋在某个页面的折叠栏里。 -->
+          <button class="ctrl-badge ready-btn" :class="{ op: !auth.isAdmin, on: rc.ready }"
+                  :disabled="rc.busy || !rc.ready && rc.jogTrig"
+                  :title="rc.ready
+                    ? '已就绪：伺服上电 + 程序运行 + 自动档 + 无报警。点击可查看明细（各页右栏的就绪卡）'
+                    : (rc.busy ? '正在就绪…' : '点击「一键就绪」：清位 → 清报警 → 伺服上电 → 加载并运行常驻程序')"
+                  @click="onReadyClick">
+            <Icon :name="rc.ready ? 'shield' : 'power'" :size="14" />
+            {{ rc.ready ? "控制中" : (rc.busy ? "就绪中…" : "一键就绪") }}<span v-if="auth.roleLabel"> · {{ auth.roleLabel }}</span> · {{ auth.ttlText }}
+          </button>
+          <!-- ★ 拆成两个明确动作（用户口径"取消就是取消伺服"）：
+               停程序 与 伺服下电 是两件事，混在一个按钮里最容易出事
+               （伺服下电后手臂可能因重力下沉）。 -->
+          <button v-if="rc.ready" class="ctrl-release"
+                  title="取消就绪：停机 + 清触发（**保持伺服上电**，程序不再跑）"
+                  @click="onCancelReady">
+            <Icon name="close" :size="14" /> 取消就绪
+          </button>
+          <button v-if="rc.ready" class="ctrl-release"
+                  title="伺服下电：停程序并断伺服。⚠ 断电后手臂可能因重力下沉，请先支撑/远离"
+                  @click="onServoOff">
+            <Icon name="power" :size="14" /> 伺服下电
+          </button>
           <button class="ctrl-release" @click="releaseControl" title="释放控制权限">
             <Icon name="power" :size="14" /> 释放
           </button>

@@ -1624,6 +1624,83 @@ def api_run_file(body: RunFileIn, tok: str = Depends(require_control)):
         db.close()
 
 
+@router.get("/locks")
+def api_locks(tok: str = Depends(require_control)):
+    """★ 诊断：谁占着执行锁？为什么"一键就绪被推迟"？
+
+    现场最常问的就是这句「有点动/下发正在执行，已推迟一键就绪」——它是**正确拦截**
+    （就绪流程与点动/下发共用同一把锁，不能插进飞行中的下发造成半截状态），
+    但用户看不出"到底谁在里面"。这里把**运行中进程**的真实占用情况摊开：
+
+      · exec_lock_free  : 现在能不能拿到执行锁（false = 有东西正在下发）
+      · holders         : 按可能的原因逐条给出"是/否"，锁定嫌疑
+      · run_active      : 正在跑的序列/文件/分拣（逐步下发会短时占锁）
+      · motion          : 运动引擎是否 moving、上次错误
+      · jog             : 连续点动是否还在跑（按住不放/松手没被收到）
+      · ready_busy      : 就绪流程自己是否正在跑
+
+    用法：点「一键就绪」被推迟时，先看这里——能立刻知道是"点动没松"、还是
+    "到点还在等完成位"、还是"分拣在跑"，而不是干等。
+    """
+    from app.services import jog as jog_mod
+    try:
+        from app.services.rc_ready import rc_ready
+    except Exception:  # noqa: BLE001
+        rc_ready = None
+    # 试着拿一下锁：拿到=空闲（立刻释放），拿不到=有人在下发
+    free = motion._exec_lock.acquire(blocking=False)
+    if free:
+        motion._exec_lock.release()
+    with _RUN_CANCEL_LOCK:
+        active = list(_RUN_ACTIVE.keys())
+    try:
+        mst = motion.state() or {}
+    except Exception:  # noqa: BLE001
+        mst = {}
+    try:
+        jst = jog_mod.jog.state() or {}
+    except Exception:  # noqa: BLE001
+        jst = {}
+    sorting_running = False
+    try:
+        from app.api import sorting as sorting_mod
+        th = (sorting_mod._job or {}).get("thread")
+        sorting_running = bool(th and th.is_alive())
+    except Exception:  # noqa: BLE001
+        pass
+    ready_busy = False
+    try:
+        ready_busy = bool(rc_ready and not rc_ready._busy_lock.acquire(blocking=False))
+        if not ready_busy and rc_ready:
+            rc_ready._busy_lock.release()
+    except Exception:  # noqa: BLE001
+        pass
+    holders = []
+    if not free:
+        if jst.get("active"):
+            holders.append("连续点动还在跑（松开按钮/失焦应停，若持续存在说明 keepalive 未断）")
+        if mst.get("moving"):
+            holders.append("一次下发正在执行（到点/点位执行；最长会等完成位 ~30s）")
+        if active:
+            holders.append("序列/文件/分拣正在执行：%s（其吸放步也会短时占锁）" % ", ".join(active))
+        if sorting_running:
+            holders.append("三色分拣正在运行")
+        if not holders:
+            holders.append("锁被占但上述都为空 → 可能是某次调用卡在收尾（把这份结果发给开发）")
+    return {
+        "ok": True,
+        "exec_lock_free": bool(free),
+        "holders": holders,
+        "run_active": active,
+        "sorting_running": sorting_running,
+        "ready_busy": ready_busy,
+        "motion": {"moving": mst.get("moving"), "stopped": mst.get("stopped"),
+                   "last_error": mst.get("last_error")},
+        "jog": {"active": jst.get("active"), "joint": jst.get("joint"),
+                "dir": jst.get("dir"), "last_reason": jst.get("last_reason")},
+    }
+
+
 @router.post("/estop")
 def api_estop(tok: str = Depends(require_control)):
     """紧急停止: 立即锁定执行引擎(真实模式同时下发急停寄存器)。"""
