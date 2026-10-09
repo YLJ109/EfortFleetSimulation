@@ -385,6 +385,10 @@ class CameraService:
         self._black_streak = 0          # 连续疑似坏帧计数(整帧全黑/单色), 用于平滑偶发"黑屏闪一下"
         self.color_seq = 0              # 触发序号(前端用 since 去重)
         self.last_event = None          # 最近一次触发详情
+        # ★ 2026-10-08：最近一次"**没有**目标过阈值"的原因（供面板原样显示：
+        #   太小 / 非矩形 / 低置信 / 非红绿蓝三色…）。过去这里什么都不记，
+        #   面板只好显示"检测不到"，现场无法判断该调哪个旋钮。
+        self.color_miss = None
         self.records = []               # 最近记录(倒序, 上限 MAX_RECORDS)
         self.color_count = 0
         self.color_ms = 0.0
@@ -465,6 +469,7 @@ class CameraService:
                 "card_n": len(self.color_calib.get("card") or {}),
             },
             "last": self.last_event,
+            "last_miss": self.color_miss,
             "records": len(self.records),
         }
 
@@ -1141,6 +1146,7 @@ class CameraService:
             if rebuild:
                 self.color_engine = None
                 self.latest_color = []
+                self.color_miss = None
         if self.color_enabled and self.running:
             self._start_color_thread()
         return self.status()
@@ -1150,6 +1156,52 @@ class CameraService:
             self._color_thread = threading.Thread(
                 target=self._color_loop, name="color", daemon=True)
             self._color_thread.start()
+
+    def _miss_reason(self, res, conf_thr: float):
+        """没有目标过阈值时，给出"最接近的那个"为什么没过 —— 原样交给界面显示。
+
+        ★ 取值优先级：候选为空（掩膜里根本没有像矩形的彩色块）→ 说"未发现矩形"；
+          否则取**面积最大**的候选，用它的 color.reason / conf 说明原因。
+          这是"让为什么没检测到看得见"的落地（用户口径：太小的不要、太低的不要，
+          但现场必须能区分是"太小"还是"太斜/太暗"）。
+        """
+        try:
+            items = list((res or {}).get("results") or [])
+            if not items:
+                # ★★ 2026-10-08：不再只说"未发现候选"。掩膜里往往**明明有彩色块**，
+                #   只是被形状/尺寸/裁切门槛拦掉了 —— 用 explain_no_candidate() 把
+                #   "具体是哪一条、该动什么"说出来（现场实测最常见的真因是"物体超出画面"，
+                #   以前那句话完全指不到它，现场只能瞎试）。
+                why = ""
+                try:
+                    # ★ 用顶部那个条件导入的 vc（颜色模块可能导入失败并降级为 None，
+                    #   那时这里也不该抛异常 —— 所以整段套 try）。
+                    mask = (res or {}).get("mask")
+                    if vc is not None and mask is not None and hasattr(vc, "explain_no_candidate"):
+                        why = vc.explain_no_candidate(mask, self.vision_thr)
+                except Exception:  # noqa: BLE001
+                    why = ""
+                return {"ts": time.strftime("%H:%M:%S"),
+                        "reason": why or "未发现候选（画面里没有像矩形的彩色块：可能太小/太暗/颜色不在红绿蓝）",
+                        "conf": None, "objects": 0}
+            items.sort(key=lambda x: -float(x.get("area") or 0.0))
+            r0 = items[0]
+            col = r0.get("color") or {}
+            conf = col.get("conf")
+            why = col.get("reason") or ""
+            try:
+                cf = float(conf) if conf is not None else 0.0
+            except (TypeError, ValueError):
+                cf = 0.0
+            if not why and cf < float(conf_thr):
+                why = "置信度 %.2f 低于阈值 %.2f" % (cf, float(conf_thr))
+            return {"ts": time.strftime("%H:%M:%S"),
+                    "reason": why or "未通过判定",
+                    "conf": conf, "objects": len(items),
+                    "area": int(r0.get("area") or 0), "fill": r0.get("fill")}
+        except Exception as e:  # noqa: BLE001
+            return {"ts": time.strftime("%H:%M:%S"), "reason": "原因不可读: %s" % e,
+                    "conf": None, "objects": 0}
 
     def _color_loop(self):
         """颜色检测线程: 复用 latest_frame 小图, 不额外抓帧、不跨进程传图。"""
@@ -1177,6 +1229,15 @@ class CameraService:
                         {"box": r["box"], "color": r["color"], "center": r["center"]}
                         for r in best
                     ]
+                    # ★★ 2026-10-08（用户口径："太小的不要检测/太低的不要检测"——
+                    #    但现场更需要知道**为什么没检测到**）：
+                    #    没有任何目标过阈值时，把**最接近的那个**候选的原因留下来，
+                    #    供面板原样显示（太小/非矩形/低置信/非红绿蓝三色…）。
+                    #    过去这里什么都不记 → 面板只好显示"检测不到"，现场没法判断该调哪个旋钮。
+                    if not best:
+                        self.color_miss = self._miss_reason(res, conf_thr)
+                    else:
+                        self.color_miss = None
                 if res.get("fire"):
                     self._on_detect(frame, bgr, res)
             except Exception as e:

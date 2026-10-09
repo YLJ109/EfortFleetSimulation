@@ -17,7 +17,6 @@ import MonitorLayout from "./MonitorLayout.vue";
 import Icon from "./Icon.vue";
 import CameraPanel from "./CameraPanel.vue";
 import ExecControlCard from "./ExecControlCard.vue";
-import RcReadyCard from "./RcReadyCard.vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useRobotStore } from "../stores/robot.js";
 import { useSafetyStore } from "../stores/safety.js";
@@ -175,24 +174,23 @@ watch(() => auth.controlActive, (v) => {
 
     <ExecControlCard />
 
-    <!-- 真机链路就绪：控制器状态 + 一键就绪 + 档位声明。
-         ★ 点动被拒时这里逐行给出原因（档位/伺服/报警/程序/触发位）。 -->
-    <RcReadyCard />
-
-    <!-- 滑块示教 -->
+    <!-- 关节点动（合并：滑块示教 + 点动 J1~J6） -->
     <div class="card">
-      <h3><Icon name="sliders" :size="15" /> 滑块示教
-        <span class="h3-sub">拖动即预演（残影跟随），确认后下发</span>
+      <h3><Icon name="sliders" :size="15" /> 关节点动 J1~J6
+        <span class="h3-sub">拖动滑块 / 按 −/+ 走一格</span>
       </h3>
-      <!-- ★ 需求：示教区的**所有组件**在"未就绪"时一律不可修改/不可点（伺服没上电时改了也没用）。 -->
+      <!-- ★ 需求：所有组件在"未就绪"时一律不可修改/不可点 -->
       <p v-if="!readyOk" class="lock-hint">
-        <Icon name="lock" :size="13" /> 需先在「真机链路」点「一键就绪」（伺服上电 + 程序运行）后，才可示教。
+        <Icon name="lock" :size="13" /> 需先在「真机链路」点「一键就绪」（伺服上电 + 程序运行）后，才可点动。
       </p>
-      <div class="seg">
-        <button :class="{ on: exec.teachMode === 'joint' }" :disabled="!readyOk"
-                @click="exec.teachMode = 'joint'; exec.schedulePreview()">关节角</button>
-        <button :class="{ on: exec.teachMode === 'cartesian' }" :disabled="!readyOk"
-                @click="exec.teachMode = 'cartesian'; exec.schedulePreview()">直角坐标</button>
+
+      <!-- 步长 + 残影预演（同一行：步长靠左，残影预演由全局 margin-left:auto 推到行尾） -->
+      <div class="pf-row" style="margin-bottom:8px">
+        <label>步长</label>
+        <div class="seg mini">
+          <button v-for="s in JOG_STEPS" :key="s" :class="{ on: exec.jogStepDeg === s }"
+                  :disabled="!readyOk" @click="exec.jogStepDeg = s">{{ s }}°</button>
+        </div>
         <label class="ghost-toggle">
           <input type="checkbox" v-model="exec.teachGhost" :disabled="!readyOk"
                  @change="exec.teachGhost ? exec.schedulePreview() : exec.hideGhost()" />
@@ -200,52 +198,39 @@ watch(() => auth.controlActive, (v) => {
         </label>
       </div>
 
-      <template v-if="exec.teachMode === 'joint'">
-        <div class="axis" v-for="(n, i) in robot.axes" :key="n"
-             @mouseenter="highlightJoint(i)" @mouseleave="highlightJoint(-1)">
-          <label>{{ n }}</label>
-          <input type="range" :min="LIMITS[i].min" :max="LIMITS[i].max" step="0.5"
-                 :disabled="!readyOk"
-                 :value="exec.teachQ[i]" @input="exec.onTeachSlider(i, $event)" />
-          <span class="deg">{{ Number(exec.teachQ[i]).toFixed(1) }}</span>
-        </div>
-      </template>
-      <template v-else>
-        <div class="axis" v-for="ax in ['x', 'y', 'z']" :key="ax">
-          <label>{{ ax.toUpperCase() }}</label>
-          <input type="number" class="tcp-in" v-model.number="exec.teachTcp[ax]"
-                 :disabled="!readyOk"
-                 @change="exec.schedulePreview()" />
-          <span class="deg">mm</span>
-        </div>
-        <div class="btns" style="margin-top:6px">
-          <button :disabled="!readyOk || exec.teachBusy" @click="exec.solveCartesian()">
-            <Icon name="target" :size="13" /> 解算为关节角
-          </button>
-        </div>
-      </template>
-
-      <p class="small muted" style="margin-top:8px">
-        速度统一由右上角「速度」控制（全项目唯一速度入口：点动 / 示教 / 执行共用同一份）。
-      </p>
-
-      <div v-if="exec.teachResult" class="teach-res"
-           :class="exec.teachResult.ok ? 'ok' : 'err'">
-        <Icon :name="exec.teachResult.ok ? 'check' : 'alert'" :size="13" />
-        <span v-if="exec.teachResult.ok">
-          目标可行 · 行程 {{ (exec.teachResult.distance_mm || 0).toFixed(1) }} mm
-          <template v-if="exec.teachResult.warnings && exec.teachResult.warnings.length">
-            · {{ exec.teachResult.warnings[0] }}
-          </template>
-        </span>
-        <span v-else>
-          {{ exec.teachResult.error
-            || (exec.teachResult.violations && exec.teachResult.violations.length
-                ? '超出关节限位' : '目标不可行') }}
-        </span>
+      <!-- 六个关节：每行 [−] 滑块 [+] [数值]
+           ★ 按钮内字符用真正的 − / +，不依赖 Icon 组件（之前 Icon.minus/plus 不存在 → 空白） -->
+      <div class="jog-axis" v-for="(n, i) in robot.axes" :key="n"
+           @mouseenter="highlightJoint(i)" @mouseleave="highlightJoint(-1)">
+        <span class="ja-name">{{ n }}</span>
+        <button class="ja-btn neg" :disabled="!readyOk || exec.jogBusy"
+                @pointerdown.prevent="exec.jogPress(i + 1, -1)"
+                @pointerup="exec.jogRelease" @pointerleave="exec.jogRelease"
+                @pointercancel="exec.jogRelease"
+                :title="'− 走一格 / 按住连续反向'">
+          −
+        </button>
+        <input class="ja-range" type="range"
+               :min="LIMITS[i].min" :max="LIMITS[i].max" step="0.5"
+               :disabled="!readyOk"
+               :value="exec.teachQ[i]"
+               @input="exec.onTeachSlider(i, $event)" />
+        <button class="ja-btn pos" :disabled="!readyOk || exec.jogBusy"
+                @pointerdown.prevent="exec.jogPress(i + 1, 1)"
+                @pointerup="exec.jogRelease" @pointerleave="exec.jogRelease"
+                @pointercancel="exec.jogRelease"
+                :title="'+ 走一格 / 按住连续正向'">
+          +
+        </button>
+        <span class="ja-val">{{ Number(exec.teachQ[i]).toFixed(1) }}°</span>
       </div>
 
-      <div class="btns">
+      <p class="small muted" style="margin-top:8px">
+        拖动滑块实时预演（残影跟随），松手即停；点击 −/+ 走一格，按住连续走。
+      </p>
+
+      <!-- 操作按钮 -->
+      <div class="btns" style="margin-top:8px">
         <button class="primary" :disabled="!exec.canExec || exec.teachBusy"
                 @click="exec.applyTeach()">
           <Icon name="target" :size="13" /> 执行到位姿
@@ -257,52 +242,6 @@ watch(() => auth.controlActive, (v) => {
           <Icon name="file" :size="13" /> 存为点位
         </button>
       </div>
-    </div>
-
-    <!-- 点动 -->
-    <div class="card">
-      <h3><Icon name="grip" :size="15" /> 点动 J1~J6
-        <span class="h3-sub">
-          {{ exec.jogState && exec.jogState.active
-            ? ('运行中 J' + exec.jogState.joint + ' · 看门狗 ' + exec.jogState.watchdog_left_ms + 'ms')
-            : '按住连续走 / 单击走一格' }}
-        </span>
-      </h3>
-      <!-- ★ 需求：点动区所有组件同样要求"已就绪"（不只按钮，角速度/步长也不可改）。 -->
-      <p v-if="!readyOk" class="lock-hint">
-        <Icon name="lock" :size="13" /> 需先在「真机链路」点「一键就绪」（伺服上电 + 程序运行）后才可点动。
-      </p>
-      <div class="pf-row">
-        <label>步长</label>
-        <div class="seg mini">
-          <button v-for="s in JOG_STEPS" :key="s" :class="{ on: exec.jogStepDeg === s }"
-                  :disabled="!readyOk" @click="exec.jogStepDeg = s">{{ s }}°</button>
-        </div>
-      </div>
-      <div class="jog-grid">
-        <div class="jog-row" v-for="(n, i) in robot.axes" :key="'jog' + n"
-             @mouseenter="highlightJoint(i)" @mouseleave="highlightJoint(-1)">
-          <span class="jog-name">{{ n }}</span>
-          <button class="jog-btn neg" :disabled="!exec.canJog || exec.jogBusy"
-                  @pointerdown.prevent="exec.jogPress(i + 1, -1)"
-                  @pointerup="exec.jogRelease" @pointerleave="exec.jogRelease"
-                  @pointercancel="exec.jogRelease"
-                  :title="'按住连续反向 / 单击走 ' + exec.jogStepDeg + '°'">
-            <Icon name="chevronDown" :size="13" /> 反向
-          </button>
-          <button class="jog-btn pos" :disabled="!exec.canJog || exec.jogBusy"
-                  @pointerdown.prevent="exec.jogPress(i + 1, 1)"
-                  @pointerup="exec.jogRelease" @pointerleave="exec.jogRelease"
-                  @pointercancel="exec.jogRelease"
-                  :title="'按住连续正向 / 单击走 ' + exec.jogStepDeg + '°'">
-            <Icon name="chevronUp" :size="13" /> 正向
-          </button>
-        </div>
-      </div>
-      <p class="small">
-        连续点动期间前端每 0.4s 发一次"使能保持"；<b>松开鼠标、切走窗口或 1.5s 无信号即自动停</b>
-        （对齐示教器三段使能开关）。急停 / 围栏危险 / 到限位同样立即停。
-      </p>
     </div>
 
     <!-- 预设点位 -->
@@ -426,6 +365,10 @@ watch(() => auth.controlActive, (v) => {
   color: var(--warn); background: var(--warn-soft);
   border: 1px solid var(--warn-line); border-radius: 8px;
 }
+/* ★ 残影预演（与步长同一行）：全局 .pf-row label 强制 width:40px 会把"残影预演"
+   四个字挤成竖排（当初截图里的"空位"就是这么来的），这里放开宽度 + 禁止换行；
+   右对齐由全局 .ghost-toggle 的 margin-left:auto 负责。 */
+.pf-row .ghost-toggle { width: auto; white-space: nowrap; }
 /* ★ 点位卡片：T1/T2 提示条 + 选中高亮 + 备注行 */
 .pt-hint {
   display: flex; align-items: flex-start; gap: 5px;
@@ -480,4 +423,75 @@ watch(() => auth.controlActive, (v) => {
   color: var(--warn); border-color: var(--warn-line); background: var(--warn-soft);
 }
 .btns button.warn:hover:not(:disabled) { filter: brightness(0.97); }
+
+/* ★ 合并后的「关节点动 J1~J6」行：每行 = [轴名] [−按钮] [滑块] [+按钮] [数值]
+   紧凑横向布局，整体按卡片内宽度自适应，拖动滑块时其余关节不抖 */
+.jog-axis {
+  /* 用户指定样式（2026-10-09）：收紧间隙与内边距，保证单行装得下 */
+  display: flex; align-items: center; gap: 5px; padding: 2px;
+}
+.jog-axis:last-child { margin-bottom: 0; }
+.ja-name {
+  flex: none; width: 20px;           /* 用户指定 20px */
+  font-size: 13px; font-weight: 600; color: var(--accent);
+  font-family: "Chakra Petch", sans-serif; letter-spacing: 0.5px;
+  text-align: left;
+}
+.ja-btn {
+  flex: none; width: 30px; height: 30px;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; border-radius: 8px;
+  background: var(--panel2); color: var(--txt);
+  border: 1px solid var(--line);
+  font-size: 16px; font-weight: 700; line-height: 1;
+  font-family: "JetBrains Mono", monospace;
+  cursor: pointer; transition: border-color .12s, background .12s, color .12s, box-shadow .12s;
+}
+.ja-btn:hover:not(:disabled) {
+  border-color: var(--accent); color: var(--accent);
+  box-shadow: 0 0 8px rgba(47, 214, 240, 0.25);
+}
+.ja-btn:active:not(:disabled) {
+  background: var(--accent-soft); color: var(--accent);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.35);
+}
+.ja-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ja-btn.neg { /* 形态略不同，便于一眼分辨方向 */ }
+.ja-btn.pos { /* 形态略不同，便于一眼分辨方向 */ }
+.ja-range {
+  flex: 1 1 auto; min-width: 0;
+  height: 6px; padding: 0;
+  appearance: none; -webkit-appearance: none;
+  background: linear-gradient(90deg, var(--panel2), var(--accent-soft));
+  border: 1px solid var(--line); border-radius: 999px;
+  cursor: pointer;
+  transition: border-color .12s;
+}
+.ja-range:hover:not(:disabled),
+.ja-range:focus:not(:disabled) { border-color: var(--accent); }
+.ja-range:disabled { opacity: 0.45; cursor: not-allowed; }
+.ja-range::-webkit-slider-thumb {
+  appearance: none; -webkit-appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid #0a1628;
+  box-shadow: 0 0 8px rgba(47, 214, 240, 0.55);
+  cursor: grab;
+  transition: transform .12s;
+}
+.ja-range::-webkit-slider-thumb:hover { transform: scale(1.15); }
+.ja-range::-webkit-slider-thumb:active { cursor: grabbing; transform: scale(1.05); }
+.ja-range::-moz-range-thumb {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--accent); border: 2px solid #0a1628;
+  box-shadow: 0 0 8px rgba(47, 214, 240, 0.55);
+  cursor: grab;
+}
+.ja-range::-moz-range-track { background: transparent; border: 0; }
+.ja-val {
+  /* 数值列宽：用户指定 45px（够装最宽情形 "-360.0°"） */
+  flex: none; width: 45px; text-align: right;
+  font-family: "JetBrains Mono", monospace; font-size: 12px;
+  color: var(--txt); font-variant-numeric: tabular-nums;
+}
 </style>

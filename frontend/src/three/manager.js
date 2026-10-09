@@ -15,12 +15,13 @@ import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { buildRobot } from "../robot/robotModel.js";
 import { FALLBACK_DH } from "../config.js";
 import { buildCell, PLATFORM_H, PLATFORM_TOP_SIZE } from "./cell.js";
-import { buildLab } from "./lab.js";
+// lab.js 已移除：场景改为开放科技感背景（网格 + 粒子光晕）
 import { SafetyFence, STATE_RANK } from "./safety.js";
 import { createGhost, GHOST_COLOR_B } from "./ghost.js";
 import { buildOwnerMap } from "./jointOwner.js";
 import { SKIN_BODY, SKIN_HARD, SKIN_JOINT, SKIN_LOGO, SKIN_METAL, skinMat } from "./materials.js";
-import { buildEndEffector } from "./endEffector.js";
+import { buildEndEffector, suckerLocalMm } from "./endEffector.js";
+import { createSortingBlocks } from "./sortingBlocks.js";
 
 // ---- 单例资源 ----
 let renderer = null;
@@ -36,13 +37,16 @@ let robot = null;        // 程序化模型（兜底） ×1
 let official = null;     // 官方数模（可动） ×1
 let fence = null;        // 安全围栏
 let cell = null;         // 地板 + 网格 + 阴影 + 地标线
-let lab = null;          // 实验室房间(14m)外壳 + 道具
+let techBg = null;       // 科技感背景（网格 + 粒子）
 let ghost = null;        // 残影 A(预演分身)：程序化模型半透明版，负责回答"要去的地方会不会撞"
 // ★ 残影 B（对比用）：让"两个点位同时看"成为可能（如 正上位 vs 原料位、A槽 vs B槽）。
 //   它与 A **同源同构**（同一个 createGhost，只换颜色），但**不参与围栏判定** ——
 //   安全结论永远只反映 A（= 当前正在评估的那个目标），避免两个残影把结论搅混。
 let ghostB = null;
 let sim = null;          // 模拟摆放物体沙盒
+// ★ 分拣 3D 可视化（18 槽位方块 + C 区摄像头）：按需创建（只有分拣页会拉它），
+//   与残影/围栏**互不影响** —— 它只是"把 state 画出来"，不参与任何安全判定。
+let sorting = null;
 let activeDh = null;
 let activeMounting = "floor";
 
@@ -179,13 +183,25 @@ function ensureRenderer() {
   return renderer;
 }
 
+/** 科技感背景：大范围地面网格 */
+function buildTechBackground(scene) {
+  // 大范围地面网格（青色，向外渐隐）
+  const gridHelper = new THREE.GridHelper(20, 40, 0x2fd6f0, 0x1a5f6f);
+  gridHelper.position.y = -0.001;
+  gridHelper.material.opacity = 0.12;
+  gridHelper.material.transparent = true;
+  scene.add(gridHelper);
+
+  techBg = { grid: gridHelper };
+}
+
 /** 懒创建唯一场景（不依赖容器，容器只用于 canvas 落点）。 */
 function ensureScene() {
   if (scene) return scene;
   const r = ensureRenderer();
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x141920);
-  scene.fog = new THREE.Fog(0x141920, 9, 24);   // 大房间远处柔和收进背景
+  scene.background = new THREE.Color(0x04070d);  // Sentinel 主题深蓝黑背景
+  scene.fog = new THREE.Fog(0x04070d, 6, 18);   // 开放场景：远处渐隐入深蓝黑
 
   camera = new THREE.PerspectiveCamera(50, 1, 0.01, 120);
   camera.position.set(1.7, 1.35, 1.75);
@@ -221,8 +237,8 @@ function ensureScene() {
   cell = buildCell();
   scene.add(cell.group);
 
-  lab = buildLab();
-  scene.add(lab.group);
+  // 科技感背景：大范围地面网格 + 氛围粒子
+  buildTechBackground(scene);
 
   fence = new SafetyFence(scene);
   // 机器人站在站台上 → 报警垫改铺到**台面**上（否则会被站台本体整块盖住）。
@@ -359,6 +375,8 @@ export function initRobots(dh, mounting = "floor") {
     robot = buildRobot(dhOk, activeMounting);
     robot.root.position.y = baseLiftY();   // 站到站台台面上
     scene.add(robot.root);
+    // ★ 程序化模型是"米"坐标系 → 局部数值 /1000（官方那条是 0.001 缩放链，用 mm）
+    attachPieceAnchor(robot.flangeNode, 0.001);
   }
   if (!ghost) {
     // ★ 残影走程序化模型（绝不 clone 官方 GLB 单 mesh，那会放大 1000 倍）
@@ -429,6 +447,46 @@ export function getTcp() {
   const t = r.getTcp();
   pushPose(qCurrent);
   return t;
+}
+
+// =====================================================================
+// ★★ 工件锚点（piece-anchor）：挂在 J6 末端工具的**吸盘口**上，供分拣 3D
+//    把"手上那块料"贴到吸盘上（2026-10-09 用户反馈："吸气的时候 3D 物体贴着
+//    机器人的 J6 那个工具的红色吸盘一起走，不要消失"）。
+//
+//    为什么不能挂在法兰中心：本工具从法兰沿 z 伸出 132mm、两个红色吸盘装在
+//    左右立板外侧（开口朝 ±x）—— 法兰中心那个位置**在腕部实体内部**，
+//    工件放那儿会被腕筒挡住，看起来就是"一吸气工件就消失"。
+//    锚点位置由 endEffector.suckerLocalMm() 给（与建模几何同源，改几何自动跟着走）。
+//
+//    ★ 单位坑：官方模型挂在 `root.scale = 0.001` 的链里，局部数值用 **mm**；
+//      程序化模型本身是**米**，局部数值必须 /1000。两边差别 1000 倍，写错就是灾难。
+// =====================================================================
+let eeAnchor = null;
+
+function attachPieceAnchor(node, localUnitPerMm) {
+  if (!node) return;
+  const [x, y, z] = suckerLocalMm(0);          // 吸盘口（不含料厚）
+  const a = new THREE.Object3D();
+  a.name = "piece-anchor";
+  a.position.set(x * localUnitPerMm, y * localUnitPerMm, z * localUnitPerMm);
+  node.add(a);
+  eeAnchor = a;
+}
+
+/**
+ * 吸盘口锚点的世界位置(mm, 场景系) + 世界朝向。
+ * 每帧由 renderFrame 喂给分拣 3D —— 料因此**贴着吸盘、随 J6 姿态一起走**。
+ * @returns {{x:number,y:number,z:number,q:[number,number,number,number]}|null}
+ */
+export function getPieceAnchor() {
+  if (!eeAnchor) return null;
+  eeAnchor.updateMatrixWorld(true);
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+  eeAnchor.matrixWorld.decompose(p, q, s);
+  return { x: p.x * 1000, y: p.y * 1000, z: p.z * 1000, q: [q.x, q.y, q.z, q.w] };
 }
 
 /** 切换活动视图：把 canvas 搬到该视图容器 + resize。场景与模型不动。 */
@@ -504,12 +562,14 @@ export function renderFrame() {
   if (ghost) ghost.step(dt);         // 残影预演：把自己的姿态"飘"到目标点位
   if (ghostB) ghostB.step(dt);        // 对比残影同理（平滑飘过去）
   controls.update();
-  if (lab) lab.updateVisibility(camera, dt);   // 智能剖切：挡视线的墙/天花板自动淡出
+  // 实验室已移除，无智能剖切
   updateSafety(now / 1000);
   if (sim) {
     const t = getTcp();                        // mm → 米，喂给模拟沙盒
     sim.tick({ x: t.x / 1000, y: t.y / 1000, z: t.z / 1000 });
   }
+  // 分拣：摄像头闪烁 + 手上方块**贴着吸盘**跟随末端（用吸盘口锚点，不是法兰中心）
+  if (sorting) sorting.step(dt, getTcp(), getPieceAnchor());
   renderer.render(scene, camera);
 }
 
@@ -538,6 +598,49 @@ export function showGhost(v) {
 }
 
 export function ghostVisible() { return !!(ghost && ghost.visible); }
+
+// ---------------------------------------------------------------------
+// 分拣 3D 可视化（方块/空槽/摄像头）—— 由分拣页驱动。
+// ★ 位置全部来自后端 FK（示教点位），**不是相机识别的实际位置**；
+//   坐标换算唯一入口见 three/sceneCoords.js（有 headless 对拍钉死）。
+// ---------------------------------------------------------------------
+/** 灌入槽位数据（来自 /api/sorting/blocks）。首次调用时按需建对象。 */
+export function setSortingSlots(payload) {
+  ensureScene();
+  if (!sorting) {
+    sorting = createSortingBlocks(baseLiftY());
+    scene.add(sorting.root);
+  }
+  sorting.setSlots(payload);
+  return sorting.info();
+}
+
+/** 按 /api/sorting/state 更新方块（幂等；同状态不重复改场景）。 */
+export function updateSortingState(state) {
+  if (!sorting) return;
+  sorting.update(state);
+}
+
+/**
+ * 井字棋棋盘覆盖：B 区按格子显隐方块、A 区按已取用隐藏料（方案 §6.3）。
+ * ★ 3D 未装填时空操作；传 null 清除覆盖（回到分拣显示）。
+ * @param {{board?:Array, used?:Array, holding?:boolean}|null} o
+ */
+export function setTttBoardState(o) {
+  if (!sorting) return;
+  sorting.setTtt(o);
+}
+
+/** 分拣可视化的显隐（离开分拣页就藏起来，避免在别的视图里"多出一堆方块"）。 */
+export function showSortingBlocks(v) {
+  if (sorting) sorting.setVisible(v);
+}
+
+/** 分拣可视化是否已建（供页面判断要不要先拉 /blocks）。 */
+export function sortingBlocksReady() { return !!sorting; }
+
+/** 分拣可视化自检信息（回归用）。 */
+export function sortingBlocksInfo() { return sorting ? sorting.info() : null; }
 
 // ---------------------------------------------------------------------
 // 关节高亮：悬停某个关节读数时，把 3D 里对应的关节段打上蓝色自发光。
@@ -659,6 +762,8 @@ function buildArticulatedOfficial(parts, dh, mounting) {
 
   const ee = buildEndEffector();
   tcpNode.add(ee.group);
+  // ★ 工件锚点：挂在与末端工具**同一个**法兰节点上（官方链局部数值用 mm）
+  attachPieceAnchor(tcpNode, 1);
 
   function applyJoints(qDeg) {
     for (let i = 0; i < joints.length; i++) {
@@ -874,7 +979,7 @@ export function disposeAll() {
   // 审计修复 P0-ui-3：撤掉切视图遗留的尺寸补救 rAF，避免单例置空后仍去渲染
   if (sizeFixRaf) { cancelAnimationFrame(sizeFixRaf); sizeFixRaf = 0; }
   // 1) 各子模块自清（从场景摘除自己的 group，并释放自有资源）
-  [sim, fence, ghost, ghostB, lab, cell].forEach((m) => {
+  [sim, fence, ghost, ghostB, cell, sorting].forEach((m) => {
     try { if (m && m.dispose) m.dispose(); } catch (e) { /* 忽略 */ }
   });
   // 2) 兜底清扫场景内残留的几何/材质/贴图
@@ -895,8 +1000,12 @@ export function disposeAll() {
   }
   // 4) 单例引用全部置空
   renderer = null; scene = null; camera = null; controls = null; envTex = null;
-  robot = null; official = null; fence = null; cell = null; lab = null;
+  robot = null; official = null; fence = null; cell = null;
   ghost = null; ghostB = null; sim = null; activeDh = null;
+  // ★ 工件锚点必须一起置空：它挂在被 dispose 的模型节点上，
+  //   不置空就会指向"已从场景摘掉的旧节点"—— 重挂后料会贴在旧位置上。
+  eeAnchor = null;
+  sorting = null;
   qReady = false; lastFrameMs = 0; lastSafetyKey = "";
   lastPixelRatio = 0;
   glState = "ok";

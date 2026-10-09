@@ -36,6 +36,7 @@ const pointView = read("src/components/PointExecView.vue");
 const progView = read("src/components/ProgramExecView.vue");
 const icons = read("src/components/Icon.vue");
 const robotApi = read("../backend/app/api/robot.py");
+const rcReady = read("../backend/app/services/rc_ready.py");
 const robotStore = read("src/stores/robot.js");
 const wsNet = read("src/net/ws.js");
 const readySvc = read("../backend/app/services/rc_ready.py");
@@ -97,6 +98,64 @@ ok("取消就绪永远可点（只要求持有控制令牌）",
 ok("取消就绪会一并伺服下电（cancelReady(true)）",
   card.includes("rc.cancelReady(true)"));
 
+// ★★ 2026-10-08 语义统一回归（用户："取消就绪伺服还是上电的状态"）：
+//   「取消就绪」曾有两个入口而行为不同 —— 就绪卡下电、底栏只停机 → 同名不同义，
+//   用户按下底栏那条后看到"伺服还是上电"。现统一为"停机 + 下电"，两条路径都必须下电，
+//   且不许再出现 cancelReady(false)（那会把伺服留在上电态）。
+const app = read("src/App.vue");
+ok("底栏「取消就绪」也走伺服下电（cancelReady(true)）", app.includes("rc.cancelReady(true)"));
+ok("全局不再存在 cancelReady(false)（避免同名不同义回归）",
+  !/cancelReady\(\s*false\s*\)/.test(app) && !/cancelReady\(\s*false\s*\)/.test(card));
+ok("底栏下电前有安全确认（手臂可能因重力下沉）",
+  /onCancelReady[\s\S]{0,400}window\.confirm/.test(app));
+// ── 清除报错（清控制器报警）：三页入口 + 只清报警不替就绪做上电/加载 ──
+const sortView = read("src/components/SortingView.vue");
+const execStore = read("src/stores/exec.js");
+const controlApi = read("../backend/app/api/control.py");
+const readySvcBackend = read("../backend/app/services/rc_ready.py");
+ok("exec store 有 clearError（清示教器报错）", /clearError\s*\(/.test(execStore));
+ok("exec.clearError 打 /control/clear-error", /\/control\/clear-error/.test(execStore));
+ok("点位/分拣页共用的就绪卡有「清除报错」按钮", card.includes("清除报错") && card.includes("exec.clearError()"));
+ok("程序执行页也挂了「清除报错」（它不用 RcReadyCard）",
+  progView.includes("清除报错") && progView.includes("exec.clearError()"));
+ok("后端 /control/clear-error 挂 require_control",
+  /def api_clear_error\(tok: str = Depends\(require_control\)\)/.test(controlApi));
+ok("后端 clear_alarm 只清报警（不写 LOAD/RUN，不替就绪做上电加载）",
+  /def _clear_alarm[\s\S]*?return/.test(readySvcBackend) &&
+  !/def _clear_alarm[\s\S]{0,3000}CMD_LOAD/.test(readySvcBackend));
+// ── 一键就绪后自动刷新点位 ──
+ok("store 就绪成功递增 readyTick（供各页自动刷新点位）",
+  /readyTick/.test(store) && /if \(d\.ok\) this\.readyTick \+= 1;/.test(store));
+ok("就绪卡 watch readyTick → 刷新点位", /watch\(\(\) => rc\.readyTick/.test(card) && card.includes("exec.loadPoints()"));
+ok("分拣页 watch readyTick → 刷新点位与 38 点体检",
+  /watch\(\(\) => rc\.readyTick/.test(sortView) && sortView.includes("loadCheck()"));
+ok("程序执行页 watch readyTick → 刷新点位/程序",
+  /watch\(\(\) => rc\.readyTick/.test(progView) && progView.includes("exec.loadPoints()"));
+// ── 伺服下电命令序列：必须 0x2000(Bit13 取消使能) → 0x0000，并回读校验 ──
+// ★ 2026-10-09：窗口从 400 放宽到 2000 —— 两步之间**本来就该有等待与注释**
+//   （"等状态位落下再全清"，见 backend/tests/test_ready_servo_timing.py 的 7 条时序回归）。
+//   这里只该验证**先后顺序**，不该限制两步之间能写多少行代码。
+//   ⚠ 更强的判据在 pytest 那边（"状态位落下前不得出现 0x0000"），这里只做静态兜底。
+ok("后端伺服下电顺序正确：先 0x2000 取消使能 → 再 0x0000 全清",
+  (() => {
+    const m = /if servo_off:[\s\S]{0,1200}?CMD_DISABLE[\s\S]{0,2000}?CMD_ZERO/.exec(readySvcBackend);
+    return !!m;
+  })());
+ok("后端伺服下电有回读校验（状态位没落必须报失败）",
+  /servo_down/.test(readySvcBackend) && /伺服状态位/.test(readySvcBackend));
+ok("modbus 定义了 CMD_DISABLE = 0x2000", /CMD_DISABLE\s*=\s*0x2000/.test(read("../backend/app/services/modbus.py")));
+// ── 分拣：只在真到 C 区才判色（空跑/双闸未开不许因"检测不到"停） ──
+const sortApi = read("../backend/app/api/sorting.py");
+ok("分拣判色有前置条件（judge = 非空跑 且 双闸已开）",
+  /judge = \(not dry\) and real/.test(sortApi));
+ok("分拣空跑不判色、不因检测不到停（跳过 _capture）",
+  /if not judge:/.test(sortApi) && sortApi.includes("空跑·未判色"));
+ok("分拣真实下发前校验确实到达 C 检测点",
+  /_camera_deviation/.test(sortApi) && sortApi.includes("CAM_ARRIVE_TOL_DEG"));
+ok("MonitorLayout 日志面板已纳入分拣视图（sort）",
+  read("src/components/MonitorLayout.vue").includes("props.view === 'sort'"));
+ok("分拣页写运行日志（exec.logLine）", /\[分拣\]/.test(sortView) && /exec\.logLine\(/.test(sortView));
+
 // 卡片语义：实测档位反转 —— AUTO/远程可动，T1/T2 拒绝
 ok("store 语义反转：仅 auto/remote 可点动",
   /m === "auto" \|\| m === "remote"/.test(store));
@@ -119,6 +178,35 @@ ok("后端就绪判定 ready（伺服+程序+运行+自动/远程+无报警+非�
   robotApi.includes('snap["ready"]'));
 ok("后端 /ready 挂 require_control 门控",
   /def ready\(.*Depends\(require_control\)/s.test(robotApi));
+
+// ---------- F. 按钮该显示「一键就绪」还是「取消就绪」（2026-10-09 修） ----------
+// 用户口径：**伺服上电就该显示「取消就绪」；没上电才需要「一键就绪」**。
+// 旧判据用 `rc.ready`（= 伺服 AND 程序已加载 AND 运行位 AND AUTO AND 无报警），
+// 于是出现现场那个怪现象：伺服明明上着电，但只要程序没加载/没运行，
+// `ready=false` → 按钮仍写「一键就绪」→ 操作员不知道该点哪个。
+ok("★ 后端额外给出 servo_on（只看伺服位，不受程序/运行位影响）",
+  robotApi.includes('snap["servo_on"]')
+  && /servo_on.*b\["servo"\]/s.test(robotApi));
+ok("★ 前端 store 暴露 servoOn，且**后端没给时返回 null**（不是 false —— 那会让按钮永远显示一键就绪）",
+  /servoOn:\s*\(s\)\s*=>\s*\{/.test(store) && /return\s+\(typeof v === "boolean"\)\s*\?\s*v\s*:\s*null/.test(store));
+ok("★ 按钮动作跟 servoOn 走（旧后端回落 ready）",
+  /const byServo = rc\.servoOn/.test(card)
+  && /typeof byServo === "boolean" \? byServo : rc\.ready/.test(card));
+ok("「取消就绪」仍然任何情况下都可点（安全动作不能被禁用）",
+  /if \(readyAction\.value === "cancel"\) return !auth\.controlActive/.test(card));
+
+// ---------- G. 被点动占用时：主动下电，而不是干等 ----------
+// 用户口径：「有点动/下发正在执行，已推迟一键就绪 …… 如果再触发这个条件**直接下电伺服**，
+// 等待一键就绪吧」
+ok("★ 就绪被占用时走「等收尾 → 取消就绪（含下电）」的补救路径",
+  /_defer_then_servo_off/.test(rcReady)
+  && /_cancel\(servo_off=True\)/.test(rcReady));
+ok("★ 而且必须**带超时地等锁**（不能抢写指令字 —— 那正是要避免的半截状态）",
+  /_exec_lock\.acquire\(timeout=/.test(rcReady));
+ok("超时未拿到锁时如实回报（不假装已下电）",
+  /仍未释放/.test(rcReady));
+ok("补救失败/超时的返回里 ok=False（本次确实没完成一键就绪）",
+  /def _defer_then_servo_off[\s\S]{0,900}?"ok": False/.test(rcReady));
 
 console.log("");
 console.log("结果: " + pass + " 通过 / " + fail + " 失败");

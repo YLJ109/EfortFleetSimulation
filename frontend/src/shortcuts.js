@@ -22,7 +22,7 @@ export const SHORTCUT_GROUPS = ["导航", "视图", "执行", "安全"];
 /**
  * 快捷键清单（唯一事实来源：解析表 + 「关于」页的说明都读它）。
  *   id     —— 动作标识，App.vue 按它分派
- *   keys   —— 触发键（KeyboardEvent.key 的小写形式；数字键用 1~8，范围见 TAB_KEY_COUNT）
+ *   keys   —— 触发键（KeyboardEvent.key 的小写形式；数字键用 1~9，范围见 TAB_KEY_COUNT）
  *   label  —— 界面上显示的键帽文字
  *   group  —— 分组
  *   desc   —— 一句话说明
@@ -67,7 +67,7 @@ export const SHORTCUTS = [
 export const SHORTCUT_BY_ID = Object.fromEntries(SHORTCUTS.map((s) => [s.id, s]));
 
 /** 数值键位数（= 最大可直达模块数）。 */
-export const TAB_KEY_COUNT = 8;
+export const TAB_KEY_COUNT = 9;
 
 const IGNORE_TAGS = { INPUT: 1, TEXTAREA: 1, SELECT: 1, OPTION: 1 };
 

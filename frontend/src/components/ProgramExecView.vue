@@ -201,6 +201,12 @@ onMounted(() => {
 watch(() => auth.controlActive, (v) => {
   if (v) { exec.loadFiles(); exec.refreshState(); }
 });
+
+// ★ 一键就绪成功 → 自动刷新点位与程序清单（用户需求："一键就绪后点位自动刷新"）。
+//   程序页没有 RcReadyCard，所以在这里单独挂一份。
+watch(() => rc.readyTick, (n) => {
+  if (n > 0) { exec.loadPoints(); exec.loadPrograms(); }
+});
 </script>
 
 <template>
@@ -222,6 +228,14 @@ watch(() => auth.controlActive, (v) => {
         <div class="rb-sub">{{ isReady ? "可以执行代码" : readyText }}</div>
       </div>
       <Icon :name="isReady ? 'check' : 'alert'" :size="18" class="rb-ico" />
+    </div>
+
+    <!-- ★ 清除示教器（控制器）报错：只清报警，不替「一键就绪」做上电/加载 -->
+    <div class="btns" style="margin-top:8px">
+      <button class="clear-err" :disabled="!auth.controlActive || rc.busy" @click="exec.clearError()"
+              title="清掉示教器（控制器）报警；不含伺服上电/加载，清完需重新一键就绪">
+        <Icon name="eraser" :size="14" /> 清除报错
+      </button>
     </div>
 
     <!-- 运行状态 -->
@@ -524,7 +538,7 @@ watch(() => auth.controlActive, (v) => {
 
 <style scoped>
 /* 就绪提示盒：一屏一个结论，视觉像"状态横幅"而非表单卡片 */
-.ready-box { display: flex; align-items: center; gap: 11px; padding: 12px 14px;
+.ready-box { display: flex; align-items: center; gap: 10px; padding: 10px;
   border-radius: 10px; border: 1px solid var(--warn-line);
   background: linear-gradient(160deg, var(--warn-soft), transparent 70%); }
 .ready-box.ok { border-color: var(--ok-line);
@@ -544,4 +558,12 @@ watch(() => auth.controlActive, (v) => {
 .seq-add { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px; margin-top: 8px; }
 .seq-add > button { justify-content: center; min-width: 0; white-space: nowrap; }
+/* ★ 清除报错：中性警示色，与一键就绪(绿)/取消(红)区分 */
+.clear-err {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  font-weight: 700; letter-spacing: .3px;
+  background: var(--warn, #d48806); border-color: var(--warn, #d48806); color: #fff;
+}
+.clear-err:hover:not(:disabled) { filter: brightness(1.08); }
+.clear-err:disabled { opacity: .5; cursor: not-allowed; }
 </style>

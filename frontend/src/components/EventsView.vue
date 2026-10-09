@@ -456,8 +456,8 @@ watch(() => filt.q, () => {
 </template>
 
 <style scoped>
-.ops { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 14px;
-  display: flex; flex-direction: column; gap: 12px; background: var(--bg); align-items: center; }
+.ops { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 10px;
+  display: flex; flex-direction: column; gap: 10px; background: var(--bg); align-items: center; }
 /* ★ 需求：运维审计页内容宽度 1200px 并水平居中 */
 .ops > * { width: 100%; max-width: 1200px; }
 .ops-sec { display: flex; flex-direction: column; gap: 10px; }
@@ -477,7 +477,7 @@ watch(() => filt.q, () => {
 
 .ops-cards { display: grid; gap: 10px;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-.card.kv { display: flex; align-items: center; gap: 9px; padding: 10px 12px; }
+.card.kv { display: flex; align-items: center; gap: 9px; padding: 10px; }
 .card.kv svg { color: var(--accent); flex: none; }
 .card.kv div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .card.kv b { font-size: 11px; color: var(--muted); font-weight: 500; }
@@ -486,7 +486,7 @@ watch(() => filt.q, () => {
 .card.kv span.ok { color: var(--ok); }
 .card.kv span.err { color: var(--err); }
 
-.ops-split { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+.ops-split { display: grid; gap: 10px; grid-template-columns: 1fr 1fr; }
 .ops-split h3 { font-size: 13px; color: var(--accent); margin: 0 0 8px; }
 .ops-msg { display: flex; align-items: center; gap: 6px; font-size: 12px;
   color: var(--ok); margin: 8px 0 0; }
@@ -507,7 +507,7 @@ watch(() => filt.q, () => {
 .ops-chip.warn { color: var(--warn); border-color: var(--warn-line); }
 .ops-live { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
 .ops-live input { accent-color: var(--accent); }
-.ops-btn { flex: none; width: auto; padding: 6px 11px; display: flex; align-items: center; gap: 5px;
+.ops-btn { flex: none; width: auto; padding: 6px 10px; display: flex; align-items: center; gap: 5px;
   font-size: 12px; }
 .ops-btn.danger { color: var(--err); }
 .ops-btn.danger:hover { border-color: var(--err); }
@@ -520,7 +520,7 @@ watch(() => filt.q, () => {
 
 .ops-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px;
   border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--panel); }
-.ops-empty { text-align: center; color: var(--muted); font-size: 12px; padding: 20px 0; }
+.ops-empty { text-align: center; color: var(--muted); font-size: 12px; padding: 10px 0; }
 .ops-item { display: grid; grid-template-columns: 84px 52px 48px 1fr auto 26px;
   align-items: center; gap: 8px; font-size: 12px; padding: 5px 8px;
   border: 1px solid transparent; border-radius: 6px; }

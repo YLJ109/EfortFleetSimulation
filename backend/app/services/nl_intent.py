@@ -30,7 +30,7 @@ COLOR_ORDER = ("红", "绿", "蓝")
 CN_NUM = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
 
-INTENTS = ("look_color", "move_one", "move_all", "sorting", "estop")
+INTENTS = ("look_color", "move_one", "move_all", "move_quota", "sorting", "estop")
 
 # 不支持/需要拒绝的模糊词（速度只认右上角那一份）
 VAGUE_SPEED = ("快一点", "快点", "慢一点", "慢点", "加速", "减速", "全速", "高速", "低速")
@@ -89,6 +89,33 @@ _COLORCOL_RE = re.compile(r"(红|绿|蓝)\s*色?\s*列")
 _COLORCOL_NTH_RE = re.compile(r"(红|绿|蓝)\s*色?\s*列[^\d一二两三四五六七八九十]{0,4}第?\s*([0-9一二两三四五六七八九十]+)\s*(?:个|块|格)")
 _SLOT_RE = re.compile(r"([ABab])\s*([1-9])")
 _PLAIN_COL_RE = re.compile(r"第\s*([0-9一二两三四五六七八九十]+)\s*列")
+
+# ★★ 2026-10-09 新增（用户口径："**全部要学会解析**，如果没有检测到放回原位"）：
+#   支持"按颜色配额"的说法，例如
+#     "A区的3个红色，2个蓝色，1个绿色搬到B区"
+#     "把A区3个红色搬到B区" / "拿两个绿色和1个蓝色到B区"
+#   ⚠ 这类指令**不能**在解析阶段就承诺结果：A 区每件是什么颜色**事先未知**
+#     （相机只对着 C 区），必须逐件取到 C 区看了才知道。
+#     所以执行侧是"试到配额满足为止，不要的件**放回原位**"。
+#     「3个红色」里的数字允许阿拉伯与中文。
+_QUOTA_RE = re.compile(
+    r"([0-9]+|[一二两三四五六七八九十]+)\s*(?:个|块|件|颗|枚)?\s*(红|绿|蓝)\s*色?")
+
+
+def _parse_quotas(text: str) -> Dict[str, int]:
+    """解析"3个红色，2个蓝色，1个绿色"这类**按颜色配额**的说法。
+
+    @returns {颜色: 件数}；没解析到就返回 {}（调用方据此走普通搬运逻辑）。
+    ★ 同一颜色说两次会**累加**（"2个红色…再加1个红色" → 3）。
+    """
+    out: Dict[str, int] = {}
+    for m in _QUOTA_RE.finditer(text or ""):
+        n = _cn2int(m.group(1))
+        c = m.group(2)
+        if n is None or n <= 0:
+            continue
+        out[c] = out.get(c, 0) + int(n)
+    return out
 
 
 def _find_zone(text: str, default: str = "A") -> str:
@@ -218,12 +245,39 @@ def parse(text: str) -> Dict:
         out["error"] = src.get("reason", "没看懂要看哪一格的颜色")
         return out
 
-    # ---- 搬运（单件 / 批量）----
+    # ---- 搬运（单件 / 批量 / 按颜色配额）----
     _SEP = r"放到|搬到|放在|摆到|摆放到|摆放回|摆回|挪到|移到|放回|取回|扔到|丢到"
     if re.search(_SEP, raw):
         # 用连接词把"源"和"目标"切开
         parts = re.split(_SEP, raw, maxsplit=1)
         src_txt, dst_txt = (parts + [""])[0], (parts + [""])[1]
+
+        # ★★ 2026-10-09 优先识别"**按颜色配额**"（用户口径："全部要学会解析"）：
+        #   "A区的3个红色，2个蓝色，1个绿色搬到B区" / "把A区3个红色搬到B区"
+        #   ⚠ 必须在普通搬运之前判：否则"soc 3个红色"会被当成"槽位解析失败"。
+        #   ⚠ 这是**有条件的**任务 —— A 区颜色事先未知，执行时逐件判色、
+        #      不要的件放回原位（所以不带 shuffle，语义务实）。
+        quotas = _parse_quotas(src_txt or raw)
+        if quotas:
+            dst_q = _parse_slot_phrase(dst_txt, default_zone="B")
+            if dst_q["kind"] == "unknown":
+                out["error"] = "没看懂要放到哪里：" + dst_q.get("reason", "")
+                return out
+            if dst_q["kind"] == "slot":
+                out["error"] = ("按颜色配额搬运要放到**颜色列**（例如「搬到B区」或「搬到B区红列」）——"
+                                "件是什么颜色要判色后才知道，没法指定某一个具体格")
+                return out
+            out.update(ok=True, intent="move_quota",
+                       plan={"action": "move_quota",
+                             "from": {"kind": "all", "zone": "A"},
+                             "to": dst_q, "quotas": quotas})
+            out["warnings"].append(
+                "按颜色配额取件：A 区颜色**事先未知**，会逐件送到 C 区判色；"
+                "不需要的件**放回原位**。若 A 区该颜色不够，会试到没有可取件为止。")
+            out["warnings"].append(
+                "合计 %d 件；每件都要走一趟「取→判色→放」" % sum(quotas.values()))
+            return out
+
         src = _parse_slot_phrase(src_txt, default_zone="A")
         dst = _parse_slot_phrase(dst_txt, default_zone="B")
         if src["kind"] == "unknown":

@@ -34,11 +34,14 @@ const auth = useAuthStore();
 const viewEl = ref(null);
 const dragging = ref(false);
 
-// 底部日志面板：程序执行 / 真实监控 / 点位执行 且有日志时显示（统一到左下角浮动）
-// ★ 需求：运行日志从右侧栏移到左下角 —— 这三个"会产日志"的视图共用同一块浮动面板，
+// 底部日志面板：程序执行 / 真实监控 / 点位执行 / 分拣 且有日志时显示（统一到左下角浮动）
+// ★ 需求：运行日志从右侧栏移到左下角 —— 这些"会产日志"的视图共用同一块浮动面板，
 //   右侧栏不再出现"运行日志"卡片（见 ProgramExecView）。
+// ★ 2026-10-08：分拣（sort）也纳入 —— 分拣页此前完全没有运行日志入口。
 const showBottomLog = computed(() =>
-  (props.view === 'program' || props.view === 'live' || props.view === 'point') && exec.log.length > 0
+  (props.view === 'program' || props.view === 'live'
+   || props.view === 'point' || props.view === 'sort'
+   || props.view === 'ai') && exec.log.length > 0
 );
 const bottomLogCollapsed = ref(false);
 
@@ -246,7 +249,7 @@ function onGripUp() {
 </template>
 
 <style scoped>
-/* 底部浮动日志面板 */
+/* 底部浮动日志面板 — Sentinel 风格：顶部青色发光线 + 毛玻璃 */
 .bottom-log-panel {
   position: fixed;
   left: 12px;
@@ -254,17 +257,28 @@ function onGripUp() {
   width: 420px;
   max-width: calc(100vw - 24px);
   max-height: min(320px, calc(100vh - 200px));
-  background: var(--glass-solid);
+  background: linear-gradient(180deg, rgba(12,19,32,0.96), rgba(8,14,25,0.92));
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   box-shadow: var(--shadow-hud);
-  backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
   z-index: 25;           /* 低于 CameraPanel(30)、关节HUD(10)、状态片(14) */
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: blp-slide-up .18s ease;
+  animation: blp-slide-up .2s cubic-bezier(.2,.9,.3,1);
+  isolation: isolate;
+}
+/* 顶部青色发光线 */
+.bottom-log-panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 8%; right: 8%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent-line), transparent);
+  pointer-events: none;
+  z-index: 1;
 }
 @keyframes blp-slide-up {
   from { opacity: 0; transform: translateY(20px); }
@@ -274,7 +288,7 @@ function onGripUp() {
 
 .blp-head {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 8px 12px;
+  padding: 8px 10px;
   font-size: 12px; font-weight: 600; color: var(--txt);
   border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, var(--veil), transparent);

@@ -43,6 +43,8 @@ const ICONS = {
   drag: '<path d="M9 4l-2 2 2 2M15 4l2 2-2 2M9 14l-2 2 2 2M15 14l2 2-2 2"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L5 16v4z"/><path d="M14 6l4 4"/>',
   trash: '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13M10 11v6M14 11v6"/>',
+  // 清除报错（清控制器报警）：橡皮擦 —— 与"删除"用不同的图形，避免误读成删数据
+  eraser: '<path d="M4.4 14.6l7.2-7.2a2 2 0 0 1 2.8 0l4.6 4.6a2 2 0 0 1 0 2.8L14.4 19.4H8.2z"/><path d="M9.8 9.2l6.6 6.6"/><path d="M4.4 19.4h15.2"/>',
 
   // ---- 阶段 3/4：运维审计页 ----
   server: '<rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/>',
@@ -76,6 +78,8 @@ const ICONS = {
   note: '<path d="M5 3h14v18H5z"/><path d="M8 8h8M8 12h8M8 16h5"/>',
   flask: '<path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3"/><path d="M7.5 15h9"/>',
   home: '<path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/>',
+  // 井字棋（3×3 棋盘格）
+  grid: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/>',
 
   // ---- 品牌标识：机器人头（顶部栏 logo 用，也用于"机器人"语义） ----
   robot: '<path d="M12 3.4v2.4"/><circle cx="12" cy="2.3" r="1.1" fill="currentColor" stroke="none"/><path d="M2.6 10.6v3M21.4 10.6v3"/><rect x="4" y="5.8" width="16" height="11.2" rx="3.2"/><circle cx="9" cy="10.8" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="10.8" r="1.3" fill="currentColor" stroke="none"/><path d="M9.6 14.1h4.8"/>',
@@ -84,6 +88,7 @@ const ICONS = {
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 10.6v6"/><circle cx="12" cy="7.6" r="1.05" fill="currentColor" stroke="none"/>',
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.2 9.3a2.9 2.9 0 0 1 5.6 1c0 1.9-2.8 2.3-2.8 4"/><circle cx="12" cy="17.4" r="1.05" fill="currentColor" stroke="none"/>',
   keyboard: '<rect x="2" y="6" width="20" height="12" rx="2.2"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01M7.5 13.6h9"/>',
+  gamepad: '<path d="M7 8h10a5 5 0 0 1 4.9 4l.6 4.2a2.6 2.6 0 0 1-4.6 2.1l-1-1.3H7l-1 1.3a2.6 2.6 0 0 1-4.6-2.1L2.1 12A5 5 0 0 1 7 8z"/><path d="M7.3 11v3M5.8 12.5h3"/><circle cx="15.4" cy="11.3" r="1" fill="currentColor" stroke="none"/><circle cx="17.6" cy="13.3" r="1" fill="currentColor" stroke="none"/>',
   externalLink: '<path d="M13 4h7v7"/><path d="M20 4l-8.5 8.5"/><path d="M18 14v5a1.8 1.8 0 0 1-1.8 1.8H5A1.8 1.8 0 0 1 3.2 19V7.8A1.8 1.8 0 0 1 5 6h5"/>',
 };
 

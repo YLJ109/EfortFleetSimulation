@@ -94,11 +94,13 @@ ok(!NONE.isAdmin && !NONE.controlActive, "C4 快照自检：无令牌 controlAct
 // ---------------------------------------------------------------------
 section("D. 操作员令牌：执行页与系统设置出现，运维审计仍隐藏");
 // ---------------------------------------------------------------------
-eq(keys(OP), ["live", "sim", "point", "program", "sort", "settings", "about"],
-   "D1 操作员可见 = 只读页 + 点位执行 + 程序执行 + 分拣 + 系统设置 + 关于");
+eq(keys(OP), ["live", "sim", "point", "program", "sort", "ai", "settings", "about"],
+   "D1 操作员可见 = 只读页 + 点位执行 + 程序执行 + 分拣 + AI 执行 + 系统设置 + 关于");
 ok(keys(OP).includes("point") && keys(OP).includes("program"), "D2 拿到控制权限后执行页出现（不需要刷新）");
 ok(keys(OP).includes("settings"), "D2b 系统设置对操作员可见（可改非管理员项，管理员项由后端逐字段拦）");
 ok(keys(OP).includes("sort"), "D2c 分拣页对操作员可见（会下发运动，必须持控制令牌）");
+ok(keys(OP).includes("ai"),
+   "D2d AI 执行页对操作员可见（会下发运动，但 AI 不是权限后门：仍需令牌）");
 ok(!keys(OP).includes("ops"), "D3 运维审计对操作员隐藏（需管理员）");
 ok(OP.controlActive && !OP.isAdmin, "D4 快照自检：操作员有令牌但不是 admin");
 

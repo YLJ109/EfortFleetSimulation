@@ -146,11 +146,111 @@ def all_full(placement: Dict,
 
 
 # ---------------------------------------------------------------- 判色投票
+def fresh_run_state(dry_run: bool, max_pieces: int, judge: bool) -> Dict:
+    """**一轮全新运行**的初始状态（每次「开始」都必须用它重建）。
+
+    ★ 用户口径（2026-10-08）："每次运行必须从头开始"。
+      —— 不是"接着上次跑"：进度、占位表、判色、停止原因、夹持/疑似标记**全部清零**，
+         并且引擎从 A1 第一格重新开始（见 api/sorting.py 的执行循环）。
+    ★ 为什么单列成函数：它同时是"开始"接口的**契约**，能被单元测试直接钉住 ——
+      以前这段字典写在接口里，只有整条 HTTP 链路才能测，容易悄悄长出一个残留字段。
+    """
+    return {
+        "dry_run": bool(dry_run),
+        "piece": 0,                 # 第几件（0 = 还没开始）
+        "total": int(max_pieces),
+        "stage": "准备",
+        "color": "", "conf": 0.0, "target": "",
+        # ★ 2026-10-09：抓帧明细（每帧颜色/置信度/是否有效）与"置信度最高的那一帧"下标。
+        #   每轮都清零 —— 否则新一轮开头会显示上一轮抓到的颜色（"每次运行从头开始"口径）。
+        "frame_detail": [], "best_frame": None,
+        "votes": {},
+        "placement": placement_summary(new_placement()),   # B 区三列全空
+        "error": "", "finished": False, "ok": None,
+        "judge": bool(judge),        # 本轮是否会真的判色（空跑/双闸未开 = False）
+        "sim_color": False,
+        # 3D 可视化用（按流程推断，非真空传感器实测）
+        "holding": False, "suspect_pick": False,
+    }
+
+
+def frame_color(f: Dict, min_conf: float = 0.0) -> Dict:
+    """从**一帧** `/vision/detect` 的返回里取出"这一帧看到什么颜色"（归一化）。
+
+    ★★ 2026-10-08 P0 修复（现场报"已停止：检测不到（无有效判定（全部未知或置信度低于 0.28））"）：
+      `/vision/detect` 的真实返回是
+        {"ok":true, "results":[{"area":.., "color":{"name":"红","conf":0.99,"reason":""}}], "tracker":{...}}
+      —— 颜色**嵌在 `results[i].color` 里**；而 `vote_color` 原先读的是**顶层** `name/conf`，
+      永远读不到 → 每一帧都被判成"未知" → **必然**报"检测不到"。
+      更糟的是：`results:[]`（画面里没东西）与"读法写错"产生**同一条**文案，
+      现场根本无法区分 —— 这就是那句提示一直误导人的原因。
+      ★ 22 条分拣单元测试全绿也掩盖了它：用例喂的是**自己造的扁平结构** `{"name":"红","conf":.9}`，
+        与真实接口对不上。回归夹具已改为**真实抓取**：`tests/data/vision_detect_frame.json`。
+
+    本函数是唯一的读法：**两种形状都接受**（真实形状优先），并选出"这一帧的那一个目标"
+    （与实时画面同一口径：先看"名次有效且过 min_conf"，再比面积）。
+    返回 {"name","conf","reason","area"}；判不出时 reason 一定非空（供上层如实回报原因）。
+    """
+    if not isinstance(f, dict):
+        return {"name": "", "conf": 0.0, "reason": "无返回", "area": 0.0}
+    if f.get("ok") is False:
+        return {"name": "", "conf": 0.0,
+                "reason": str(f.get("error") or "视觉服务返回失败"), "area": 0.0}
+
+    results = f.get("results")
+    if isinstance(results, list):
+        if not results:
+            # 画面里没有候选：与"读法写错"区分开，明确说明是"没看到东西"
+            return {"name": "", "conf": 0.0,
+                    "reason": "画面里没有候选（未检测到红/绿/蓝矩形：可能太小、太斜或被挡住）",
+                    "area": 0.0}
+
+        def _rank(r):
+            c = (r.get("color") or {}) if isinstance(r, dict) else {}
+            n = str(c.get("name") or "").strip()
+            try:
+                cf = float(c.get("conf") or 0.0)
+            except (TypeError, ValueError):
+                cf = 0.0
+            ok = 1 if (n in COLORS and cf >= float(min_conf)) else 0
+            try:
+                ar = float((r or {}).get("area") or 0.0)
+            except (TypeError, ValueError):
+                ar = 0.0
+            return (ok, ar, cf)
+
+        best = max([r for r in results if isinstance(r, dict)], key=_rank, default=None)
+        if best is None:
+            return {"name": "", "conf": 0.0, "reason": "候选结构异常", "area": 0.0}
+        c = best.get("color") or {}
+        n = str(c.get("name") or "").strip()
+        try:
+            cf = float(c.get("conf") or 0.0)
+        except (TypeError, ValueError):
+            cf = 0.0
+        try:
+            ar = float(best.get("area") or 0.0)
+        except (TypeError, ValueError):
+            ar = 0.0
+        return {"name": n, "conf": cf, "reason": str(c.get("reason") or "").strip(),
+                "area": ar}
+
+    # ---- 扁平形状（旧调用方/单元测试直接喂 {"name","conf"}）----
+    n = str(f.get("name") or "").strip()
+    try:
+        cf = float(f.get("conf") or 0.0)
+    except (TypeError, ValueError):
+        cf = 0.0
+    return {"name": n, "conf": cf, "reason": str(f.get("reason") or "").strip(),
+            "area": 0.0}
+
+
 def vote_color(frames: Sequence[Dict], min_conf: float = 0.3,
                accept_ratio: float = 0.5) -> Dict:
     """多帧判定 → 采信结论。
 
-    frames: 每次 `GET /vision/detect` 的返回（含 name / conf）
+    frames: 每次 `GET /vision/detect` 的**原始返回**（颜色在 results[i].color 里；
+            也兼容 {"name","conf"} 扁平结构 —— 见 `frame_color`）。
     规则（现场口径："检测不到就直接停"，所以宁可判不出也不硬猜）：
       1) 逐帧过滤：name 属于 红/绿/蓝 且 conf ≥ min_conf 才算"有效帧"；
       2) 取有效帧里出现次数最多的颜色为结论；
@@ -161,42 +261,63 @@ def vote_color(frames: Sequence[Dict], min_conf: float = 0.3,
     """
     names: List[str] = []
     confs: List[float] = []
+    # ★ 逐帧的"未判定原因"（服务端给什么就记什么：非矩形 / 太小 / 非红绿蓝三色 / 低置信…）
+    #   用途：判不出时把**真原因**写进停止文案 —— 过去只有"无有效判定（全部未知…）"，
+    #   现场看不出到底是"太小"还是"太斜"还是"颜色不对"，只能瞎调旋钮。
+    why: List[str] = []
+    # ★ 2026-10-09 新增（用户口径："捕捉3张，只显示一张置信度最高的"）：
+    #   逐帧明细，供界面把抓到的 3 帧**如实**列出来并突出置信度最高的那张。
+    #   以前 votes 只有"每色几票"，现场看不到"这 3 帧各自看到什么" ——
+    #   判不出时无法判断是"三帧都低"还是"两帧对一帧错"。
+    detail_frames: List[Dict] = []
     for f in (frames or []):
         if not isinstance(f, dict):
+            why.append("无返回（相机服务未响应/未开启）")
+            detail_frames.append({"color": "", "conf": 0.0, "ok": False,
+                                  "reason": "无返回（相机服务未响应/未开启）"})
             continue
-        n = str(f.get("name") or "").strip()
-        try:
-            c = float(f.get("conf") or 0.0)
-        except (TypeError, ValueError):
-            c = 0.0
-        if n in COLORS and c >= float(min_conf):
-            names.append(n)
-            confs.append(c)
+        got = frame_color(f, min_conf)
+        valid = got["name"] in COLORS and got["conf"] >= float(min_conf)
+        detail_frames.append({"color": got["name"] if got["name"] in COLORS else "",
+                              "conf": round(float(got["conf"]), 3),
+                              "ok": bool(valid),
+                              "reason": "" if valid else (got["reason"] or "")})
+        if valid:
+            names.append(got["name"])
+            confs.append(got["conf"])
+        else:
+            why.append(got["reason"] or ("未知（置信度 %.2f 低于阈值 %.2f）"
+                                         % (got["conf"], float(min_conf))))
 
     total = len(frames or [])
     votes = {c: names.count(c) for c in COLORS}
     if not names:
+        detail = "；".join(dict.fromkeys(why)) if why else "全部未知或置信度低于 %.2f" % min_conf
         return {"ok": False, "color": COLOR_UNKNOWN, "conf": 0.0, "votes": votes,
-                "valid": 0, "frames": total,
-                "reason": "无有效判定（全部未知或置信度低于 %.2f）" % min_conf}
+                "valid": 0, "frames": total, "frame_detail": detail_frames,
+                "reason": "无有效判定（%s）" % detail}
 
     top = max(votes.values())
     winners = [c for c in COLORS if votes[c] == top]
     need = max(1, int(round(total * float(accept_ratio) + 1e-9)))
     if len(winners) > 1:
         return {"ok": False, "color": COLOR_UNKNOWN, "conf": 0.0, "votes": votes,
-                "valid": len(names), "frames": total,
+                "valid": len(names), "frames": total, "frame_detail": detail_frames,
                 "reason": "多帧结论不一致（%s）" % " / ".join(
                     "%s %d 票" % (c, votes[c]) for c in COLORS)}
     if top < need:
         return {"ok": False, "color": COLOR_UNKNOWN, "conf": 0.0, "votes": votes,
-                "valid": len(names), "frames": total,
+                "valid": len(names), "frames": total, "frame_detail": detail_frames,
                 "reason": "有效帧不足（%d/%d 帧命中，需 ≥%d）" % (top, total, need)}
 
     color = winners[0]
     hit = [confs[i] for i in range(len(names)) if names[i] == color]
+    # ★ best = 命中帧里置信度最高的那一张（用户口径："只显示一张置信度最高的"）
+    best = max((i for i in range(len(names)) if names[i] == color),
+               key=lambda i: confs[i])
     return {"ok": True, "color": color, "conf": round(sum(hit) / len(hit), 3),
-            "votes": votes, "valid": len(names), "frames": total, "reason": ""}
+            "votes": votes, "valid": len(names), "frames": total, "reason": "",
+            "best_frame": int(best), "frame_detail": detail_frames}
 
 
 # ---------------------------------------------------------------- 流程编排（纯函数）

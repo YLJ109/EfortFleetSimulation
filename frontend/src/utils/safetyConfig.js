@@ -23,7 +23,7 @@ export function defaultSafety() {
         center: { x: 0, z: 0 }, half: { x: 0.82, z: 0.82 }, radius: 0.9,
         corners: [[-0.82, -0.82], [0.82, -0.82], [0.82, 0.82], [-0.82, 0.82]],
         height: 1.2, walls: true,
-        posts: { enabled: true, size: 0.1, color: "#f2c500" },
+        posts: { enabled: true, size: 0.1, color: "#2fd6f0" },
         thresholds: { basis: "halfwidth", warn: 0.3, danger: 0.1, fixed_mm: 300 },
         colors: { safe: "#2ecc71", warn: "#f2c500", danger: "#e5484d", hit: "#ff2020" },
         opacity: { safe: 0.11, warn: 0.2, danger: 0.3, hit: 0.45 },

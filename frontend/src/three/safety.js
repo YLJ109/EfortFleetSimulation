@@ -502,14 +502,18 @@ export class SafetyFence {
     if (p.enabled !== false) {
       const s = num(p.size, 0.1);
       postMat = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(p.color || "#f2c500"),
-        metalness: 0.35, roughness: 0.38,
+        color: new THREE.Color(p.color || "#2fd6f0"),
+        metalness: 0.4, roughness: 0.35,
+        emissive: new THREE.Color("#2fd6f0"),
+        emissiveIntensity: 0.12,
+        transparent: true,
+        opacity: 0.8,
       });
-      const baseMat = new THREE.MeshStandardMaterial({ color: 0x33383f, metalness: 0.55, roughness: 0.45 });
-      const darkMat = new THREE.MeshStandardMaterial({ color: 0x22262b, metalness: 0.3, roughness: 0.62 });
-      const capMat = new THREE.MeshStandardMaterial({ color: 0x9aa2ac, metalness: 0.7, roughness: 0.3 });
+      const baseMat = new THREE.MeshStandardMaterial({ color: 0x1a2a3a, metalness: 0.55, roughness: 0.45 });
+      const darkMat = new THREE.MeshStandardMaterial({ color: 0x0d1520, metalness: 0.3, roughness: 0.62 });
+      const capMat = new THREE.MeshStandardMaterial({ color: 0x3a5a7a, metalness: 0.7, roughness: 0.3 });
       const refMat = new THREE.MeshStandardMaterial({
-        color: 0xe8edf3, emissive: 0xb9c6d6, emissiveIntensity: 0.35,
+        color: 0xe8f0fc, emissive: 0x2fd6f0, emissiveIntensity: 0.25,
         metalness: 0.2, roughness: 0.35,
       });
       postMats = [postMat, baseMat, darkMat, capMat, refMat];

@@ -72,6 +72,14 @@ def rc_status():
     b = snap["bits"]
     snap["ready"] = bool(b["servo"] and b["prog_loaded"] and b["run"]
                          and (b["auto"] or b["remote"]) and not b["alarm"] and not b["estop"])
+    # ★★ 2026-10-09 新增：**伺服是否上电**（只看伺服位）。
+    #   为什么单列一个字段：用户口径 ——
+    #     "如果伺服上电的状态，应该显示取消就绪；如果没有上电伺服，那就需要一键就绪"
+    #   而 `ready` 是**完整就绪**（伺服 + 程序已加载 + 运行位 + AUTO + 无报警）。
+    #   于是出现现场那个怪现象：伺服明明上着电，但只要程序没加载/没运行，
+    #   `ready=false` → 按钮还显示「一键就绪」→ 操作员不知道该点哪个。
+    #   现在按钮用 `servo_on` 判（该显示什么），`ready` 继续表示"整条链路是否可用"。
+    snap["servo_on"] = bool(b["servo"] and not b["alarm"] and not b["estop"])
     # ★ 实测档位喂给 runmode（与采集循环同一条路）：用户手动刷新真机链路时，
     #   底栏「示教器」灯也能立刻反映旋钮实际位置，不必等下一个 4s 采集周期。
     feed_run_mode(snap.get("mode"), snap.get("status_word"))

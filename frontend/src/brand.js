@@ -17,7 +17,7 @@ export const BRAND = {
   /** 厂商/团队前缀 */
   short: "FIT",
   /** 中文全称（顶部栏显示） */
-  name: "FIT 埃夫特智能机器人远程控制与监控系统",
+  name: "工业机器人远程智控与数字孪生系统",
   /** 英文全称（文档/导出文件用） */
   en: "FIT EFORT Intelligent Robot Remote Control & Monitoring System",
   /** 缩写（导出文件名、日志前缀） */

@@ -34,6 +34,9 @@ export const useRcReadyStore = defineStore("rcReady", {
     lastResult: null,  // 最近一次 /ready 或 /ready/cancel 的完整结果（steps/summary/error）
     lastAction: "",    // 上一次结果属于哪个动作："ready" | "cancel"（文案分流用）
     wsAt: 0,           // 最近一次收到 WS rc_status 帧的时间（stale 判定依据）
+    // ★ 一键就绪成功计数器：各页面 watch 它来「就绪后自动刷新点位」。
+    //   为什么用计数器而不是布尔：连续两次就绪也要各触发一次刷新（布尔会因值相同不触发）。
+    readyTick: 0,
   }),
 
   getters: {
@@ -42,6 +45,17 @@ export const useRcReadyStore = defineStore("rcReady", {
     realEnabled: (s) => !!(s.snap && s.snap.real_enabled),
     /** 就绪 = 伺服上电 + 程序已加载且运行 + 自动/远程档 + 无报警 + 非急停（后端判定）。 */
     ready: (s) => !!(s.snap && s.snap.ready),
+    // ★★ 2026-10-09 新增：**伺服是否上电**（只看伺服位，不看程序/运行位）。
+    //   按钮"一键就绪 ↔ 取消就绪"跟它走 —— 用户口径：
+    //   "伺服上电就该显示取消就绪；没上电才需要一键就绪"。
+    //   旧代码用 `ready`（伺服+程序+运行+AUTO+无报警），导致
+    //   "伺服上电但程序没加载"时按钮还写着「一键就绪」，操作员不知道该点哪个。
+    //   ⚠ 后端未返回 `servo_on` 时返回 null（不是 false）—— 调用方据此回落旧判据，
+    //     避免"老后端 → 按钮永远显示一键就绪"这种静默错。
+    servoOn: (s) => {
+      const v = s.snap && s.snap.servo_on;
+      return (typeof v === "boolean") ? v : null;
+    },
     /** 点动触发位为 1 = 上一发点动还没收尾，此时禁止一键就绪。 */
     jogTrig: (s) => !!(s.snap && s.snap.jog_trig),
     /** 数据是否过期：超过 RC_POLL_MS 没收到 WS 帧（或根本没有快照）判定为旧数据。 */
@@ -127,6 +141,10 @@ export const useRcReadyStore = defineStore("rcReady", {
         const d = await r.json().catch(() => ({}));
         this.lastResult = d;
         await this.load();
+        // ★ 就绪成功 → 递增信号，各页面 watch 它自动刷新点位（用户需求：
+        //   "一键就绪后点位自动刷新"）。就绪后控制器可上报实时姿态/可示教，
+        //   刷新能让页面立刻反映"现在能存点了 / 点位体检状态变化"。
+        if (d.ok) this.readyTick += 1;
         return !!d.ok;
       } catch (e) {
         this.lastResult = { ok: false, error: (e && e.message) || "网络错误" };

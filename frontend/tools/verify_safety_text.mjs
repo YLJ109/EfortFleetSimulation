@@ -91,7 +91,8 @@ console.log("\n[D] 正文 / 标签 / 悬停提示 严重度不许互相矛盾");
 // ★ 两套链要分清：safetyLabel() 返回的是**中文**两字标签（安全/接近/危险/碰撞），
 //   而内部状态键是英文（safe/warn/danger/hit）。曾经这里直接 RANK[label] 取，
 //   中文键取不到值 → undefined → 分支永远走 else，断言形同虚设。
-const LABEL_RANK = { 安全: 0, 接近: 1, 危险: 2, 碰撞: 3 };
+// 中文做对象键是合法 JS 标识符（不是"串里夹引号"），显式豁免本行。
+const LABEL_RANK = { 安全: 0, 接近: 1, 危险: 2, 碰撞: 3 };   // cjk-ok
 /** 从正文反推它宣称的严重度（只看开头/特征词，不看正文里的解释性用词）。 */
 function severityOfText(t) {
   if (t.indexOf("碰撞报警") !== -1) return 3;

@@ -70,7 +70,16 @@ def db_path() -> str:
 
 
 def logs_dir() -> str:
-    d = os.path.join(_PROJECT_ROOT, "logs")
+    """日志目录。
+
+    ★★ 2026-10-09：支持 `EFORT_LOGS_DIR` 覆盖 —— **测试必须覆盖它**。
+      事故：跑 `pytest` 时 app 被真实构造，日志 handler 指向生产 `logs/app.log`，
+      于是测试里注入的异常 traceback（`tests/test_audit_p0.py ... raise RuntimeError("注入的循环异常")`）
+      写进了**生产日志**。现场同事查日志时会看到一堆"凭空出现的报错"，
+      分不清是真故障还是测试噪音 —— 排障时这是很贵的干扰。
+      conftest 已把该变量指到临时目录（见 tests/conftest.py）。
+    """
+    d = os.environ.get("EFORT_LOGS_DIR") or os.path.join(_PROJECT_ROOT, "logs")
     os.makedirs(d, exist_ok=True)
     return d
 

@@ -52,7 +52,10 @@ const SECTIONS = [
   { id: "ab-sec-prec", label: "注意事项", icon: "alert" },
   { id: "ab-sec-trouble", label: "异常速查", icon: "siren" },
   { id: "ab-sec-keys", label: "快捷键", icon: "keyboard" },
-  { id: "ab-sec-mods", label: "八个模块", icon: "layers" },
+  { id: "ab-sec-mods", label: "九个模块", icon: "layers" },
+  // ★ 2026-10-09：3D 可视化与占位表的详细说明统一收到这里
+  //   （用户："占位表和对话的那些废话移除掉，放在关于吧，不要太乱"）
+  { id: "ab-sec-3d", label: "3D 说明", icon: "camera" },
   { id: "ab-sec-notes", label: "安全须知", icon: "shieldCheck" },
   { id: "ab-sec-info", label: "系统信息", icon: "server" },
 ];
@@ -467,7 +470,7 @@ onMounted(() => {
     <div class="ab-sec" id="ab-sec-mods">
       <div class="ab-head">
         <Icon name="layers" :size="16" />
-        <span class="ab-title">八个模块</span>
+        <span class="ab-title">九个模块</span>
         <span class="ab-sub">1 ~ 8 从左到右直达</span>
       </div>
       <div class="ab-mods">
@@ -491,6 +494,64 @@ onMounted(() => {
     </div>
 
     <!-- ===== 安全须知 ===== -->
+    <!-- ★ 2026-10-09 新增：把原本散在各页的长说明集中到这里，
+         各页只留一行指路（用户口径："放在关于吧，不要太乱"） -->
+    <div class="ab-sec" id="ab-sec-3d">
+      <div class="ab-head">
+        <Icon name="camera" :size="16" />
+        <span class="ab-title">3D 可视化说明</span>
+        <span class="ab-sub">画面里画的是什么、以及哪些是"推断"</span>
+      </div>
+      <div class="ab-notes">
+        <div class="ab-note-item info">
+          <div class="ab-note-h"><Icon name="layers" :size="14" /><b>三区构成</b></div>
+          <p>
+            <b>A 区</b>＝一个托盘盒里 9 块料；<b>B 区</b>＝一个托盘盒里 9 个空位；
+            <b>C 区</b>＝摆在台面上的摄像头（镜头朝上）。料与托盘<b>底面坐在站台台面上</b>，
+            料坐在托盘内底面上（比台面高一个托板厚度）—— 不漂浮、不悬空。
+          </p>
+        </div>
+        <div class="ab-note-item info">
+          <div class="ab-note-h"><Icon name="target" :size="14" /><b>X/Y 从哪来</b></div>
+          <p>
+            由<b>示教点位</b>经正运动学（FK）算出，<b>按点位示意，不是视觉定位</b> ——
+            相机只对着 C 区，照不到 A/B 区。
+          </p>
+        </div>
+        <div class="ab-note-item warn">
+          <div class="ab-note-h"><Icon name="alert" :size="14" /><b>高度为什么不取示教点的 Z</b></div>
+          <p>
+            示教点存的是关节角，算出来的是<b>法兰中心</b>（工具安装面），料在其下方。
+            直接拿它当料高会让料<b>悬空</b>（曾因此浮在台面上方 15cm）。
+            所以摆放高度统一用"站台台面"，示教点的 Z 只用于共面性体检。
+          </p>
+        </div>
+        <div class="ab-note-item info">
+          <div class="ab-note-h"><Icon name="activity" :size="14" /><b>随执行进度同步</b></div>
+          <p>
+            A 格取走 → 消失；判色后手上那块变色；落入 B 格 → 出现同色实心块。
+            <b>空跑</b>时方块只是示意、机器人不动（界面有空跑角标）。
+          </p>
+        </div>
+        <div class="ab-note-item warn">
+          <div class="ab-note-h"><Icon name="info" :size="14" /><b>哪些是"推断"，不是实测</b></div>
+          <p>
+            现场<b>没有真空反馈</b>：手上是否夹着件、件有没有吸住，都是<b>按流程推断</b>的。
+            失败停止时会把方块画回原格并标红（"疑似没取到"），人工停止则如实显示"还夹着"。
+          </p>
+        </div>
+        <div class="ab-note-item info">
+          <div class="ab-note-h"><Icon name="layers" :size="14" /><b>「占位表」（原在 AI 执行页）</b></div>
+          <p>
+            那是 AI 执行页自己的记账：它<b>不共享分拣页那一轮的占位</b>，
+            也<b>不知道 A/B 区真实里面有什么</b>（相机只对 C 区）——
+            默认 A 区有料、B 区为空，每成功搬一件才更新。要"放到红列"就得先知道哪格空着，
+            所以那张表是必需的；但它<b>不是现场实况</b>，格子里到底有什么仍需人工确认。
+          </p>
+        </div>
+      </div>
+    </div>
+
     <div class="ab-sec" id="ab-sec-notes">
       <div class="ab-head">
         <Icon name="shieldCheck" :size="16" />
@@ -562,13 +623,13 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.about { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 14px;
-  display: flex; flex-direction: column; gap: 14px; align-items: center; }
+.about { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 10px;
+  display: flex; flex-direction: column; gap: 10px; align-items: center; }
 /* ★ 需求：关于页内容宽度 1200px 并水平居中 */
 .about > * { width: 100%; max-width: 1200px; }
 
 /* ---- 品牌抬头 ---- */
-.ab-hero { display: flex; align-items: center; gap: 14px; padding: 16px;
+.ab-hero { display: flex; align-items: center; gap: 10px; padding: 10px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 .ab-mark { flex: none; width: 58px; height: 58px; display: grid; place-items: center;
   border-radius: 14px; color: var(--accent);
@@ -582,7 +643,7 @@ onMounted(() => {
 .ab-tag.ok { color: var(--ok); border-color: var(--ok-line); }
 .ab-tag.warn { color: var(--warn); border-color: var(--warn-line); }
 .ab-btn { flex: none; align-self: flex-start; display: inline-flex; align-items: center; gap: 5px;
-  padding: 7px 12px; font-size: 12px; }
+  padding: 7px 10px; font-size: 12px; }
 .ab-btn.sm { padding: 4px 9px; font-size: 11px; }
 
 /* ---- 章节导航 ---- */
@@ -596,16 +657,16 @@ onMounted(() => {
 .ab-nav-chip svg { color: var(--accent); }
 
 /* ---- 通用分节 ---- */
-.ab-sec { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 14px;
+.ab-sec { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 10px;
   scroll-margin-top: 46px; }
-.ab-head { display: flex; align-items: center; gap: 7px; margin-bottom: 12px; flex-wrap: wrap; }
+.ab-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .ab-head svg { color: var(--accent); }
 .ab-title { font-size: 14px; font-weight: 700; color: var(--txt); }
 .ab-sub { font-size: 11px; color: var(--muted); margin-left: 4px; }
 .ab-head-act { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
 
 /* ---- 快速上手 ---- */
-.ab-steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 12px; }
+.ab-steps { margin: 0; padding-left: 10px; display: flex; flex-direction: column; gap: 5px; }
 .ab-steps li { color: var(--txt); }
 .ab-step-h { font-size: 13px; color: var(--txt); }
 .ab-step-d { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.65; }
@@ -613,7 +674,6 @@ onMounted(() => {
   padding-left: 9px; border-left: 2px solid var(--line); }
 
 /* ---- 检查清单 ---- */
-.ab-prog { margin-bottom: 12px; }
 .ab-prog-bar { height: 6px; border-radius: 4px; overflow: hidden;
   background: var(--bg); border: 1px solid var(--line); }
 .ab-prog-bar i { display: block; height: 100%; background: var(--warn); transition: width .22s ease; }
@@ -625,10 +685,10 @@ onMounted(() => {
 .ab-prog-ok { display: inline-flex; align-items: center; gap: 4px; color: var(--ok); }
 .ab-prog-warn { display: inline-flex; align-items: center; gap: 4px; color: var(--warn); }
 
-.ab-cl-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.ab-cl-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; }
 .ab-cl-group { border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); padding: 9px; }
 .ab-cl-gh { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--txt);
-  padding-bottom: 7px; margin-bottom: 6px; border-bottom: 1px solid var(--line); }
+  padding: 0 0 7px; border-bottom: 1px solid var(--line); }
 .ab-cl-gh svg { color: var(--accent); }
 .ab-cl-cnt { margin-left: auto; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .ab-cl-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 7px; border-radius: 6px;
@@ -653,10 +713,10 @@ onMounted(() => {
 .ab-sop-h svg { color: var(--accent); flex: none; }
 .ab-sop-auth { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: var(--warn); }
 .ab-sop-cnt { margin-left: auto; font-size: 11px; color: var(--muted); }
-.ab-sop-body { padding: 0 12px 12px 12px; }
-.ab-sop-why { margin: 0 0 9px; font-size: 11px; color: var(--muted); line-height: 1.75;
+.ab-sop-body { padding: 0 10px 10px; }
+.ab-sop-why { font-size: 11px; color: var(--muted); line-height: 1.75;
   padding: 7px 9px; border-radius: 6px; background: var(--panel); border-left: 2px solid var(--accent); }
-.ab-sop-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; }
+.ab-sop-steps { margin: 0; padding-left: 10px; display: flex; flex-direction: column; gap: 5px; }
 .ab-sop-steps li { font-size: 12px; color: var(--txt); line-height: 1.6; }
 .ab-sop-steps li.warn { color: var(--err); }
 .ab-sop-txt { display: inline-flex; align-items: flex-start; gap: 4px; }
@@ -665,7 +725,7 @@ onMounted(() => {
   padding-left: 8px; border-left: 2px solid var(--line); }
 
 /* ---- 注意事项 ---- */
-.ab-prec-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 12px; }
+.ab-prec-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 10px; }
 .ab-prec-group { display: flex; flex-direction: column; gap: 7px; }
 .ab-prec-gh { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--txt); }
 .ab-prec-gh svg { color: var(--accent); }
@@ -695,13 +755,13 @@ onMounted(() => {
 .ab-tr-s { color: var(--txt); }
 .ab-tr-c { color: var(--muted); }
 .ab-tr-a { color: var(--muted); }
-.ab-tr-empty { padding: 16px; text-align: center; font-size: 11px; color: var(--muted); }
+.ab-tr-empty { padding: 10px; text-align: center; font-size: 11px; color: var(--muted); }
 
 /* ---- 快捷键 ---- */
-.ab-keys { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
-.ab-keygroup-h { font-size: 11px; color: var(--accent); margin-bottom: 6px; letter-spacing: .5px; }
+.ab-keys { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
+.ab-keygroup-h { font-size: 11px; color: var(--accent); letter-spacing: .5px; }
 .ab-keyrow { display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: 7px;
-  background: var(--panel2); border: 1px solid var(--line); margin-bottom: 5px; }
+  background: var(--panel2); border: 1px solid var(--line); }
 .ab-keyrow.danger { border-color: var(--err-line); background: var(--err-soft); }
 .ab-cap { flex: none; min-width: 54px; text-align: center; padding: 3px 7px; border-radius: 5px;
   font-size: 11px; font-weight: 700; color: var(--txt);

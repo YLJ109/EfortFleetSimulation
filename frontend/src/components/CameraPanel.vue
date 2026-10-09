@@ -436,6 +436,36 @@ async function retryService() {
   await cam.refresh();
   if (!cam.serviceDown) { startPoll(100); connectStream(); }
 }
+
+// =====================================================================
+// 三色识别的**尺寸/形状阈值**回显（用户口径："太小的不要检测、只识别矩形"）
+//   ★ 值来自 /status 的 vision.thr（服务端生效值），滑杆改完立即回读 ——
+//     界面显示的必须是**真正生效**的值，不能是本地状态自己猜的。
+// =====================================================================
+const colorThr = computed(() => {
+  const t = (cam.status && cam.status.vision && cam.status.vision.thr) || {};
+  return {
+    min_side: Number(t.min_side ?? 30),
+    min_area_ratio: Number(t.min_area_ratio ?? 0.003),
+    // ★ 兜底默认必须与后端 DEFAULT_THR 一致（0.55）。写 0.72 会让"后端没返回时"
+    //   显示一个**已被现场证明会误杀**的值 —— 2026-10-08 那次"绿色检不出"就是它。
+    fill_min: Number(t.fill_min ?? 0.55),
+    min_fill: Number(t.min_fill ?? 0.45),
+  };
+});
+
+/** 最近一次判定的结果 / 未检出的原因（原样显示后端文案，不美化、不猜）。 */
+const lastWhy = computed(() => {
+  const v = (cam.status && cam.status.vision) || {};
+  const ev = v.last;
+  if (ev && ev.color && ev.color !== "未知") {
+    return { ok: true, color: ev.color, conf: ev.conf };
+  }
+  const miss = v.last_miss;
+  if (miss && miss.reason) return { ok: false, reason: miss.reason };
+  if (ev && ev.reason) return { ok: false, reason: ev.reason };
+  return null;
+});
 </script>
 
 <template>
@@ -484,10 +514,12 @@ async function retryService() {
       </div>
     </div>
 
-    <!-- 主控制区域（收起时也显示） -->
+    <!-- 主控制区域（收起时仅显示快捷状态；设备/开关按钮展开才出现） -->
     <div class="cam-controls">
+      <!-- ★ 2026-10-09 用户需求：设备选择与开关相机按钮收起时隐藏，展开才显示
+       （收起态只留标题栏 + 画面 + 快捷状态，不再顶着一排控件） -->
       <!-- 设备选择下拉 -->
-      <div class="device-select" v-if="cam.devices.length > 0">
+      <div class="device-select" v-if="cam.devices.length > 0" v-show="expanded">
         <label class="device-label">
           <Icon name="camera" :size="13" />
           <span>设备</span>
@@ -501,8 +533,8 @@ async function retryService() {
         </select>
       </div>
 
-      <!-- 一键启停 -->
-      <button class="power-btn" :class="{ on: cam.opened, busy: cam.busy || acting }"
+      <!-- 一键启停（收起时隐藏，展开才显示） -->
+      <button v-show="expanded" class="power-btn" :class="{ on: cam.opened, busy: cam.busy || acting }"
               :disabled="cam.busy || acting || cam.serviceDown" @click="onToggle">
         <Icon name="power" :size="18" />
         <span>{{ cam.busy ? '处理中…' : (cam.opened ? '关闭相机' : '开启相机') }}</span>
@@ -569,6 +601,49 @@ async function retryService() {
               :class="'chip-' + t">{{ t }}</span>
       </div>
 
+      <!-- ★ 尺寸/形状旋钮（用户口径："太小的不要检测" + "只识别矩形"）：
+           这两个值过去只能改配置文件/调接口，现场没法调 —— 现在直接放面板上。 -->
+      <template v-if="cam.colorSupported && cam.colorCapable">
+        <div class="control-row conf-row">
+          <label class="control-label">
+            最小短边&nbsp;≥&nbsp;<b>{{ Math.round(colorThr.min_side) }} px</b>
+          </label>
+          <input class="conf-slider" type="range" min="10" max="120" step="2"
+                 :value="Math.round(colorThr.min_side)" :disabled="cam.serviceDown"
+                 title="小于这个像素尺寸的色块不检测（调大可挡掉远处小物/反光碎块）"
+                 @change="cam.setThr({ min_side: Number($event.target.value) })" />
+        </div>
+        <div class="control-row conf-row">
+          <label class="control-label">
+            最小面积占比&nbsp;≥&nbsp;<b>{{ (colorThr.min_area_ratio * 100).toFixed(1) }}%</b>
+          </label>
+          <input class="conf-slider" type="range" min="1" max="40" step="1"
+                 :value="(colorThr.min_area_ratio * 100).toFixed(0)" :disabled="cam.serviceDown"
+                 title="占整帧面积的百分比下限（与最小短边取更严者）"
+                 @change="cam.setThr({ min_area_ratio: Number($event.target.value) / 100 })" />
+        </div>
+        <div class="control-row conf-row">
+          <label class="control-label">
+            矩形填充率&nbsp;≥&nbsp;<b>{{ colorThr.fill_min.toFixed(2) }}</b>
+          </label>
+          <input class="conf-slider" type="range" min="0" max="95" step="5"
+                 :value="(colorThr.fill_min * 100).toFixed(0)" :disabled="cam.serviceDown"
+                 title="「只识别矩形」硬门槛：低于此值直接判非矩形、不输出颜色。0 = 关闭。
+⚠ 必须**低于现场实测最低填充率**（实测真矩形 0.67~0.75）：定太高会误杀真方块，
+   表现是「三色全都检测不到」（2026-10-08 事故：曾定为 0.72 → 绿色/蓝色全部被判非矩形）。
+⚠ 与旋转无关（斜着举的方块不受影响）；被遮挡较厉害的件会被判非矩形 → 分拣按「检测不到」停，
+   现场觉得太严就调低。"
+                 @change="cam.setThr({ fill_min: Number($event.target.value) / 100 })" />
+        </div>
+      </template>
+
+      <!-- ★ 最近一次"没检测到"的原因（原样显示后端 reason，让现场知道是太小/太斜/颜色不对） -->
+      <div v-if="lastWhy" class="why-row" :class="{ bad: !lastWhy.ok }">
+        <Icon name="info" :size="12" />
+        <span v-if="lastWhy.ok">最近判定：{{ lastWhy.color }}（conf {{ lastWhy.conf }}）</span>
+        <span v-else>最近未检出：{{ lastWhy.reason }}</span>
+      </div>
+
       <!-- 操作按钮 -->
       <div class="action-btns">
         <button @click="onSnap" :disabled="!cam.opened">
@@ -604,16 +679,27 @@ async function retryService() {
 
 <style scoped>
 /* ★ z-index 30：面板浮在 3D 视口上，必须高于关节 HUD(10)、状态片(14)、
-   执行 HUD(12) —— 否则拖动/缩放面板时会被这些浮层"咬"掉一块。 */
+   执行 HUD(12) —— 否则拖动/缩放面板时会被这些浮层"咬"掉一块。
+   Sentinel 风格：渐变背景 + 顶部发光线 + 毛玻璃 */
 .cam-panel {
   position: absolute; z-index: 30;
-  background: var(--glass-solid);
+  background: linear-gradient(180deg, rgba(12,19,32,0.96), rgba(8,14,25,0.92));
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--radius);
   box-shadow: var(--shadow-hud);
-  backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
   overflow: hidden;
+  isolation: isolate;
+}
+.cam-panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 10%; right: 10%;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent-line), transparent);
+  pointer-events: none;
+  z-index: 1;
 }
 .cam-panel.down { border-color: var(--err-line); }
 
@@ -681,7 +767,7 @@ async function retryService() {
   background: linear-gradient(160deg, #171d25, #10151b);
   display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 6px;
-  color: var(--muted); pointer-events: none; text-align: center; padding: 0 14px;
+  color: var(--muted); pointer-events: none; text-align: center; padding: 0 10px;
 }
 .cam-ph-icon { opacity: .5; }
 .cam-ph-title { font-size: 13px; color: var(--txt); }
@@ -698,7 +784,7 @@ async function retryService() {
 
 /* ---- 主控制区域 ---- */
 .cam-controls {
-  padding: 10px 12px;
+  padding: 10px;
   border-bottom: 1px solid var(--line);
   background: var(--scrim);
 }
@@ -706,7 +792,7 @@ async function retryService() {
 /* ---- 设备选择下拉 ---- */
 .device-select {
   display: flex; align-items: center; gap: 8px;
-  margin-bottom: 10px; padding: 8px 10px;
+  padding: 8px 10px;
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 6px;
 }
@@ -727,7 +813,7 @@ async function retryService() {
 
 .power-btn {
   display: flex; align-items: center; justify-content: center; gap: 8px;
-  width: 100%; padding: 10px 16px;
+  width: 100%; padding: 10px;
   font-size: 14px; font-weight: 600;
   border: none; border-radius: 8px;
   cursor: pointer; transition: all .15s ease;
@@ -763,13 +849,13 @@ async function retryService() {
 
 /* ---- 展开后的详细控制 ---- */
 .cam-body {
-  padding: 12px;
-  display: flex; flex-direction: column; gap: 12px;
+  padding: 10px;
+  display: flex; flex-direction: column; gap: 10px;
 }
 
 .control-row {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
 }
 .control-label {
   font-size: 12px; color: var(--muted);
@@ -809,7 +895,7 @@ input:disabled + .slider { opacity: .45; cursor: not-allowed; }
   display: flex; align-items: center; gap: 7px;
   font-size: 12px; line-height: 1.5; color: #b3872a;
   background: rgba(214, 158, 46, 0.10); border: 1px solid rgba(214, 158, 46, 0.28);
-  border-radius: 8px; padding: 8px 10px; margin-bottom: 8px;
+  border-radius: 8px; padding: 8px 10px;
 }
 .color-unavail .dot { width: 8px; height: 8px; border-radius: 50%; background: #d69e2e; flex: none; }
 .color-unavail strong { color: #e8b347; }
@@ -820,6 +906,10 @@ input:disabled + .slider { opacity: .45; cursor: not-allowed; }
   width: 128px; flex: none; accent-color: var(--accent); cursor: pointer;
 }
 .conf-slider:disabled { opacity: .45; cursor: not-allowed; }
+/* ★ 最近未检出原因：灰色提示条（不是错误，是"为什么没检测到"） */
+.why-row { display: flex; align-items: center; gap: 6px; margin-top: 7px;
+  font-size: 11.5px; color: var(--muted); }
+.why-row.bad { color: var(--warn, #d48806); }
 
 /* 三色目标 chips */
 .target-row { display: flex; gap: 6px; margin-top: 6px; }

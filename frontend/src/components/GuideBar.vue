@@ -42,11 +42,18 @@ const ICON_OF = {
 </template>
 
 <style scoped>
+/* Sentinel 风格引导条：毛玻璃 + 发光线 */
 .gb { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.gb-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px;
-  font-size: 12px; border: 1px solid var(--line); background: var(--panel2); }
+.gb-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: var(--radius-sm);
+  font-size: 12px; border: 1px solid var(--line); background: var(--glass-solid);
+  backdrop-filter: blur(12px) saturate(140%); -webkit-backdrop-filter: blur(12px) saturate(140%);
+  box-shadow: var(--shadow); position: relative; overflow: hidden; }
+.gb-bar::before { content: ''; position: absolute; top: 0; left: 10%; right: 10%; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent-line), transparent); pointer-events: none; }
 .gb-bar.warn { color: var(--warn); border-color: var(--warn-line); background: var(--warn-soft); }
+.gb-bar.warn::before { background: linear-gradient(90deg, transparent, var(--warn-line), transparent); }
 .gb-bar.err { color: var(--err); border-color: var(--err-line); background: var(--err-soft); }
+.gb-bar.err::before { background: linear-gradient(90deg, transparent, var(--err-line), transparent); }
 .gb-title { font-weight: 600; flex: none; line-height: 1.5; }
 .gb-hint { color: var(--muted); flex: 1; min-width: 0; line-height: 1.5;
   white-space: normal; overflow-wrap: anywhere; }

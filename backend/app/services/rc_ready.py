@@ -27,8 +27,8 @@ from app.services.modbus import (
     ADDR_RO_TRIG,
     ADDR_SET_PROG,
     CMD_CLEAR,
+    CMD_DISABLE,
     CMD_LOAD,
-    CMD_STOP,
     CMD_RUN,
     CMD_SERVO,
     CMD_STOP,
@@ -124,15 +124,49 @@ class ReadinessService:
         try:
             from app.services.motion import motion   # 延迟导入避免环
             if not motion._exec_lock.acquire(blocking=False):
-                return {"ok": False,
-                        "error": "有点动/下发正在执行，已推迟一键就绪（避免半截状态）",
-                        "steps": []}
+                # ★★ 2026-10-09（用户口径）："如果再触发这个条件，**直接下电伺服**，等待一键就绪吧"。
+                #   原来只回一句"已推迟"，操作员干瞪眼不知道该干什么。
+                #   现在改为**主动补救**：等点动/下发收尾（通常 <1s）→ 立即执行
+                #   "取消就绪"（停程序 + 撤触发 + **伺服下电**），把系统放回一个明确的静止态，
+                #   然后提示"请再点一次一键就绪"。
+                #
+                #   ⚠ 为什么是"等它收尾"而不是"插队直接写 0x2000"：
+                #     写指令字（40101）**必须持执行锁** —— 强行插队会和飞行中的点动抢
+                #     指令字，产生的正是这句提示想避免的"半截状态"。
+                #     所以"直接下电"的正确含义是"不再让用户手动去处理，由系统完成下电"，
+                #     而不是"不等点动结束就抢着写"。
+                return self._defer_then_servo_off()
             try:
                 return self._ready(prog, on_step)
             finally:
                 motion._exec_lock.release()
         finally:
             self._busy_lock.release()
+
+    def _defer_then_servo_off(self, wait_s: float = 3.0) -> Dict[str, Any]:
+        """被点动/下发占用时的补救：等它收尾 → 取消就绪（**含伺服下电**）。
+
+        返回 ok=False（本次**没有**完成一键就绪）+ 明确指引，让界面照原样显示。
+        """
+        from app.services.motion import motion
+        t0 = time.time()
+        if not motion._exec_lock.acquire(timeout=float(wait_s)):
+            return {"ok": False, "steps": [], "deferred": True,
+                    "error": ("有点动/下发正在执行，已推迟一键就绪（等待 %.0f 秒仍未释放）。"
+                              "请松开点动按钮或等它跑完再点。" % wait_s)}
+        try:
+            r = self._cancel(servo_off=True)          # 停程序 + 撤触发 + 下电伺服
+        finally:
+            motion._exec_lock.release()
+        steps = list(r.get("steps") or [])
+        off = any(s.get("step") == "servo_off" and s.get("ok") for s in steps)
+        steps.append({"step": "defer", "ok": True,
+                      "msg": "原请求被点动/下发占用 → 已自动改为「取消就绪」"
+                             "（等待 %.1fs）" % (time.time() - t0)})
+        return {"ok": False, "steps": steps, "deferred": True,
+                "error": ("刚才有点动/下发在执行：已**主动停止程序%s**"
+                          "（避免半截状态）。现在请再点一次「一键就绪」。"
+                          % ("并下电伺服" if off else "（伺服未确认下电）"))}
 
     # ------------------------------------------------------------------
     def _step(self, steps: List[dict], name: str, on_step, ok: bool, msg: str) -> None:
@@ -519,16 +553,188 @@ class ReadinessService:
                         "error": "停止命令已下发但运行位仍为 1，请检查控制器档位/程序状态",
                         "steps": steps}
 
-        # 3) 可选：伺服下电（CMD_ZERO=0x0000 清指令字 → Bit0/Bit12 复位即掉电。
-        #    与 _ready() 第 5 步"全清→重上电"是同一条已实测的通道；
-        #    库里的 CMD_DISABLE=0x2000 全无调用方、语义未经实机确认，不用它。）
+        # 3) 可选：伺服下电。
+        #    ★★ 2026-10-08 修复（用户反馈"取消就绪伺服还是上电的状态"）：
+        #    原实现只写 CMD_ZERO=0x0000 —— 单写全清**不足以取消伺服使能**：
+        #      官方手册 2.2 明确定义 Bit13=取消使能，而命令字约定"始终保留 Bit0+Bit12"，
+        #      0x0000 只是把指令字清空，并不表达"取消使能"这个动作。
+        #    必须按参考实现 efort_client.servo_disable()：**先 0x2000 造下降沿 → 再 0x0000 全清**。
+        #    ★ 0x0000 控制器常不回正常应答（超时/异常）但已生效 → 这步容忍失败。
+        #    ★ 另补**回读校验**：原实现写完就报"伺服已下电"，从不核对状态位，
+        #      于是"实际没下电"也显示成功 —— 用户看到的那条假成功就是这么来的。
         if servo_off:
-            _, serr2 = mb.rc_command(CMD_ZERO)
-            if serr2:
-                _step("servo_off", False, "伺服下电失败: %s" % serr2)
-                return {"ok": False, "error": "伺服下电失败: %s" % serr2, "steps": steps}
+            # =====================================================================
+            # ★★ 2026-10-09 修复"取消就绪偶发失败"（现场报：已下发 0x2000→0x0000，
+            #    但伺服状态位 2.1s 内仍未落下；同一序列**有时成功有时失败**）。
+            #
+            # 根因（对照本仓上电序列得出，不是猜的）：
+            #   上电是 `0x0000 → **等 0.6s** → 0x1001`，注释写明"吸合延迟实测 ≈0.55s"；
+            #   而原下电是 `0x2000 → **立即** 0x0000`，中间**没有等待**。
+            #   ⇒ 0x0000（全清）很可能把**还没执行完的"取消使能"意图一起清掉**，
+            #     于是下电不生效。赶上控制器先执行了就成功（实测有 0.03s 就落的），
+            #     没赶上就失败 —— 这正是"间歇性"的来源。
+            #
+            # 修法（两条）：
+            #   ① **0x2000 与 0x0000 之间加等待**：先轮询等状态位落下（最多 1.5s），
+            #      落下后再写 0x0000 把命令字清干净（保留原设计意图）；
+            #   ② **失败自动重试一轮**：偶发不响应时重发即可，且**下电是安全方向**动作，
+            #      重发无风险。
+            # 另补：0x0000 的返回值以前**直接丢掉** → 无法区分"写失败"还是"写了没生效"，
+            #      现在两个命令的返回都记进步骤消息，现场一眼能看出是哪一种。
+            # =====================================================================
+            trace: List[str] = []
+            servo_down = False
+            last_servo = None
+            t_all = time.time()
+            for attempt in (1, 2):
+                _, e_dis = mb.rc_command(CMD_DISABLE)      # 0x2000 Bit13 取消使能
+                if e_dis:
+                    trace.append("第%d次 0x2000 被拒(%s)" % (attempt, e_dis))
+                else:
+                    trace.append("第%d次 0x2000 已写" % attempt)
+                # ① 先等"取消使能"真正生效（照上电 0.6s 吸合延迟的口径，给到 1.5s）
+                t0 = time.time()
+                while time.time() - t0 < 1.5:
+                    s3, _ = mb.rc_snapshot()
+                    if s3 is not None:
+                        last_servo = s3["bits"].get("servo")
+                        if not last_servo:
+                            servo_down = True
+                            break
+                    time.sleep(0.1)
+                # ② 状态位已落 → 再把命令字清干净（这一步容忍无应答，与参考实现一致）
+                _, e_zero = mb.rc_command(CMD_ZERO)
+                trace.append("第%d次 0x0000 %s" % (attempt, e_zero or "ok"))
+                if servo_down:
+                    break
+                # 没落 → 再确认一次（给控制器一点余量），仍没落就进下一轮重试
+                time.sleep(0.2)
+                s3, _ = mb.rc_snapshot()
+                if s3 is not None:
+                    last_servo = s3["bits"].get("servo")
+                    if not last_servo:
+                        servo_down = True
+                        break
+            if not servo_down:
+                _step("servo_off", False,
+                      "已下发 0x2000→0x0000（重试 2 轮，%.1fs），伺服状态位仍未落下"
+                      "（现值 %s）｜%s" % (time.time() - t_all, last_servo, "；".join(trace)))
+                return {"ok": False,
+                        "error": ("伺服下电命令已下发（0x2000→0x0000，重试 2 轮），但控制器"
+                                  "伺服状态位仍为 %s，下电未生效。请检查是否有运行中程序/"
+                                  "外部使能，或现场确认后重试。｜%s"
+                                  % (last_servo, "；".join(trace))),
+                        "steps": steps}
             _step("servo_off", True,
-                  "伺服已下电（吸合延迟实测 ≈0.55s，约 1s 后状态位才落）")
+                  "伺服已下电并回读确认（状态位已落，%.2fs）｜%s"
+                  % (time.time() - t_all, "；".join(trace)))
 
         return {"ok": True, "steps": steps}
+
+
+    # ------------------------------------------------------------------
+    def clear_alarm(self, on_step=None) -> Dict[str, Any]:
+        """仅清报警（不重新上电/加载/运行）。
+
+        ★ 区别于 ready()：ready() 把清报警当成"推到就绪态"的一环，清完会继续
+          上伺服→加载→运行。本函数**只清报警**，清完即返回，把"重新就绪"
+          留给用户点「一键就绪」去做。
+        ★ 铁律（2026-09-29 实机）：清报警前若程序在跑，必须 CMD_STOP 先停，
+          否则报警清掉 0.5s 内被运行中程序顶回（5005 复现）。
+        ★ 清报警后伺服可能掉电 —— 那是「一键就绪」的职责，本函数不替它做。
+        """
+        steps: List[Dict] = []
+        if not real_write_enabled():
+            self._step(steps, "gate", on_step, False,
+                       "真实下发未开启，拒绝写控制器")
+            return {"ok": False,
+                    "error": "真实下发未开启：总闸未打开，拒绝写控制器",
+                    "steps": steps}
+        if not self._busy_lock.acquire(blocking=False):
+            return {"ok": False, "error": "就绪/清除流程正在执行中，请稍候", "steps": steps}
+        try:
+            from app.services.motion import motion
+            if not motion._exec_lock.acquire(blocking=False):
+                return {"ok": False,
+                        "error": "有点动/下发正在执行，已推迟清除（避免半截状态）",
+                        "steps": steps}
+            try:
+                return self._clear_alarm(steps, on_step)
+            finally:
+                motion._exec_lock.release()
+        finally:
+            self._busy_lock.release()
+
+    def _clear_alarm(self, steps, on_step) -> Dict[str, Any]:
+        mb = self._client()
+        snap, err = mb.rc_snapshot()
+        if snap is None:
+            self._step(steps, "snapshot", on_step, False, "读快照失败: %s" % err)
+            return {"ok": False, "error": "无法读取控制器状态: %s" % err, "steps": steps}
+        b = snap["bits"]
+        a1, a2 = snap.get("alarm1"), snap.get("alarm2")
+        self._step(steps, "snapshot", on_step, True,
+                   "模式=%s 伺服=%d 报警=%d 程序=%d 运行=%d"
+                   % (snap["mode"], b["servo"], b["alarm"], snap["prog"], b["run"]))
+        if not b["alarm"]:
+            return {"ok": True, "cleared": False, "was_alarm": False,
+                    "message": "当前无报警（码 %s/%s），无需清除" % (a1, a2),
+                    "steps": steps}
+        # ★ 有报警：若在跑先停（铁律：否则 0.5s 内被顶回）
+        if b.get("run"):
+            _, sterr = mb.rc_command(CMD_STOP)
+            if sterr:
+                self._step(steps, "stop", on_step, False, "停止程序失败: %s" % sterr)
+                return {"ok": False,
+                        "error": "停掉当前程序失败: %s（清报警前需先停机）" % sterr,
+                        "steps": steps}
+            t0 = time.time(); stopped = False
+            while time.time() - t0 < 2.0:
+                s2, _ = mb.rc_snapshot()
+                if s2 and not s2["bits"].get("run"):
+                    stopped = True; break
+                time.sleep(0.1)
+            self._step(steps, "stop", on_step, stopped,
+                       "已停机（%.2fs），运行中程序会把报警顶回，必须先停再清"
+                       % (time.time() - t0) if stopped
+                       else "停机后运行位 2s 内未落下")
+            if not stopped:
+                return {"ok": False,
+                        "error": "程序仍在运行（运行位未落下），无法可靠清报警",
+                        "steps": steps}
+        # ★ 重试清报警（0x1009 后控制器需时间落定报警位）
+        cleared = False; snap2 = None
+        for _ in range(3):
+            _, cerr = mb.rc_command(CMD_CLEAR)
+            if cerr:
+                self._step(steps, "alarm", on_step, False, "清报警命令失败: %s" % cerr)
+                break
+            time.sleep(0.6)
+            snap2, _ = mb.rc_snapshot()
+            if snap2 and not snap2["bits"]["alarm"]:
+                cleared = True; break
+        if not cleared:
+            na1 = (snap2 or snap).get("alarm1", "?"); na2 = (snap2 or snap).get("alarm2", "?")
+            hints = []
+            for raw in (na1, na2):
+                try:
+                    ci = int(raw)
+                except (TypeError, ValueError):
+                    ci = None
+                if ci in ALARM_HINTS:
+                    hints.append(ALARM_HINTS[ci])
+                elif ci not in (None, 0):
+                    hints.append("报警 %s：请按示教器报警明细排查" % raw)
+            hint = "；".join(dict.fromkeys(hints)) or "请按示教器报警信息排查，处理后重试"
+            self._step(steps, "alarm", on_step, False,
+                       "清报警失败（码 %s/%s 仍在）" % (na1, na2))
+            return {"ok": False,
+                    "error": "清报警后仍处于报警状态（当前码 %s/%s）。%s"
+                             % (na1, na2, hint),
+                    "steps": steps}
+        self._step(steps, "alarm", on_step, True, "报警已清（原码 %s/%s）" % (a1, a2))
+        return {"ok": True, "cleared": True, "was_alarm": True,
+                "message": "报警已清（原码 %s/%s）；伺服可能已掉电，需重新「一键就绪」再动作"
+                           % (a1, a2),
+                "steps": steps}
 

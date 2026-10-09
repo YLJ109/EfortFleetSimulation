@@ -28,7 +28,8 @@ import { useRcReadyStore } from "./rcReady.js";
 import { setGhostPose, setGhostPoseB, showGhost, showGhostB, highlightJoint,
          evalSafety } from "../three/manager.js";
 import { STATE_RANK } from "../three/safety.js";
-import { DEFAULT_ONLY_JOINT, JOINT_LOCK_TOL_DEG } from "../core/safetyConst.js";
+import { DEFAULT_ONLY_JOINT, JOINT_LOCK_TOL_DEG, SPEED_MIN }
+  from "../core/safetyConst.js";
 
 export const JOG_STEPS = [0.1, 1, 5, 10];
 const HOLD_MS = 260;      // 按住超过该时长 → 连续点动；否则视为单击走一格
@@ -63,17 +64,25 @@ export const useExecStore = defineStore("exec", {
     programsErr: "",
 
     // ---- 公共执行参数 ----
-    // ★ 全局执行速度：默认 5%（安全档位，避免误发时机器人窜太快）。
-    //   顶栏滑块调整后经 saveSpeed 持久化，页面刷新后保持用户设过的值。
-    // ★ 审计修复 P1-D10：localStorage 在隐私模式 / 禁用 Cookie 下读会直接抛
-    //   SecurityError —— 原实现没有 try/catch，整页 state() 建不起来 → 白屏。
+    // ★★ 全局执行速度（全项目唯一速度口径）：**所有下发都用这一份**。
+    //   ★ 2026-10-09 修正两处与后端不一致的地方（现场报"速度不对/像被写死"）：
+    //     ① **下限必须与后端 `SPEED_MIN` 一致**（=5）。旧代码这里放行 `>= 1`、
+    //        顶栏滑块也是 `min="1"` —— 操作员拖到 1~4 时，后端 `ge=5` 会**直接拒绝**
+    //        （或按 5 夹取），表现就是"我设了 1% 但它按 5% 跑"。
+    //     ② **不再持久化**：以前拖过一次 35% 就会"每次启动都是 35%"（见下方注释）。
+    //        现在**每次启动一律 5%**。
+    //   ★ 改这里的任何一个数，都要同步 `App.vue` 的滑块 min 与后端 SPEED_MIN，
+    //     有回归脚本 tools/verify_speed.mjs 盯着三者一致。
     speed: (() => {
-      let raw = "5";
-      try {
-        if (typeof localStorage !== "undefined") raw = localStorage.getItem("exec.speed") || "5";
-      } catch (e) { /* 隐私模式读不到就用默认值 */ }
-      const v = parseInt(raw, 10);
-      return isFinite(v) && v >= 1 && v <= 100 ? v : 5;
+      // ★★ 2026-10-09 用户口径（第二次纠正，以这次为准）：
+      //   "速度每次启动怎么默认是35%？**默认必须是5%**，看一下代码逻辑"
+      //   原因：以前把滑块值**持久化到 localStorage** —— 操作员拖过一次 35%，
+      //   之后**每次启动都从 35% 开始**（现场看到的就是"默认变成 35%"）。
+      //   现在：**不读也不写 localStorage**，每次启动一律从 SPEED_MIN（5%）起步。
+      //   ★ 为什么这样更安全：速度是**每次开机最该保守**的参数 ——
+      //     上一次调试时的高速不该被"继承"到下一次（尤其是在别人接手、
+      //     或隔天开机时）。当前会话内拖到多少就一直是多少，刷新即归 5%。
+      return SPEED_MIN;
     })(),
     dryRun: true,
     fileName: "",
@@ -263,9 +272,34 @@ export const useExecStore = defineStore("exec", {
     },
     clearLog() { this.log = []; },
 
-    // ================= 全局执行速度持久化 =================
+    // ================= 清除示教器（控制器）报错 =================
+    // ★ 只清报警（写 CMD_CLEAR 0x1009），不重新上电/加载/运行——
+    //   那是「一键就绪」的职责。清完若伺服掉电，需再点一键就绪。
+    async clearError() {
+      this.logLine("info", "清除报错：读报警 → 必要时先停机 → 清报警…");
+      try {
+        const r = await apiControl("/control/clear-error", { method: "POST" });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.ok) {
+          this.logLine("ok", "清除报错完成：" + (d.message || (d.cleared ? "报警已清" : "本无报警")));
+        } else {
+          this.logLine("err", "清除报错失败：" + ((d && (d.error || d.message)) || ("HTTP " + r.status)));
+        }
+      } catch (e) {
+        this.logLine("err", "清除报错请求失败：" + (e && e.message ? e.message : e));
+      }
+    },
+
+    // ================= 全局执行速度 =================
+    // ★ 2026-10-09：**不再持久化**（用户口径"每次启动默认必须是 5%"）。
+    //   保留这个方法只为兼容旧调用点 —— 它现在什么都不做，并在控制台提示一次，
+    //   避免"看着像存了、其实没存"的误解。
     saveSpeed() {
-      try { localStorage.setItem("exec.speed", String(this.speed)); } catch (e) { /* 忽略 */ }
+      if (!this._speedPersistWarned) {
+        this._speedPersistWarned = true;
+        console.info("[speed] 速度不再持久化：每次启动从 5% 起步（用户口径）。"
+          + "本次会话内调整仍即时生效。");
+      }
     },
 
     // ================= 权限 =================

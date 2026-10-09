@@ -201,6 +201,15 @@ export const useCameraStore = defineStore("camera", {
       try { await this.camPost("/vision/config", { min_conf: conf }); } catch (e) { this.error = e.message; return; }
       await this.refresh();
     },
+    /**
+     * 三色识别的**尺寸/形状阈值**（走既有 /vision/config 的 thr 部分覆盖）。
+     * ★ 用户口径："太小的不要检测" —— min_side(短边像素) / min_area_ratio(占帧比例)；
+     *   fill_min = 矩形硬门槛（"只识别矩形"），0 = 关闭。
+     */
+    async setThr(patch) {
+      try { await this.camPost("/vision/config", { thr: patch }); } catch (e) { this.error = e.message; return; }
+      await this.refresh();
+    },
     async snap() {
       try {
         return await this.camPost("/snapshot-save");

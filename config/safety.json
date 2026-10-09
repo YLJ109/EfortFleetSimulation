@@ -39,7 +39,7 @@
       "posts": {
         "enabled": true,
         "size": 0.1,
-        "color": "#f2c500"
+        "color": "#2fd6f0"
       },
       "thresholds": {
         "basis": "halfwidth",

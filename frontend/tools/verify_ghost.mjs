@@ -15,6 +15,7 @@ import { createGhost, GHOST_OPACITY, GHOST_ALARM_COLOR,
          GHOST_COLOR, GHOST_COLOR_B } from "../src/three/ghost.js";
 import { buildRobot } from "../src/robot/robotModel.js";
 import { FALLBACK_DH } from "../src/config.js";
+import { EE_META } from "../src/three/endEffector.js";
 
 let pass = 0, fail = 0;
 function ok(name, cond, extra = "") {
@@ -87,6 +88,24 @@ if (ee) {
     const lb = new THREE.Box3().setFromObject(ee).applyMatrix4(inv);
     ok("末端工具整体在法兰前方（z >= -0.005 m，未被埋进腕部）", lb.min.z >= -0.005,
       "min.z=" + lb.min.z.toFixed(4));
+    // ★★ 2026-10-08 现场三改的钉子（用户："J6工具有点太大 / 吸盘要向前一点 /
+    //    J6工具没有连接在J6上，还有个什么间隙"）
+    ok("★ 工具后缘**贴到法兰面**（min.z ≤ 2mm）—— 修掉「悬在法兰前 16mm 的缝」",
+      lb.min.z <= 0.002, "min.z=" + lb.min.z.toFixed(4));
+    // ★ 2026-10-09：判据从"钉死具体比例"改成**钉不变量**。
+    //   原因：`EE_SCALE` 是**设计参数**，会随现场调整（1.5 → 1.2 是被正常调小的），
+    //   钉死数值会让"别人合法调参"变成测试失败（假警报）。
+    //   真正该守的不变量只有两条：
+    //     · 工具整体尺寸不能大到离谱（不许变回 EE_SCALE=2 那种大工具）；
+    //     · 比例本身仍在"设计单位→真实 mm"的合理量级内。
+    ok("★ 工具尺寸在上限内（≤0.18m）且缩放比例未反弹回大尺寸",
+      emax <= 0.18 && EE_META.scale <= 1.6 && EE_META.scale > 0.5,
+      `emax=${emax.toFixed(3)} scale=${EE_META.scale}`);
+    ok("★ 吸盘向前移了（cupFwd > 0，不再摆在立板正中）", EE_META.cupFwd > 0);
+    // ⚠ 单位：back(设计单位) × scale = **mm**；别拿它跟"米"比（第一版就写错了）
+    const backMm = EE_META.back * EE_META.scale;
+    ok("★ 后缘压进法兰但不埋进腕部（-5mm ≤ 后缘 < 0mm）",
+      backMm < 0 && backMm >= -5, `后缘 = ${backMm} mm`);
   }
 }
 

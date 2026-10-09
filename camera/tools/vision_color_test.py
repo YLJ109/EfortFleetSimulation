@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import glob
+import inspect
 import os
 import sys
 
@@ -331,6 +332,135 @@ def main():
     names = [x["color"]["name"] for x in best_two]
     ok("同帧多目标时只报一个（面积最大的蓝）", len(best_two) == 1 and names == ["蓝"],
        "候选 %s → 选中 %s" % ([x["color"]["name"] for x in r_two["results"]], names))
+
+    # ------------------------------------------------------------------
+    print("")
+    print("== K. 矩形硬门槛 fill_min（用户口径：只识别矩形；2026-10-08 新增） ==")
+    # ------------------------------------------------------------------
+    # K1. 旋转不变性：★ 这一条是"硬门槛会不会误杀"的关键 ——
+    #     fill 用 minAreaRect 的长×宽，与旋转无关；斜着举的方块必须照样判得出颜色。
+    rot_ok = True
+    for ang in (0.0, 12.0, 30.0, 45.0, 78.0):
+        img = np.full((H, W, 3), BG, np.uint8)
+        box = cv2.boxPoints(((W / 2, H / 2), (200, 200), ang)).astype(np.int32)
+        cv2.fillPoly(img, [box], hex_bgr("#E02020"))
+        r = vc.VisionEngine().detect(img)
+        got = [x["color"]["name"] for x in r["results"]]
+        if got != ["红"]:
+            rot_ok = False
+            ok("旋转 %.0f° 的方块仍判红" % ang, False, "实际 %s" % got)
+    ok("★ 旋转不变：0/12/30/45/78° 的正方块都判得出「红」（硬门槛不误杀斜着举的件）",
+       rot_ok)
+
+    # K2. 硬门槛精确单测：把 fill 注入到 0.40（低于新默认 0.55）→
+    #     必须**直接判非矩形、不给颜色**。
+    #     ★ 为什么要注入而不是造形状：候选阶段本身就有 min_fill=0.45 + solidity=0.75 两道门，
+    #       现实里"能过候选、却卡在硬门槛"的形状很少（三角形/细长条在候选阶段就被挡了）。
+    #       这条断言保证：门槛真的接在判色链路上，而不是写了没人用。
+    sq = np.full((H, W, 3), BG, np.uint8)
+    cv2.rectangle(sq, (W // 2 - 110, H // 2 - 110), (W // 2 + 110, H // 2 + 110),
+                  hex_bgr("#E02020"), -1)
+    eng = vc.VisionEngine()
+    r0 = eng.detect(sq)
+    ok("正方形正常给出颜色（新门槛不误伤）", len(r0["results"]) == 1
+       and r0["results"][0]["color"]["name"] == "红",
+       "实际 %s" % [x["color"]["name"] for x in r0["results"]])
+    cand = r0["results"][0]
+    FMIN = float(vc.DEFAULT_THR["fill_min"])
+    fake = {"box": np.array(cand["box"], np.int32), "fill": 0.40, "rect": cand["rect"]}
+    col = eng._color(sq, r0["mask"], fake)
+    ok("★ fill=0.40（< 默认 %.2f）→ 判「非矩形」且不输出颜色" % FMIN,
+       col["name"] == "未知" and "非矩形" in (col.get("reason") or ""),
+       "实际 name=%s reason=%s" % (col["name"], col.get("reason")))
+
+    # K3. fill_min 可关闭：填 0 时同一注入值必须重新给出颜色结论（现场可退回旧行为）
+    t_off = dict(vc.DEFAULT_THR)
+    t_off["fill_min"] = 0.0
+    eng_off = vc.VisionEngine(thr=t_off)
+    col_off = eng_off._color(sq, r0["mask"], fake)
+    ok("fill_min=0 时门槛关闭（同一输入重新给出颜色）", col_off["name"] == "红",
+       "实际 %s" % col_off["name"])
+
+    # K3b. 边界：fill 略高于门槛 → 必须放过（不可把刚好达标的也拦了）
+    col_hi = eng._color(sq, r0["mask"],
+                        {"box": np.array(cand["box"], np.int32),
+                         "fill": FMIN + 0.03, "rect": cand["rect"]})
+    ok("fill=%.2f（略高于门槛 %.2f）→ 正常给颜色（门槛不过度拦）" % (FMIN + 0.03, FMIN),
+       col_hi["name"] == "红", "实际 %s" % col_hi["name"])
+
+    # ------------------------------------------------------------------
+    # K5. ★★ 关键回归（2026-10-08 现场事故）：**门槛必须低于现场实测最低值**
+    #
+    #   首次把 fill_min 定成 0.72（只看合成图定的，合成图 fill≈0.95+），
+    #   而现场相机图里**真矩形**的 fill 只有 0.67~0.75（透视斜视+边缘模糊）→
+    #   一律被判"非矩形"→ 不给颜色 → 三色全都"检测不到"（用户报的绿色检不出就是这个）。
+    #
+    #   这里把**现场实测数据**钉死：真实方块的 fill 最低 0.67（蓝色 210746 那张），
+    #   门槛必须比它低、且留 ≥0.08 的余量，否则稍微换个角度/光照就会掉出去。
+    #   ⚠ 改 fill_min 之前必须跑 tools/vision_replay_test.py（真图回放）确认三色检出率。
+    FIELD_MIN_FILL = 0.67      # 现场实测：真矩形的最低 fill（见 tools/vision_replay_test.py）
+    ok("★★ 默认 fill_min 低于现场实测最低 fill（%.2f）且留 ≥0.08 余量（当前 %.2f）"
+       % (FIELD_MIN_FILL, FMIN),
+       FMIN < FIELD_MIN_FILL - 0.08,
+       "fill_min=%.2f，现场实测最低=%.2f" % (FMIN, FIELD_MIN_FILL))
+    ok("★ 反证：旧的 0.72 会被这条判据否掉（说明判据不是恒真的）",
+       0.72 >= FIELD_MIN_FILL - 0.08)
+    ok("fill_min 可由 /vision/config 覆盖（在合法区间表里）",
+       "fill_min" in vc._THR_RANGE)
+    # 软提示线与硬门槛**必须解耦**（以前共用一个数，调一个另一个跟着动，极易改错）
+    ok("fill_warn（软提示线）与 fill_min（硬门槛）是两个独立可调项",
+       "fill_warn" in vc.DEFAULT_THR and "fill_warn" in vc._THR_RANGE
+       and float(vc.DEFAULT_THR["fill_warn"]) > FMIN)
+
+    # ------------------------------------------------------------------
+    # K6. ★★ 置信度不得被 Lab 一票否决（同日第二处现场事故）
+    #   旧实现 conf = min(hsv_conf, lab_conf)：Lab 用**固定标准色卡**比色，
+    #   现场光照偏暗时实测红 a*=12~14 vs 色卡 a*=69 → ΔE 26~34 → lab_conf=0
+    #   → **形状完美（fill=0.98）的红块 conf=0.00** → 被 min_conf 卡掉 → "检测不到"。
+    #   现在口径：HSV 一致性是主判据；Lab 只做复核/提示。
+    #   ⚠ 只在**去掉注释**的源码里找：注释里会写"旧实现是 min(hsv_conf, lab_conf)"
+    #     来解释历史，直接扫全文会把解释文字当成"还在调用"（第一版就踩了）。
+    _src = inspect.getsource(vc.VisionEngine._color)
+    _code = "\n".join(l for l in _src.split("\n") if not l.strip().startswith("#"))
+    ok("★★ 置信度不再被 Lab 的 ΔE 一票否决（代码里没有 min(hsv_conf, lab_conf)）",
+       "min(hsv_conf, lab_conf)" not in _code)
+    ok("★ HSV/Lab 一致时置信度略升（互相印证）",
+       "hsv_conf * 1.15" in inspect.getsource(vc.VisionEngine._color))
+    ok("★ HSV/Lab 分歧时降但不归零（仍交上层按 min_conf 决定）",
+       "hsv_conf * 0.55" in inspect.getsource(vc.VisionEngine._color))
+    ok("★ Lab 偏差大只写进 reason 提示标定，不影响能否给出颜色",
+       "建议现场标定" in inspect.getsource(vc.VisionEngine._color))
+    # 实测反证：现场那张"形状完美但 ΔE=34"的红图，现在必须给出颜色且 conf 高
+    #   （用合成图复刻同一情形：纯色块 + 拉低亮度模拟现场暗光 → ΔE 变大但 HSV 仍对）
+    dark = np.full((H, W, 3), BG, np.uint8)
+    cv2.rectangle(dark, (W // 2 - 110, H // 2 - 110), (W // 2 + 110, H // 2 + 110),
+                  hex_bgr("#7A1010"), -1)          # 暗红：Lab 远离标准红，HSV 色相仍属红
+    rd = vc.VisionEngine().detect(dark)
+    if rd["results"]:
+        c0 = rd["results"][0]["color"]
+        ok("★★ 暗光下的红块仍给出「红」且 conf 不被 Lab 拖到 0",
+           c0["name"] == "红" and float(c0["conf"]) > 0.3,
+           "name=%s conf=%s de=%s" % (c0["name"], c0["conf"], c0.get("de")))
+    else:
+        ok("★★ 暗光下的红块仍给出「红」（不被形状门槛误杀）", False, "无候选")
+
+    # ------------------------------------------------------------------
+    # K7. 色相带不得有"空隙"（绿 90~95 的 5° 漏洞）
+    #   实测：偏青的绿（OpenCV H≈91~94）原本同时落在绿带 [35,90) 与蓝带 [95,135) 之外
+    #   → 表现为"这块绿色怎么都认不出"。现在应为绿 [35,95) / 蓝 [95,135) 无缝隙。
+    src_hue = inspect.getsource(vc._hue_vote)
+    ok("★ 绿带上限已接到 95（与蓝带起点无缝，不再漏 90~95 的偏青绿）",
+       "(H >= 35) & (H < 95)" in src_hue)
+    ok("★ 蓝带起点仍为 95（没有把蓝色划给绿）", "(H >= 95)" in src_hue)
+    # 实测该色：H=92 的偏青绿在旧代码里"三条带都不占"→ 空结果
+    teal = np.full((H, W, 3), BG, np.uint8)
+    # 构造 H≈92 的绿（BGR：G 高、B 中等、R 低）
+    cv2.rectangle(teal, (W // 2 - 110, H // 2 - 110), (W // 2 + 110, H // 2 + 110),
+                  (140, 190, 40), -1)
+    r_teal = vc.VisionEngine().detect(teal)
+    got_teal = r_teal["results"][0]["color"]["name"] if r_teal["results"] else ""
+    ok("★ 偏青绿（H≈92）现在能归到「绿」（旧代码落在 90~95 空隙里判不出）",
+       got_teal == "绿", "实际 %r" % got_teal)
 
     print("")
     print("结果: %d 通过 / %d 失败" % (pass_n, fail_n))

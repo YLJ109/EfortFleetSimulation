@@ -408,32 +408,77 @@ def test_cancel_does_not_report_success_when_stop_ineffective(monkeypatch):
 
 
 def test_cancel_servo_off_failure_is_not_silent(monkeypatch):
-    """★ servo_off 下电失败必须 ok=False，不能吞掉 —— 否则界面显示"已下电"。"""
+    """★ 伺服下电必须**真下电**且不静默 —— 否则界面显示"已下电"而伺服还在。
+
+    ★★ 2026-10-08 重写（原用例钉的是错的实现）：
+      原用例断言"CMD_ZERO(0x0000) 写失败 → ok=False"。但按官方手册 2.2 与参考实现
+      efort_client.servo_disable()：**下电要靠 0x2000(Bit13 取消使能)造下降沿**，
+      0x0000 只是全清、且**控制器常不回正常应答但已生效** —— 把它当失败判据是错的
+      （会把一次成功下电记成失败，也可能反过来掩盖"0x2000 根本没发"）。
+      现在分三条真实判据：
+        (a) 0x2000 写失败 → ok=False（真失败）；
+        (b) 0x2000 已发但伺服状态位不落 → ok=False（不静默谎报成功）；
+        (c) 0x2000 已发且状态位落下 → ok=True（此时 0x0000 失败也不影响）。
+    """
     import app.services.rc_ready as R
 
     monkeypatch.setattr(R, "real_write_enabled", lambda: True)
 
-    class _MB:
-        def rc_snapshot(self):
-            return {"bits": {"run": 0}, "jog_trig": False}, None
+    def _mb(servo_after, dis_err=None, zero_err=None):
+        """servo_after: 回读时的伺服状态位值；dis_err/zero_err: 对应命令的注入错误。"""
+        class _MB:
+            def rc_snapshot(self):
+                return {"bits": {"run": 0, "servo": servo_after}, "jog_trig": False}, None
 
-        def rc_command(self, w):
-            return 0, "注入：写失败" if w == R.CMD_ZERO else None
+            def rc_command(self, w):
+                if w == R.CMD_DISABLE and dis_err:
+                    return None, dis_err
+                if w == R.CMD_ZERO and zero_err:
+                    return None, zero_err
+                return 0, None
+        return _MB()
 
-    r = R.ReadinessService(modbus=_MB()).cancel(servo_off=True)
-    assert r["ok"] is False and "伺服下电失败" in r["error"]
+    # (a1) 0x2000 被拒 **且伺服仍在位** → 必须失败（真失败，不许静默）
+    r = R.ReadinessService(modbus=_mb(1, dis_err="注入：写失败")).cancel(servo_off=True)
+    assert r["ok"] is False, "命令被拒且状态位仍在 → 必须报失败"
+    assert any(s["step"] == "servo_off" and s["ok"] is False for s in r["steps"])
+    assert "0x2000" in r["error"], "诊断要写清是哪条命令被拒"
 
-    # 不带 servo_off 时不碰 CMD_ZERO（默认只做"最轻的那一步"）
+    # (a2) ★★ 2026-10-09 口径修正：0x2000 被拒**但伺服状态位本来就是 0** → 判**成功**。
+    #   理由：取消就绪的目标（伺服下电）**已经达成**，此时报失败是**误报**。
+    #   （旧用例断言这种情况必须失败，那是把"命令没发出去"与"目标没达成"混为一谈了。）
+    #   命令被拒这件事仍要如实写进消息里，不许悄悄吞掉。
+    r = R.ReadinessService(modbus=_mb(0, dis_err="注入：写失败")).cancel(servo_off=True)
+    assert r["ok"] is True, "伺服已在位下时不该误报失败：%s" % r.get("error")
+    _msg = " ".join(str(s.get("msg") or "") for s in r["steps"])
+    assert "0x2000" in _msg and "被拒" in _msg, "命令被拒的事实必须留在诊断里"
+
+    # (b) 0x2000 发出去了但伺服位仍是 1（下电没生效）→ 必须失败，不能谎报成功
+    r = R.ReadinessService(modbus=_mb(1)).cancel(servo_off=True)
+    assert r["ok"] is False and "伺服" in r["error"]
+    assert any(s["step"] == "servo_off" and s["ok"] is False for s in r["steps"])
+
+    # (c) 0x2000 发出、伺服位落下 → 成功；且 **0x0000 超时不算失败**
+    #     （控制器对 0x0000 常不回正常应答，但命令已生效）
+    r = R.ReadinessService(modbus=_mb(0, zero_err="注入：0x0000 超时")).cancel(servo_off=True)
+    assert r["ok"] is True, "0x0000 无应答不应把成功下电记成失败"
+    assert any(s["step"] == "servo_off" and s["ok"] is True for s in r["steps"])
+
+    # 不带 servo_off 时不碰伺服命令（默认只做"最轻的那一步"）
     sent = []
 
-    class _MB2(_MB):
+    class _MB2:
+        def rc_snapshot(self):
+            return {"bits": {"run": 0, "servo": 1}, "jog_trig": False}, None
+
         def rc_command(self, w):
             sent.append(w)
             return 0, None
 
     r2 = R.ReadinessService(modbus=_MB2()).cancel()
     assert r2["ok"] is True
-    assert R.CMD_ZERO not in sent, "默认不该发伺服下电命令"
+    assert R.CMD_ZERO not in sent and R.CMD_DISABLE not in sent, \
+        "默认不该发伺服下电命令"
 
 
 def test_collector_loop_survives_exception(monkeypatch):

@@ -11,9 +11,13 @@
 // 所以代码位残留 CJK ⇒ 一定有引号漏配对（或注释符写错）。
 //
 // 用法：
-//   node tools/check_cjk_bare.mjs                    # 自动扫描 src/ 下所有 .js 与 .vue 的 script 段
-//   node tools/check_cjk_bare.mjs a.js b.vue         # 只查指定文件
+//   node tools/check_cjk_bare.mjs                    # 自动扫描 src/ 与 tools/ 下所有 .js/.mjs/.vue
+//   node tools/check_cjk_bare.mjs a.js b.vue         # 只查指定文件（也接受目录，会递归）
 // 退出码：0 = 干净；1 = 命中。
+//
+// ★★ 2026-10-09 扩到 tools/：这个坑一共犯过 6 次，其中 **4 次发生在 tools/*.mjs**
+//    （写回归脚本时在中文说明串里夹了 ASCII 引号 → 脚本直接 SyntaxError 起不来）。
+//    原先只扫 src，所以那 4 次都要等"跑一下才发现"；现在构建链会把它们提前拦下。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -173,7 +177,15 @@ function walk(dir, out = []) {
 }
 
 let files = process.argv.slice(2);
-if (!files.length) files = walk("src");
+// ★ 参数可以是目录：递归展开（verify 链里直接写 `src tools` 就能一起扫）
+files = files.flatMap((p) => {
+  try {
+    return fs.statSync(p).isDirectory() ? walk(p) : [p];
+  } catch (e) {
+    return [p];      // 不存在就让后面的 readFileSync 报错，别在这里静默吞掉
+  }
+});
+if (!files.length) files = [...walk("src"), ...walk("tools")];
 
 if (!files.length) {
   console.error("check_cjk_bare: 没找到待检查文件");
@@ -192,17 +204,30 @@ for (const f of files) {
     offset = ex.offset;
   }
   const { stray } = scan(code);
-  if (stray.length) {
+  // ★ 豁免机制：JS 允许中文做对象键（`{ 安全: 0 }` 是合法标识符），这类"残留中文"
+  //   不是引号漏配对，属**误报**。允许在行尾写 `// cjk-ok` 单行豁免，
+  //   或在文件前 3 行写 `cjk-ok-file` 整文件豁免。
+  //   ⚠ 刻意做成"显式逐行豁免"而不是"放宽判据"：放宽会同时放过真正的漏配对
+  //     （那才是会导致整页白屏的那个），豁免则必须有人主动写一行说明。
+  const rawLines = raw.split(/\r?\n/);
+  const fileOk = rawLines.slice(0, 3).some((l) => l.includes("cjk-ok-file"));
+  const realStray = fileOk ? [] : stray.filter((s) => {
+    const ln = s.line + offset;
+    return !(rawLines[ln - 1] || "").includes("cjk-ok");
+  });
+  if (realStray.length) {
     bad += 1;
     console.error(`FAIL  ${f}`);
-    for (const s of stray.slice(0, 12)) {
+    for (const s of realStray.slice(0, 12)) {
       const ln = s.line + offset;
-      const txt = f.endsWith(".vue") ? (raw.split(/\r?\n/)[ln - 1] || "").trim() : s.text;
+      const txt = f.endsWith(".vue") ? (rawLines[ln - 1] || "").trim() : s.text;
       console.error(`  L${ln}  代码位出现中文（多半是串里嵌了 ASCII 引号，请改用「」）: ${txt.slice(0, 130)}`);
     }
-    if (stray.length > 12) console.error(`  … 另有 ${stray.length - 12} 处`);
+    if (realStray.length > 12) console.error(`  … 另有 ${realStray.length - 12} 处`);
+  } else if (fileOk) {
+    console.log(`ok    ${f}（整文件豁免 cjk-ok-file）`);
   } else {
-    console.log(`ok    ${f}`);
+    console.log(`ok    ${f}${stray.length ? "（" + stray.length + " 处已按 cjk-ok 豁免）" : ""}`);
   }
 }
 

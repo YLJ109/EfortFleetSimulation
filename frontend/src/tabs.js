@@ -33,12 +33,12 @@ export const HOME_VIEW = "live";
  */
 export const TABS = [
   { key: "live", icon: "camera", label: "真实监控" },
-  { key: "sim", icon: "layers", label: "模拟仿真" },
   { key: "point", icon: "target", label: "点位执行", needAuth: true },
-  { key: "program", icon: "play", label: "程序执行", needAuth: true },
   { key: "sort", icon: "layers", label: "分拣", needAuth: true },
-  { key: "ops", icon: "activity", label: "运维审计", needAdmin: true },
+  { key: "ai", icon: "megaphone", label: "AI 执行", needAuth: true },
+  { key: "sim", icon: "layers", label: "模拟仿真" },
   { key: "settings", icon: "sliders", label: "系统设置", needAuth: true },
+  { key: "ops", icon: "activity", label: "运维审计", needAdmin: true },
   { key: "about", icon: "info", label: "关于" },
 ];
 

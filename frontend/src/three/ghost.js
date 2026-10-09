@@ -42,14 +42,18 @@ export function createGhost(dh, mounting = "floor", liftY = 0, colorHex = GHOST_
   //   ★ 尺度：该工具是按官方那条 **root.scale = 0.001** 的链设计的（几何值是"近似 mm"），
   //     而程序化模型本身是"米"（robotModel 里 j.d / SCALE，SCALE=1000）→ 这里必须再乘 0.001，
   //     否则整套工具会被放大 1000 倍（残影文件头的铁律同样适用于末端工具）。
-  //   ★ 挂载点用 model.flangeNode（按 DH 的 d6 算出的法兰面）；**不要硬编码 z**，
-  //     往腕部筒身里偏一点，工具就整块埋进去看不见了。
+  //   ★★ 挂载点 = model.eeNode（robotModel 暴露的**链末端帧**原点，z=0）——
+  //     与 manager.js buildArticulatedOfficial 的实体机 tcpNode **完全同位**。
+  //     2026-10-09 踩坑记录：曾挂 flangeNode（关节帧 jg 的子节点）再"往回补 z"，
+  //     但 flangeNode 与链末端帧差着 d6/a6/alpha6 三个变换，补出来的位置是错的
+  //     —— 工具整块旋进腕部筒身"消失"，示教点位也对不上。别再走那条路。
   //   必须在下面"统一染成半透明蓝 + 收集 tint"之前挂上去，末端工具才会一起泛红。
   try {
-    if (model.flangeNode) {
+    const mount = model.eeNode || model.flangeNode;   // eeNode 缺失时退回旧挂点
+    if (mount) {
       const ee = buildEndEffector();
       ee.group.scale.setScalar(0.001);   // 对齐官方 0.001 缩放链（单位：米）
-      model.flangeNode.add(ee.group);
+      mount.add(ee.group);
     }
   } catch (e) { /* 末端工具缺失不影响残影本体 */ }
 

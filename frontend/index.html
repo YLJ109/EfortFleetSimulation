@@ -3,137 +3,148 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>FIT 埃夫特智能机器人远程控制与监控系统 · EFORT ER8-700H</title>
-    <!-- 内联 SVG 图标：避免浏览器自动请求 /favicon.ico 产生 404 -->
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230e1116'/><path d='M9 23V9h9a5 5 0 0 1 0 10h-6' stroke='%23ff7a18' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+    <title>工业机器人远程智控与数字孪生系统 · EFORT ER8-700H</title>
+    <!-- 内联 SVG 图标：青色主题 -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%2304070d'/><path d='M9 23V9h9a5 5 0 0 1 0 10h-6' stroke='%232fd6f0' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
+    <!-- Google Fonts: Sentinel 风格字体 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;600;700&family=Sora:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
     <style>
       /* =================================================================
-         设计令牌（全站唯一取色来源）
+         设计令牌（全站唯一取色来源）— Sentinel 深色指挥中心主题
          ★ 规矩：组件里**只准**引用这里的变量，不准写 #hex / rgba()。
-           理由：以前"选中/悬停"底用的是蓝色 rgba(47,155,255,.1x)，而主色是橙色，
-           同一个界面里出现两套强调色，看着像两个产品拼起来的。
-           现在强调色只有 --accent 一系（--accent / --accent2 / --accent-soft*），
-           语义色只有 ok / warn / err 三系（各带 -soft 底与 -fg 前景）。
            守卫：tools/verify_theme.mjs 扫描组件与 index.html，发现硬编码色即失败。
          ================================================================= */
       :root {
-        /* ---- 底色阶 ---- */
-        --bg: #0e1116;
-        --panel: #161b22;
-        --panel2: #1c2230;
-        --panel3: #232b3a;            /* 三级面板：内嵌区块 / hover 底 */
-        --line: #2a3140;
-        --line2: #3a4250;             /* 强调分隔线（比 --line 亮一档） */
+        /* ---- 底色阶（深蓝黑层级）---- */
+        --bg: #04070d;
+        --panel: #0c1320;
+        --panel2: #111a2a;
+        --panel3: #16202f;
+        --line: rgba(122, 162, 220, 0.11);
+        --line2: rgba(122, 162, 220, 0.2);
         /* ---- 文字 ---- */
-        --txt: #e6edf3;
-        --txt2: #c2cbd6;              /* 次级正文 */
-        --muted: #8b949e;
-        /* ---- 主色（橙）：一系三阶 + 三档透明底 ---- */
-        --accent: #ff7a18;
-        --accent2: #ffb35c;           /* 亮阶：渐变高光 / 高亮文字 */
-        --accent-deep: #d96a12;       /* 暗阶：渐变收尾 */
-        --accent-soft: rgba(255, 122, 24, .10);   /* 悬停底 */
-        --accent-soft2: rgba(255, 122, 24, .16);  /* 选中底 */
-        --accent-soft3: rgba(255, 122, 24, .07);  /* 极淡底（大面积） */
-        --accent-line: rgba(255, 122, 24, .42);   /* 强调描边 */
-        --accent-btn: #3d2a10;                    /* 主按钮实底 */
+        --txt: #e8f0fc;
+        --txt2: #8fa0bd;
+        --muted: #7d8dad;
+        /* ---- 主色（青）：一系三阶 + 三档透明底 ---- */
+        --accent: #2fd6f0;
+        --accent2: #3b82f6;
+        --accent-deep: #1abdd6;
+        --accent-soft: rgba(47, 214, 240, 0.10);
+        --accent-soft2: rgba(47, 214, 240, 0.16);
+        --accent-soft3: rgba(47, 214, 240, 0.07);
+        --accent-line: rgba(47, 214, 240, 0.42);
+        --accent-btn: #0a2a30;
         /* ---- 语义色 ---- */
-        --ok: #3fb950;
-        --ok-soft: rgba(63, 185, 80, .14);
-        --ok-soft2: rgba(63, 185, 80, .30);
-        --ok-line: rgba(63, 185, 80, .50);
-        --ok-btn: #12291a;
-        --warn: #d29922;
-        --warn-fg: #ffd54a;           /* 深底上的警示文字（--warn 太暗读不清） */
-        --warn-soft: rgba(210, 153, 34, .14);
-        --warn-line: rgba(210, 153, 34, .50);
-        --err: #f85149;
-        --err-fg: #ff9a9a;            /* 深底上的错误文字 */
-        --err-soft: rgba(248, 81, 73, .14);
-        --err-btn: #3a1512;
-        --err-line: rgba(248, 81, 73, .45);
-        /* 撞击态（比 --err 更硬的红，报警时要求"刺眼"） */
-        --hit: #ff2020;
-        --hit-bg: rgba(255, 32, 32, .85);
-        --hit-bg-strong: rgba(255, 32, 32, .88);
-        --hit-bg-soft: rgba(255, 32, 32, .60);
-        /* ---- 分类色（审计/日志类别、模拟物体三原色） ---- */
-        --c-auth: #d2a8ff;
-        --c-config: #58a6ff;
-        --c-conn: #39c5cf;
-        --c-pose: #d29922;
-        --c-suck: #f85149;
-        --c-release: #3fb950;
-        --c-wait: #8b949e;
-        --c-red: #c0392b;
-        --c-green: #27ae60;
-        --c-blue: #2e6fdc;
-        --c-none: #6b7280;
-        /* 分类色的"描边档"：徽标/标签边框用它，避免又冒出一堆 rgba 手写值 */
-        --c-auth-line: rgba(210, 168, 255, .40);
-        --c-config-line: rgba(88, 166, 255, .40);
-        --c-config-soft: rgba(88, 166, 255, .14);
-        --c-conn-line: rgba(57, 197, 207, .40);
-        /* ---- 浮层 / 玻璃 / 遮罩 ----
-           浮在 3D 视口上的卡片（关节 HUD、摄像头面板、安全状态片）都用这一组：
-           底色统一"半透明面板色 + 高斯模糊"，描边统一"白纱"（深色底上唯一能读清的细线）。 */
-        --glass: rgba(22, 27, 34, .72);          /* 玻璃底（HUD 常驻） */
-        --glass-solid: rgba(22, 27, 34, .92);    /* 近实心玻璃（悬浮面板） */
-        --glass-line: rgba(255, 255, 255, .08);  /* 玻璃描边 */
-        --glass-line2: rgba(255, 255, 255, .12); /* 玻璃描边（按钮/可点元素） */
-        --veil: rgba(255, 255, 255, .06);        /* 白纱底：玻璃上的 hover */
-        --veil2: rgba(255, 255, 255, .10);       /* 白纱底：hover 加强 */
-        --scrim: rgba(0, 0, 0, .35);             /* 弹窗遮罩 */
-        --scrim2: rgba(0, 0, 0, .55);            /* 遮罩加强 / 大投影 */
-        --ink: #fff;                             /* 深底上的纯白字（撞击/危险标签） */
+        --ok: #2ee6a8;
+        --ok-soft: rgba(46, 230, 168, 0.13);
+        --ok-soft2: rgba(46, 230, 168, 0.28);
+        --ok-line: rgba(46, 230, 168, 0.45);
+        --ok-btn: #0a2a1e;
+        --warn: #ffb020;
+        --warn-fg: #ffdca8;
+        --warn-soft: rgba(255, 176, 32, 0.14);
+        --warn-line: rgba(255, 176, 32, 0.45);
+        --err: #ff4d6d;
+        --err-fg: #ffd7de;
+        --err-soft: rgba(255, 77, 109, 0.14);
+        --err-btn: #3a1220;
+        --err-line: rgba(255, 77, 109, 0.45);
+        /* 撞击态 */
+        --hit: #ff1e56;
+        --hit-bg: rgba(255, 30, 86, 0.85);
+        --hit-bg-strong: rgba(255, 30, 86, 0.88);
+        --hit-bg-soft: rgba(255, 30, 86, 0.60);
+        /* ---- 分类色（审计/日志类别、模拟物体三原色）---- */
+        --c-auth: #9b7bff;
+        --c-config: #3b82f6;
+        --c-conn: #2fd6f0;
+        --c-pose: #ffb020;
+        --c-suck: #ff4d6d;
+        --c-release: #2ee6a8;
+        --c-wait: #7d8dad;
+        --c-red: #ff4d6d;
+        --c-green: #2ee6a8;
+        --c-blue: #3b82f6;
+        --c-none: #4a5a74;
+        /* 分类色的"描边档" */
+        --c-auth-line: rgba(155, 123, 255, 0.40);
+        --c-config-line: rgba(59, 130, 246, 0.40);
+        --c-config-soft: rgba(59, 130, 246, 0.14);
+        --c-conn-line: rgba(47, 214, 240, 0.40);
+        /* ---- 浮层 / 玻璃 / 遮罩 ---- */
+        --glass: rgba(12, 19, 32, 0.78);
+        --glass-solid: rgba(12, 19, 32, 0.92);
+        --glass-line: rgba(122, 162, 220, 0.11);
+        --glass-line2: rgba(122, 162, 220, 0.18);
+        --veil: rgba(122, 162, 220, 0.06);
+        --veil2: rgba(122, 162, 220, 0.10);
+        --scrim: rgba(3, 6, 12, 0.72);
+        --scrim2: rgba(3, 6, 12, 0.55);
+        --ink: #fff;
         /* ---- 形状 / 阴影 / 字体 ---- */
         --radius: 10px;
-        --radius-sm: 7px;
+        --radius-sm: 6px;
         --radius-pill: 999px;
-        --shadow: 0 4px 14px rgba(0, 0, 0, .32);
-        --shadow-lg: 0 12px 34px rgba(0, 0, 0, .46);
-        --shadow-hud: 0 8px 28px rgba(0, 0, 0, .45);
-        --screen: #000;               /* 视频画面底色（必须纯黑，不能跟着主题变） */
-        --font: "Microsoft YaHei UI", "Segoe UI", system-ui, -apple-system, sans-serif;
-        --mono: Consolas, "Cascadia Mono", ui-monospace, monospace;
-        /* 技术读数专用字：Bahnschrift 是 Windows 自带的 DIN 风格窄体，数字 / 关节角 /
-           TCP / 速度百分比用它更有「工业仪表」的锐利感；缺失时回落等宽。 */
-        --num: "Bahnschrift", "DIN Alternate", "Segoe UI", Consolas, ui-monospace, monospace;
-        /* 环境氛围：背景不是死黑，而是带一点橙色环境光的深空灰（下方 body 用渐变叠出来）。 */
-        --amb-top: rgba(255, 122, 24, .07);
-        --amb-bottom: rgba(255, 122, 24, .045);
-        --amb-cool: rgba(118, 138, 168, .05);
+        --shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+        --shadow-lg: 0 10px 34px rgba(0, 0, 0, 0.5);
+        --shadow-hud: 0 8px 28px rgba(0, 0, 0, 0.45);
+        --screen: #000;
+        --font: 'Sora', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+        --mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+        --num: 'Chakra Petch', 'Sora', 'Bahnschrift', 'DIN Alternate', Consolas, ui-monospace, monospace;
+        /* 环境氛围：青色 + 蓝色双光晕 + 极淡网格 */
+        --amb-top: rgba(47, 214, 240, 0.07);
+        --amb-bottom: rgba(59, 130, 246, 0.06);
+        --amb-cool: rgba(122, 162, 220, 0.04);
       }
       * { box-sizing: border-box; }
       html, body { margin: 0; height: 100%; background: var(--bg); color: var(--txt);
         font-family: var(--font); -webkit-font-smoothing: antialiased;
-        text-rendering: optimizeLegibility; }
-      /* 大气氛围：顶部橙色环境光 + 底部暖光 + 冷调收尾，让深色界面有纵深而非一片死黑。 */
+        text-rendering: optimizeLegibility; font-size: 14px; line-height: 1.55; }
+      /* 大气氛围：青色光晕 + 蓝色光晕 + 极淡网格 */
       body {
         background:
-          radial-gradient(1200px 560px at 16% -10%, var(--amb-top), transparent 62%),
-          radial-gradient(1000px 560px at 88% 112%, var(--amb-bottom), transparent 58%),
+          radial-gradient(1000px 520px at 12% -8%, var(--amb-top), transparent 62%),
+          radial-gradient(880px 460px at 108% 108%, var(--amb-bottom), transparent 60%),
           radial-gradient(840px 480px at 50% 124%, var(--amb-cool), transparent 60%),
+          linear-gradient(rgba(122, 162, 220, 0.025) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(122, 162, 220, 0.025) 1px, transparent 1px),
           var(--bg);
+        background-size: 100% 100%, 100% 100%, 100% 100%, 46px 46px, 46px 46px, 100% 100%;
         background-attachment: fixed;
       }
-      /* 焦点可见性：键盘 Tab 走到哪儿必须看得见（以前全站没有 focus 样式） */
       :focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
       ::selection { background: var(--accent-soft2); color: var(--txt); }
       #app { display: flex; flex-direction: column; height: 100vh;
-        animation: ctrl-settle .4s cubic-bezier(.2, .7, .2, 1); }
-      @keyframes ctrl-settle { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+        animation: ctrl-settle .4s cubic-bezier(.2, .9, .3, 1); }
+      @keyframes ctrl-settle { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
       /* ---- 顶部 Tab ---- */
-      #tabs { display: flex; background: var(--panel); border-bottom: 1px solid var(--line);
-        overflow-x: auto; }   /* ★ U-01：1201–1400px 段也允许横向滚动，避免 Tab 被裁且无滚动 */
-      #tabs .tab { flex: 0 0 auto; min-width: 88px; background: transparent; color: var(--muted); border: none;
-        border-bottom: 2px solid transparent; border-radius: 0; padding: 12px 10px; font-size: 14px;
-        cursor: pointer; font-weight: 600; position: relative;
-        transition: color .16s ease, background .16s ease; }
-      #tabs .tab:hover { color: var(--txt); background: var(--panel2); }
-      #tabs .tab.active { color: var(--accent); border-bottom-color: var(--accent);
-        background: linear-gradient(180deg, var(--accent-soft3), transparent 78%); }
+      /* 平行四边形 tab 按钮 — 左右对称（左侧向右倾、右侧向左倾） */
+      .tabs-left .tab {
+        flex: 0 0 auto; min-width: 100px; background: transparent; color: var(--muted); border: none;
+        padding: 12px 22px; font-size: 13px;
+        cursor: pointer; font-weight: 600; position: relative; font-family: var(--font);
+        transition: color .16s ease, background .16s ease, box-shadow .2s ease;
+        clip-path: polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
+      }
+      .tabs-right .tab {
+        flex: 0 0 auto; min-width: 100px; background: transparent; color: var(--muted); border: none;
+        padding: 12px 22px; font-size: 13px;
+        cursor: pointer; font-weight: 600; position: relative; font-family: var(--font);
+        transition: color .16s ease, background .16s ease, box-shadow .2s ease;
+        clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 100%, 10px 100%);
+      }
+      .tabs-left .tab:hover, .tabs-right .tab:hover { color: var(--txt); background: var(--panel2); }
+      /* 选中态：青色高亮 + 底部发光线 */
+      .tabs-left .tab.active, .tabs-right .tab.active {
+        color: #b9f4ff;
+        background: linear-gradient(180deg, var(--accent-soft2), var(--accent-soft));
+        box-shadow: 0 2px 12px rgba(47,214,240,0.25), inset 0 -2px 0 var(--accent);
+      }
 
       #main { display: flex; flex: 1; min-height: 0; }
       .monitor { display: flex; flex: 1; min-height: 0; min-width: 0; }
@@ -142,56 +153,45 @@
       .hud-tip { position: absolute; left: 12px; bottom: 10px; font-size: 12px;
         color: var(--muted); pointer-events: none; }
       .sim-hud { position: absolute; left: 12px; top: 10px; font-size: 13px; color: var(--accent);
-        background: var(--glass); border: 1px solid var(--line); border-radius: 6px;
-        padding: 6px 10px; pointer-events: none; }
+        background: var(--glass); border: 1px solid var(--glass-line); border-radius: var(--radius-sm);
+        padding: 6px 10px; pointer-events: none; backdrop-filter: blur(14px) saturate(140%);
+        -webkit-backdrop-filter: blur(14px) saturate(140%); }
 
-      /* 宽度由 stores/ui.js 的 SIDE_DEF(=400) 经 --side-w 下发；这里的 400px 只是
-         "JS 还没跑起来"时的首帧兜底值，★ 必须与 SIDE_DEF 保持一致，否则会看到一次宽度跳变。 */
       .side { width: var(--side-w, 400px); flex: none; background: var(--panel);
         border-left: 1px solid var(--line);
         display: flex; flex-direction: column; padding: 14px; gap: 12px; overflow-y: auto;
-        min-height: 0;            /* ★ 根治：flex 列子项默认 min-height:auto 会被内容撑高、
-                                      导致 .side 跟着变高而非自身滚动。显式 0 让它在父级限高内滚动 */
-        overscroll-behavior: contain;   /* 栏内滚到底不向外冒泡（避免误触发整页/3D 缩放） */
+        min-height: 0;
+        overscroll-behavior: contain;
         transition: width .16s ease, padding .16s ease; }
-      /* 折叠：宽度归零 + 去掉内边距与边框。★ 不要用 display:none ——
-         SafetyPanel 里挂着监听和定时器，保持挂载更稳，切回来状态不丢。 */
       .side.collapsed { width: 0; padding: 0; border-left: none; overflow: hidden; }
-      /* ★★ 右栏的子项必须 flex:none，否则"运行日志被压成两三行"：
-         .side 是 flex 列容器，子项默认 flex-shrink:1 —— 内容超高时**所有卡片一起被压扁**，
-         处在最下面的「运行日志」被压得只剩两三行（看着像 max-height 设小了，其实是这个）。
-         滚动容器只该有一个：让 .side 自己滚，卡片保持自然高度。 */
       .side > * { flex: none; }
-      .monitor.dragging .side { transition: none; }   /* 拖拽中不要过渡，否则跟手迟钝 */
+      .monitor.dragging .side { transition: none; }
       .hidden { display: none !important; }
 
-      /* ---- 全局滚动条（统一适配项目深色主题）----
-         深色主题下系统默认滚动条几乎看不见，用户会以为"没有滚动条"。
-         这里给全站一层统一滚动条：轨道用主题底色、滑块用 --line 渐变（悬停变 --accent 橙），
-         苹果/圆角 + 内缩边框呈现"细窄悬浮"效果，覆盖所有可滚动容器。 */
+      /* ---- 全局滚动条 ---- */
       *::-webkit-scrollbar { width: 10px; height: 10px; }
       *::-webkit-scrollbar-track { background: transparent; }
       *::-webkit-scrollbar-thumb {
-        background: linear-gradient(180deg, var(--line2) 0%, var(--panel) 100%);
+        background: linear-gradient(180deg, var(--panel3) 0%, var(--panel) 100%);
         border-radius: 6px;
-        border: 2px solid var(--bg);          /* 内缩，滑块呈细窄悬浮条 */
+        border: 2px solid var(--bg);
       }
       *::-webkit-scrollbar-thumb:hover {
         background: linear-gradient(180deg, var(--accent) 0%, var(--accent-deep) 100%);
       }
       *::-webkit-scrollbar-corner { background: transparent; }
       *::-webkit-scrollbar-button { display: none; }
-      /* Firefox（Gecko）滚动条：细 + 主题配色 */
       * { scrollbar-width: thin; scrollbar-color: var(--line) var(--bg); }
 
-      /* ---- 右栏手柄：拖动调宽 / 单击折叠 / 双击复位 ---- */
+      /* ---- 右栏手柄 ---- */
       .side-grip { position: relative; flex: none; width: 10px; cursor: col-resize;
         display: flex; align-items: center; justify-content: center;
         background: var(--bg); border-left: 1px solid var(--line);
         border-right: 1px solid var(--line); user-select: none; touch-action: none; }
       .side-grip .grip-bar { position: absolute; top: 50%; transform: translateY(-50%);
         width: 2px; height: 44px; border-radius: 2px; background: var(--line); }
-      .side-grip:hover .grip-bar, .side-grip.dragging .grip-bar { background: var(--accent); }
+      .side-grip:hover .grip-bar, .side-grip.dragging .grip-bar { background: var(--accent);
+        box-shadow: 0 0 8px rgba(47,214,240,0.4); }
       .side-grip .grip-ico { position: relative; z-index: 1; display: flex; align-items: center;
         justify-content: center; width: 16px; height: 22px; border-radius: 4px;
         background: var(--panel); border: 1px solid var(--line); color: var(--muted);
@@ -254,26 +254,28 @@
       .ev-item.clear .ev-s { color: var(--ok); }
       .ev-item .ev-n { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-      /* ---- 卡片：全站统一外形（圆角/阴影/描边/标题条） ----
-         ★ 标题条（h3）带下分隔线 + 图标着色，是"卡片有边界感"的关键：
-           以前卡片与卡片之间只靠 12px 间距区分，滚起来一片糊。 */
+      /* ---- 卡片：面板顶部发光线 + 角标装饰 ---- */
       .card { position: relative; background: linear-gradient(180deg, var(--panel2), var(--panel));
         border: 1px solid var(--line); border-radius: var(--radius); padding: 12px;
-        box-shadow: var(--shadow);
-        transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
-      .card:hover { border-color: var(--line2); box-shadow: var(--shadow-lg); transform: translateY(-1px); }
+        box-shadow: var(--shadow); overflow: hidden;
+        transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease; }
+      .card::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(47,214,240,0.3), transparent);
+        opacity: 0.5; pointer-events: none; }
+      .card:hover { border-color: rgba(122,162,220,0.2); box-shadow: var(--shadow-lg); transform: translateY(-1px); }
+      .card:hover::before { opacity: 0.8; }
       .card h3 { margin: 0 0 10px; padding-bottom: 8px; font-size: 13px; font-weight: 700;
-        color: var(--accent); letter-spacing: .4px;
+        color: var(--txt); letter-spacing: .03em; font-family: 'Chakra Petch', var(--font);
         border-bottom: 1px solid var(--line);
         display: flex; align-items: center; gap: 6px; }
       .status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
       .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
-      .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.err { background: var(--err); }
+      .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+      .dot.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+      .dot.err { background: var(--err); box-shadow: 0 0 8px var(--err); }
       .row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; font-size: 13px; }
       .row .k { color: var(--muted); }
       .row .v { font-variant-numeric: tabular-nums; font-weight: 600; font-family: var(--num); }
-      /* 关节 / 示教滑块行（唯一一份定义；此前上下各写了一份、后者覆盖前者，
-         导致"改了上面那份不生效"，见方案 T3） */
       .axis { display: grid; grid-template-columns: 26px 1fr 52px; align-items: center;
         gap: 6px; margin: 6px 0; padding: 2px 4px; border-radius: var(--radius-sm);
         transition: background .12s ease; }
@@ -283,19 +285,22 @@
       .axis .deg { font-size: 11px; color: var(--txt); text-align: right;
         font-variant-numeric: tabular-nums; font-family: var(--num); }
       .btns { display: flex; gap: 8px; }
-      /* ---- 按钮：统一外形 + 过渡 + 按下反馈 ---- */
-      /* ★ 需求（按钮过宽）：原来 `flex:1` 让按钮在 .btns 里**强制撑满整行** ——
-         单个按钮就会占满整行、看着又宽又空。改为按内容宽度（可收缩、不强制伸展），
-         需要等宽铺满的行请在各自 .btns 上显式加 flex。 */
-      button { flex: 0 1 auto; max-width: 100%; background: var(--panel); color: var(--txt);
-        border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 12px;
-        cursor: pointer; font-size: 13px; font-family: inherit;
+      /* ---- 按钮 ---- */
+      button { flex: 0 1 auto; max-width: 100%; background: var(--panel2); color: var(--txt);
+        border: 1px solid var(--line2); border-radius: var(--radius-sm); padding: 8px 12px;
+        cursor: pointer; font-size: 13px; font-family: inherit; font-weight: 500;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-        transition: background .14s ease, border-color .14s ease, color .14s ease; }
-      button:hover:not(:disabled) { border-color: var(--accent); background: var(--panel3); }
+        transition: transform .14s ease, box-shadow .2s ease, background .2s ease, border-color .2s ease; }
+      button:hover:not(:disabled) { border-color: rgba(122,162,220,0.34); background: var(--panel3);
+        transform: translateY(-1px); }
       button:active:not(:disabled) { transform: translateY(1px); }
-      button.primary { background: var(--accent-btn); border-color: var(--accent); color: var(--accent); }
-      button.rec-on { background: var(--err-btn); border-color: var(--err); color: var(--err); }
+      button.primary { background: linear-gradient(135deg, var(--accent), var(--accent2));
+        border-color: transparent; color: #04121a; font-weight: 700;
+        box-shadow: 0 6px 20px rgba(47,214,240,0.22); }
+      button.primary:hover:not(:disabled) { box-shadow: 0 8px 26px rgba(47,214,240,0.32); }
+      button.rec-on { background: linear-gradient(135deg, #ff5c7a, #e02a4e);
+        border-color: transparent; color: #fff;
+        box-shadow: 0 6px 20px rgba(255,77,109,0.24); }
       button:disabled { opacity: .4; cursor: not-allowed; }
       .small { font-size: 11px; color: var(--muted); line-height: 1.5; }
       .calib { color: var(--warn); font-size: 11px; margin-top: 6px; }
@@ -307,22 +312,18 @@
       .tag.real { background: var(--ok-btn); color: var(--ok); }
       .tag.sim { background: var(--warn-soft); color: var(--warn); }
 
-      /* ---- 摄像头悬浮面板 ----
-         ★ 这里**不再**定义 .cam-panel/.cam-head/.cam-screen 等：它们已全部搬到
-           components/CameraPanel.vue 的 scoped 样式里。此前两边各写一份，
-           全局这份的 `top:12px; right:12px; width:280px; z-index:25` 会与组件里
-           内联的 left/top/width 和 scoped 的 z-index:30 打架（表现为面板位置飘、
-           被关节 HUD 咬掉一块、折叠高度不生效）—— 重复定义是"卡片有问题"的根源。 */
-      /* ★ 数字输入框不再写死 132px：由所在容器决定宽度，避免右侧溢出面板 */
       .side select { background: var(--panel); color: var(--txt); border: 1px solid var(--line);
         border-radius: 4px; padding: 3px 6px; width: 132px; font-size: 12px; max-width: 100%; }
-      .side input[type=number] { background: var(--panel); color: var(--txt); border: 1px solid var(--line);
-        border-radius: 4px; padding: 3px 6px; width: 100%; min-width: 0; font-size: 12px; }
+      .side input[type=number] { background: #080e19; color: var(--txt); border: 1px solid var(--line2);
+        border-radius: var(--radius-sm); padding: 3px 6px; width: 100%; min-width: 0; font-size: 12px;
+        transition: border-color .18s, box-shadow .18s; }
+      .side input[type=number]:focus { border-color: rgba(47,214,240,0.55);
+        box-shadow: 0 0 0 3px rgba(47,214,240,0.1); }
       .side input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; }
 
       /* ---- 指令预演 ---- */
-      .side .row input[type=number] { background: var(--panel); color: var(--txt);
-        border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px;
+      .side .row input[type=number] { background: #080e19; color: var(--txt);
+        border: 1px solid var(--line2); border-radius: 4px; padding: 3px 6px;
         width: 96px; font-size: 12px; text-align: right; }
       .cmd-result.ok { color: var(--ok); }
       .cmd-result.err { color: var(--err); }
@@ -337,11 +338,15 @@
         border: 1px solid var(--glass-line);
         border-radius: 12px;
         box-shadow: var(--shadow-hud);
-        padding: 10px 12px; user-select: none; }
+        padding: 10px 12px; user-select: none; overflow: hidden; }
+      .hud-joints::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(47,214,240,0.3), transparent);
+        opacity: 0.5; pointer-events: none; }
       .hud-head { display: flex; align-items: center; gap: 7px; font-size: 12px;
         color: var(--muted); padding-bottom: 8px; margin-bottom: 8px;
         border-bottom: 1px solid var(--veil); }
-      .hud-title { font-weight: 700; color: var(--txt); letter-spacing: .5px; }
+      .hud-title { font-weight: 700; color: var(--txt); letter-spacing: .5px;
+        font-family: 'Chakra Petch', var(--font); }
       .hud-src { font-size: 10px; color: var(--muted); }
       .hud-fps { font-size: 10px; color: var(--muted); margin-left: auto;
         font-variant-numeric: tabular-nums; }
@@ -390,37 +395,23 @@
         animation: sa-blink .5s steps(1, end) infinite; }
       @keyframes sa-blink { 50% { opacity: .3; } }
 
-      /* ---- 底部状态栏：三盏常驻状态灯 + 连接自检/操作引导 + 控制区 ----
-         ★ 为什么是独立的一条底栏而不是浮层：引导条以前在 #main 上面，会把 3D 视口往下挤，
-           而且它出现/消失时视口高度会跳。挪到底部后视口紧贴 Tab 栏、高度稳定。
-         ★ 安全围栏状态片**已移出底栏**（见下方 #safety-chip）：
-           它现在是 .view 里的浮层，贴在 3D 视口右下角。
-
-     ★ 连接自检 / 操作引导条（#guide-zone）也已移出底栏：浮在 3D 视口底部上方。
-       bottom 留出底栏高度、不挤视口高度；先居中再整体左偏一点、限宽（不要太宽，
-       免得盖住 3D 画面），长提示完整换行（GuideBar .gb-hint）。 */
+      /* ---- 底部状态栏 ---- */
       #guide-zone { position: fixed; left: 50%; transform: translateX(calc(-50% - 56px));
         bottom: 110px; z-index: 60; width: min(620px, 86vw); }
       #bottom-zone { flex: none; display: flex; align-items: center; gap: 10px;
         padding: 5px; flex-wrap: wrap; }
 
-      /* ---- 安全围栏常驻状态片（浮在 3D 视口右下角） ----
-         ★ 定位基准是 .view 自己（index.html 里 .view { position: relative }），
-           所以右栏拖宽/折叠、窄屏上下堆叠，状态片都自动跟着视口走，
-           完全不需要 JS 去算右栏宽度 —— 这是它没留在底栏的主要原因。
-         ★ 左侧留出 .hud-tip（"鼠标左键旋转…"）的位置：视口极窄时可能贴上，
-           所以贴右 12px 而不是铺满；.hud-tip 的 left:12px 与本条 right:12px 对称。 */
+      /* ---- 安全围栏常驻状态片 — Sentinel 毛玻璃 ---- */
       #safety-chip { position: absolute; right: 12px; bottom: 10px; z-index: 14;
         display: flex; align-items: center; gap: 8px;
         padding: 6px 12px; border-radius: 8px; font-size: 12px;
-        border: 1px solid var(--glass-line); background: var(--panel2);
+        border: 1px solid var(--glass-line); background: var(--glass-solid);
         color: var(--muted); user-select: none;
-        backdrop-filter: blur(6px); box-shadow: var(--shadow); }
+        backdrop-filter: blur(14px) saturate(140%); -webkit-backdrop-filter: blur(14px) saturate(140%);
+        box-shadow: var(--shadow-hud); }
       #safety-chip .sc-dot { width: 9px; height: 9px; border-radius: 50%; flex: none;
         transition: background .15s ease, box-shadow .15s ease; }
       #safety-chip .sc-num { font-variant-numeric: tabular-nums; color: var(--txt); font-family: var(--num); }
-      /* 「残影」标记：这份读数量的是预演目标位姿，不是实体机现在的位置。
-         只加一个小标签，不改状态片的配色与二分口径（见 safetyLabels.js）。 */
       #safety-chip .sc-src { font-size: 10px; padding: 1px 5px; border-radius: 4px;
         border: 1px solid var(--glass-line); color: var(--muted); }
       #safety-chip.safe .sc-dot { background: var(--ok); box-shadow: 0 0 7px var(--ok); }
@@ -434,16 +425,14 @@
 
       /* =================================================================
          点位执行 / 程序执行（两页共用样式）
-         ★ 放在全局而不是各自 scoped：拆成两页后若各写一份，改一处必漏一处。
          ================================================================= */
       .exec-hud { position: absolute; left: 12px; top: 10px; z-index: 12;
         font-size: 13px; color: var(--accent); background: var(--glass);
-        border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px;
-        pointer-events: none; }
+        border: 1px solid var(--glass-line); border-radius: 6px; padding: 6px 10px;
+        pointer-events: none; backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
       .side h3 { display: flex; align-items: center; gap: 6px; }
       .h3-sub { font-size: 10px; font-weight: 400; color: var(--muted); margin-left: auto;
         text-align: right; }
-      /* h3 右侧的刷新小按钮（示教器程序卡重新扫描 programs 目录） */
       .h3-refresh { flex: none; display: inline-flex; align-items: center; justify-content: center;
         width: 20px; height: 20px; padding: 0; border: 1px solid var(--line);
         border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer;
@@ -456,14 +445,14 @@
       /* 分段选择 */
       .seg { display: flex; gap: 4px; align-items: center; margin-bottom: 8px; }
       .seg button { flex: none; padding: 4px 10px; font-size: 11px; border-radius: var(--radius-sm); }
-      .seg button.on { color: var(--accent); border-color: var(--accent);
-        background: var(--accent-soft); }
+      .seg button.on { color: #b9f4ff; border-color: var(--accent);
+        background: linear-gradient(135deg, rgba(47,214,240,0.18), rgba(59,130,246,0.10));
+        box-shadow: inset 0 0 0 1px rgba(47,214,240,0.25); }
       .seg.mini button { padding: 2px 8px; }
       .ghost-toggle { margin-left: auto; display: inline-flex; align-items: center; gap: 4px;
         font-size: 11px; color: var(--muted); }
 
-      /* 关节 / 示教滑块行 → 已并入上面 .card 区的唯一一份定义（勿在此重复） */
-      .tcp-in { width: 100%; background: var(--bg); color: var(--txt); border: 1px solid var(--line);
+      .tcp-in { width: 100%; background: #080e19; color: var(--txt); border: 1px solid var(--line2);
         border-radius: 4px; padding: 3px 6px; font-size: 12px; }
 
       /* 点动 */
@@ -493,28 +482,22 @@
         gap: 8px; }
       .pf-row { display: flex; align-items: center; gap: 8px; }
       .pf-row label { color: var(--muted); font-size: 12px; flex: none; width: 40px; }
-      .pf-row input[type=text], .pf-row select { flex: 1; min-width: 0; background: var(--bg);
-        color: var(--txt); border: 1px solid var(--line); border-radius: 4px;
+      .pf-row input[type=text], .pf-row select { flex: 1; min-width: 0; background: #080e19;
+        color: var(--txt); border: 1px solid var(--line2); border-radius: 4px;
         padding: 5px 8px; font-size: 12px; }
       .pf-row input[type=range] { flex: 1; accent-color: var(--accent); }
       .pf-row .v { color: var(--txt); font-variant-numeric: tabular-nums; }
       .pf-grid { display: grid; grid-template-columns: 28px 1fr 28px 1fr 28px 1fr;
         gap: 6px 8px; align-items: center; }
-      /* ★ 六等分网格：关节角表单是"6 个标签一行 + 6 个输入框一行"（12 个子元素按行填充），
-         不能用上面"标签+输入框成对同行"的 28px/1fr 列模板 —— 否则自动落位后
-         J1/J3/J5 落进 28px 窄列、J2/J4/J6 落进 1fr 宽列，六个框宽窄不一（现场截图问题）。 */
       .pf-grid6 { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
         gap: 6px 8px; align-items: center; }
       .pf-grid6 label { color: var(--muted); font-size: 12px; text-align: center; }
-      .pf-grid6 input, .pf-grid6 select { width: 100%; background: var(--bg); color: var(--txt);
-        border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; font-size: 12px; }
+      .pf-grid6 input, .pf-grid6 select { width: 100%; background: #080e19; color: var(--txt);
+        border: 1px solid var(--line2); border-radius: 4px; padding: 4px 6px; font-size: 12px; }
       .pf-grid label { color: var(--muted); font-size: 12px; }
-      .pf-grid input, .pf-grid select { width: 100%; background: var(--bg); color: var(--txt);
-        border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; font-size: 12px; }
+      .pf-grid input, .pf-grid select { width: 100%; background: #080e19; color: var(--txt);
+        border: 1px solid var(--line2); border-radius: 4px; padding: 4px 6px; font-size: 12px; }
       .pf-err { color: var(--err); font-size: 12px; display: flex; align-items: center; gap: 5px; }
-      /* ★ 限高 + 内滚动：点位可能有几十条，不限高会把下面的卡片一路顶到屏幕外，
-         而 .side 是整栏滚动 —— 用户在"滚半天看不到别的卡片"时会以为界面坏了。
-         限高后本列表自己滚，卡片自然高度与整栏滚动都保持稳定。 */
       .pt-list { display: flex; flex-direction: column; gap: 6px;
         max-height: 340px; overflow-y: auto; padding-right: 2px; }
       .pt-item { display: flex; align-items: center; gap: 8px; padding: 7px 8px;
@@ -529,14 +512,12 @@
       .pt-tag { font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--ok-btn);
         color: var(--ok); white-space: nowrap; }
       .pt-tag.warn { background: var(--warn-soft); color: var(--warn); }
-      /* 程序号徽标（示教器程序的数字编号，如 200 / 411） */
       .pt-num { flex: none; min-width: 30px; text-align: center; padding: 1px 6px;
         border-radius: 4px; font-size: 11px; font-weight: 700;
         font-family: var(--num); font-variant-numeric: tabular-nums;
-        color: var(--accent2); background: var(--accent-soft);
+        color: var(--accent); background: var(--accent-soft);
         border: 1px solid var(--accent-line); }
-      /* 类型徽标配色：示教器（控制器）= 主色橙，点位序列 = 配置蓝，区分默认绿（步数/文件） */
-      .pt-tag.teach { background: var(--accent-soft2); color: var(--accent2); }
+      .pt-tag.teach { background: var(--accent-soft2); color: var(--accent); }
       .pt-tag.seq { background: var(--c-config-soft); color: var(--c-config); }
       .pt-joints { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; font-family: var(--num); }
       .pt-ops { display: flex; gap: 5px; flex: none; flex-wrap: wrap; }
@@ -548,14 +529,11 @@
       .exec-result.ok { color: var(--ok); background: var(--ok-soft); }
       .exec-result.err { color: var(--err); background: var(--err-soft); }
 
-      /* 运行日志（程序执行页）
-         ★ height 用固定值而不是 max-height：max-height 只是上限，
-           真正的高度会被父级的 flex 压缩吃掉（见上面 .side > * 那段）。
-           148px 扣掉 12px 内边距 ≈ 7 行 @ line-height 1.5 —— 稳超"至少 5~6 行"。 */
+      /* 运行日志 */
       .run-log { margin-top: 8px; height: 148px; flex: none; overflow-y: auto;
         display: flex; flex-direction: column; gap: 3px;
         font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums;
-        background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+        background: #080e19; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
       .run-log .rl { display: flex; gap: 6px; }
       .run-log .rl-t { color: var(--muted); flex: none; }
       .run-log .rl.info { color: var(--txt); }
@@ -564,13 +542,12 @@
       .run-log .rl.err { color: var(--err); }
       .prog-bar { height: 4px; border-radius: 2px; background: var(--glass-line);
         overflow: hidden; margin: 8px 0 2px; }
-      .prog-bar > i { display: block; height: 100%; width: 0%; background: var(--accent);
+      .prog-bar > i { display: block; height: 100%; width: 0%;
+        background: linear-gradient(90deg, var(--accent), var(--accent2));
         transition: width .18s ease; }
 
       /* =================================================================
-         阶段 3：响应式布局
-         ★ 只调整"宽度/换行方向"，绝不隐藏或删除任何面板内容 ——
-           窄屏上宁可上下分区滚动，也不让用户丢功能。
+         响应式布局
          ================================================================= */
       @media (max-width: 1400px) {
         .side-grip + .side { max-width: none; }
@@ -578,16 +555,11 @@
       @media (max-width: 1200px) {
         .side { padding: 12px; }
         #brand { padding: 0 12px; max-width: 268px; }
-        #tabs .tab { flex: 0 0 auto; min-width: 0; padding: 12px 12px; font-size: 13px; }
+        #tabs .tab { flex: 0 0 auto; min-width: 0; padding: 12px 12px; font-size: 12px; }
         #control-zone { padding: 0 2px 0 10px; gap: 8px; }
         .cam-panel { width: 240px; }
       }
-      /* ★ 1120 = stores/ui.js 的 COMPACT_PX，两侧必须一致：
-         JS 用 matchMedia(COMPACT_PX) 决定要不要隐藏拖拽手柄，CSS 用这个断点决定怎么堆叠。
-         只改一边会出现"手柄藏了但面板还是横排"或反过来的错位。 */
       @media (max-width: 1120px) {
-        /* 面板转纵向堆叠：上面 3D 视口，下面功能卡片，两者都能独立滚动。
-           ★ 此时"拖宽/折叠"没有意义：手柄隐藏，右栏强制全宽（覆盖 --side-w）。 */
         .monitor { flex-direction: column; }
         .view { flex: 1 1 45%; min-height: 220px; }
         .side-grip { display: none; }
@@ -596,11 +568,9 @@
           overflow-y: auto; transition: none; }
         #safety-banner { white-space: normal; max-width: 92vw; text-align: center; }
         .hud-joints { min-width: 176px; max-width: 200px; }
-        /* 底栏元素变多：收窄间距，引导条仍占满中间剩余宽度 */
         #bottom-zone { gap: 6px; }
       }
       @media (max-width: 720px) {
-        /* 品牌区整块让位：这一档 tab 本身就要横向滚动，项目名再占位会把 tab 挤没 */
         #brand { display: none; }
         #tabs { overflow-x: auto; }
         #tabs .tab { flex: 0 0 auto; padding: 10px 10px; font-size: 12px; }

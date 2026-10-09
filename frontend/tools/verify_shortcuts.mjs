@@ -61,7 +61,7 @@ eq(SHORTCUT_GROUPS.filter((g) => !shortcutRows().some((r) => r.group === g)), []
    "A5 每个分组都至少有一个动作（空分组会在「关于」页留下空白块）");
 ok(shortcutRows().reduce((n, r) => n + r.items.length, 0) === SHORTCUTS.length,
    "A6 分组后条目总数 == 定义总数（没有动作被漏掉）");
-eq(TAB_KEY_COUNT, 8, "A7 数字键位数 = 8（与 tabs.js 的模块数一致）");
+eq(TAB_KEY_COUNT, 9, "A7 数字键位数 = 9（与 tabs.js 的模块数一致）");
 // 每个按键只能属于一个动作，否则"按 e 到底干什么"就变成看代码顺序了
 {
   const seen = new Map();
@@ -107,13 +107,13 @@ ok(isTypingTarget(null) === false && isTypingTarget(undefined) === false, "C11 �
 ok(isTypingTarget({ tagName: "input" }) === true, "C12 小写 tagName 也认（大小写不敏感）");
 
 // ---------------------------------------------------------------------
-section("D. 数字键 1~8：切模块");
+section("D. 数字键 1~9：切模块");
 // ---------------------------------------------------------------------
-for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) {
+for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
   eq(resolveKey(key(String(n)), ctx()), "tab:" + n, `D1 按 ${n} → tab:${n}`);
 }
-for (const bad of ["0", "9", "10", "12", "3abc", "abc", "", "  "]) {
-  eq(resolveKey(key(bad), ctx()), "", `D2 非 1~8 的输入 ${JSON.stringify(bad)} 不当作切模块`);
+for (const bad of ["0", "10", "12", "3abc", "abc", "", "  "]) {
+  eq(resolveKey(key(bad), ctx()), "", `D2 非 1~9 的输入 ${JSON.stringify(bad)} 不当作切模块`);
 }
 eq(resolveKey(key("1", { repeat: true }), ctx()), "tab:1", "D3 数字键允许长按重复（连续切页是有意为之）");
 
@@ -180,21 +180,23 @@ section("J. tab:N 的解码：越界必须返回空，不能回落到第一个")
 // ---------------------------------------------------------------------
 eq(tabIndexOf("tab:3"), 3, "J1 tab:3 → 3");
 eq(tabIndexOf("tab:0"), 0, "J2 tab:0 → 0（非法）");
-eq(tabIndexOf("tab:9"), 0, "J3 tab:9 → 0（超出 1~7）");
+eq(tabIndexOf("tab:9"), 9, "J3 tab:9 → 9（第 9 位：AI 执行）");
+eq(tabIndexOf("tab:10"), 0, "J3b tab:10 → 0（超出 1~9）");
 eq(tabIndexOf("toggle_side"), 0, "J4 非 tab 动作 → 0");
 eq(tabIndexOf(""), 0, "J5 空串 → 0");
 eq(tabIndexOf(null), 0, "J6 null → 0");
 
 const VISIBLE_NONE = ["live", "sim", "about"];                  // 无权限：只读页 + 关于
-const VISIBLE_OP = ["live", "sim", "point", "program", "settings", "about"];  // 操作员
-const VISIBLE_ADMIN = ["live", "sim", "point", "program", "ops", "settings", "about"];
+const VISIBLE_OP = ["live", "sim", "point", "program", "sort", "ai", "settings", "about"];  // 操作员
+const VISIBLE_ADMIN = ["live", "sim", "point", "program", "sort", "ai", "ops", "settings", "about"];
 eq(tabKeyFor("tab:1", VISIBLE_NONE), "live", "J7 无权限时按 1 → live");
 eq(tabKeyFor("tab:3", VISIBLE_NONE), "about", "J8 无权限时按 3 → about（序号按可见集合顺延）");
 eq(tabKeyFor("tab:4", VISIBLE_NONE), "", "J9 无权限时按 4 → 空（不能回落到 live）");
 eq(tabKeyFor("tab:3", VISIBLE_OP), "point", "J10 操作员按 3 → point");
-eq(tabKeyFor("tab:6", VISIBLE_OP), "about", "J11 操作员按 6 → about");
-eq(tabKeyFor("tab:5", VISIBLE_ADMIN), "ops", "J12 管理员按 5 → ops（运维审计）");
-eq(tabKeyFor("tab:7", VISIBLE_ADMIN), "about", "J12b 管理员按 7 → about（第 7 个模块）");
+eq(tabKeyFor("tab:8", VISIBLE_OP), "about", "J11 操作员按 8 → about");
+eq(tabKeyFor("tab:7", VISIBLE_ADMIN), "ops", "J12 管理员按 7 → ops（运维审计）");
+eq(tabKeyFor("tab:6", VISIBLE_ADMIN), "ai", "J12c 管理员按 6 → ai（AI 执行）");
+eq(tabKeyFor("tab:9", VISIBLE_ADMIN), "about", "J12b 管理员按 9 → about（最后一位）");
 eq(tabKeyFor("tab:1", []), "", "J13 可见集合为空 → 空");
 eq(tabKeyFor("tab:1", null), "", "J14 可见集合为 null → 空");
 eq(tabKeyFor("nonsense", VISIBLE_ADMIN), "", "J15 非 tab 动作 → 空");

@@ -81,9 +81,9 @@ function makeHazardTexture() {
   const c = document.createElement("canvas");
   c.width = c.height = N;
   const ctx = c.getContext("2d");
-  ctx.fillStyle = "#e0b400";
+  ctx.fillStyle = "#1abdd6";  // 青色主题
   ctx.fillRect(0, 0, N, N);
-  ctx.strokeStyle = "#1b1e22";
+  ctx.strokeStyle = "#0a2a30";
   ctx.lineWidth = N / 5;
   // 45° 斜线：从左下往右上铺满整张图（含两侧溢出，保证平铺无缝）
   for (let x = -2 * N; x <= 2 * N; x += N / 2.5) {
@@ -143,36 +143,34 @@ export function buildCell(opt = {}) {
   group.name = "cell";
   const disposables = [];
 
-  // ---- 环氧自流平地坪（程序化板缝 + 抛光面） ----
-  const epoxy = makeEpoxyTexture();
-  epoxy.repeat.set(size / TILE_STEP, size / TILE_STEP);
+  // ---- 深色科技地坪（深蓝黑 + 青色网格线） ----
   const floorGeo = new THREE.PlaneGeometry(size, size);
   const floorMat = new THREE.MeshPhysicalMaterial({
-    map: epoxy,
-    color: 0xffffff,
-    metalness: 0.18,
-    roughness: 0.46,
-    clearcoat: 0.55,          // 抛光层的清漆反光
-    clearcoatRoughness: 0.28,
-    envMapIntensity: 1.05,
+    color: 0x0a1628,
+    metalness: 0.3,
+    roughness: 0.55,
+    clearcoat: 0.3,
+    clearcoatRoughness: 0.4,
+    envMapIntensity: 0.8,
   });
   const floor = new THREE.Mesh(floorGeo, floorMat);
   floor.rotation.x = -Math.PI / 2;
   floor.position.y = -0.002;
   floor.name = "floor";
   group.add(floor);
-  disposables.push(floorGeo, floorMat, epoxy);
+  disposables.push(floorGeo, floorMat);
 
-  // ---- 0.1m 工程细网格（淡淡压在地坪上） ----
-  const fine = makeGrid(size, step, 0x767d87, 0.3);
+  // ---- 青色工程细网格（淡淡压在地坪上） ----
+  const fine = makeGrid(size, step, 0x2fd6f0, 0.15);
   fine.position.y = 0.0004;
   fine.name = "floor-grid";
   group.add(fine);
   disposables.push(fine.geometry, fine.material);
 
-  // ---- 工作区黄色地标线：3.6m 场地四边（工业现场地面分区线） ----
+  // ---- 工作区青色地标线：3.6m 场地四边（主题色分区线） ----
   const bandMat = new THREE.MeshStandardMaterial({
-    color: 0xd8b400, metalness: 0.05, roughness: 0.62,
+    color: 0x2fd6f0, metalness: 0.1, roughness: 0.5,
+    emissive: 0x2fd6f0, emissiveIntensity: 0.15,
   });
   const bw = 0.07;
   const half = size / 2 - bw / 2;

@@ -93,6 +93,29 @@ DEFAULT_THR: Dict[str, float] = {
     "min_fill": 0.45,          # 最小外接矩形填充率下限（原写死 0.55）
     "solidity_min": 0.75,      # 实心度下限（面积/凸包面积；原写死 0.90）
     "aspect_max": 6.0,         # 长宽比上限（原写死 4.0；部分遮挡的长条仍可能是同一个物料）
+    # ★★ 2026-10-08 新增（用户口径"只需要识别矩形"）：**矩形硬门槛**。
+    #   与上面的 min_fill(0.45) 不是一回事：
+    #     · min_fill = **能否成为候选**（放宽，容忍遮挡/只露一部分，否则会整块漏检）；
+    #     · fill_min = **能否给出颜色结论**（更严：形状明显不像矩形就别报颜色）。
+    #   ⚠ 该值算的是 area/(minAreaRect 长×宽)，**与旋转无关**（斜着举的方块不会因此被误杀）。
+    #
+    #   ★★ 2026-10-08 修正（首次定 0.72 **太高，现场误杀**）：
+    #     0.72 是只看**合成图**定出来的（合成图 fill≈0.95+），而现场相机图受
+    #     透视斜视 + 边缘模糊 + 轻微反光影响，**真矩形的 fill 只有 0.67~0.75**：
+    #       · 现场 miss 记录：0.68、0.71（"非矩形"→ 不给颜色 → 分拣按"检测不到"停）
+    #       · 现场成功记录：0.745（蓝色，刚刚过线）
+    #     0.72 正好卡在真实分布**正中间** → 表现就是"有时能检测、有时检测不到"，
+    #     绿色/蓝色最先中招（fill 偏低）。
+    #     现在取 **0.55**：比现场实测最低值 0.67 再低 0.12 留足余量，
+    #     同时仍高于三角形（minAreaRect fill≈0.50）—— 明显不是矩形的照样拒。
+    #   ⚠ 该值的定法**只能是"低于现场实测最低值"**，不能按合成图定。改之前先跑
+    #     tools/vision_replay_test.py（真图回放）确认三色检出率不掉。
+    #   ⚠ 其它副作用：真被遮住一半的方块会被判非矩形 → 不输出颜色 → 分拣按"检测不到"停。
+    #     现场觉得太严就用面板调低（走 /vision/config，不必改代码）。
+    "fill_min": 0.55,
+    # ★ 软提示线（不拦检、只写 reason 提醒复核）：fill 低于它就标注"杂色（建议复核）"。
+    #   与 fill_min 解耦 —— 以前两者共用一个 0.72，调了一个另一个跟着动，很容易改错。
+    "fill_warn": 0.72,
 }
 
 # 每个键的合法区间：越界一律夹回，不做"拒绝整包"，避免现场配置一个错值就全不检测。
@@ -108,6 +131,8 @@ _THR_RANGE: Dict[str, Tuple[float, float]] = {
     "min_fill": (0.05, 1.0),
     "solidity_min": (0.05, 1.0),
     "aspect_max": (1.0, 50.0),
+    "fill_min": (0.0, 1.0),      # 0 = 关闭该硬门槛（现场可据此完全退回旧行为）
+    "fill_warn": (0.0, 1.0),     # 软提示线（只写 reason，不拦检）
 }
 
 
@@ -157,8 +182,15 @@ def _hue_vote(bgr_roi, s_min=None, v_min=None):
         return ("", 0.0)
     H = hsv[..., 0][sel]
     nr = int(((H < 12) | (H >= 160)).sum())   # 红带（扩到 160 容纳高饱和品红/玫红）
-    ng = int(((H >= 35) & (H < 90)).sum())    # 绿带
-    nb = int(((H >= 95) & (H < 135)).sum())   # 蓝带（收窄上限 145→135，不再吞紫/青）
+    # ★★ 2026-10-08 修正：绿带与蓝带原来留了 **90~95 的 5° 空隙**（绿 [35,90)、蓝 [95,135)）
+    #   —— 偏青的绿（OpenCV H≈91~94，即 182°~188°）会**同时落在两条带之外**，
+    #   表现为"这块绿色怎么都认不出"。现在把边界接上：绿 [35,95)、蓝 [95,135)，
+    #   两条带**无缝隙、无重叠**（纯划分，各自中心不变，不会把蓝判成绿）。
+    #   ⚠ 副作用（如实说明）：偏青的物体（H 90~95）现在归**绿**（以前是"都不认"）。
+    #     取舍理由：本系统只认红/绿/蓝三色，"归到绿"比"检测不到"对现场更可用；
+    #     若现场确实有青色料需要区分，那是另一套色卡的事，不在三色分拣范围内。
+    ng = int(((H >= 35) & (H < 95)).sum())    # 绿带（上限 90 → 95，补掉与蓝之间的空隙）
+    nb = int(((H >= 95) & (H < 135)).sum())   # 蓝带（收窄上限 145→135，不再吞紫）
     m = max(nr, ng, nb)
     if m == 0:
         return ("", 0.0)                       # 全落在三色带之外 → 非三色
@@ -182,16 +214,29 @@ def classify_rgb(lab: Sequence[float], card: Optional[Dict[str, np.ndarray]] = N
     返回 {name, hex, de, conf, alt, alt_de, chroma}。conf 由 ΔE 决定：
     越接近目标色相 conf 越高；离三色都远（如橙色 红↔绿 之间）conf 明显偏低，
     便于用"置信度阈值"把中间色 / 非目标色滤掉。
+
+    ★★ 2026-10-09 修复（**现场"实物标定"以前是白做的**）：
+      `card` 参数从有这个函数起就**完全没被使用**（函数体写死 `RGB_CARD_LAB`，
+      注释还写着"不受标定覆盖影响"）。而现场标定正是往 `calib["card"]` 里写实测 Lab
+      —— 于是**标了也不生效**：界面提示"已用实测样本标定「红」"，判色却仍按标准色卡走。
+      现在：**传了现场卡就用现场卡**，没传才回落标准色卡（保持原有默认行为）。
+      只认 红/绿/蓝 三个键，缺的颜色用标准卡补齐（现场只标了一色也不会 KeyError）。
     """
     L, A, B = float(lab[0]), float(lab[1]), float(lab[2])
     chroma = float(np.hypot(A, B))
-    # 三色判色只用固定三色卡参考，不受 18 类卡/标定覆盖影响
-    tbl = RGB_CARD_LAB
+    # 参考表：现场实测卡优先，缺项用标准卡补
+    tbl = dict(RGB_CARD_LAB)
+    if isinstance(card, dict):
+        for k, v in card.items():
+            if k in RGB_NAMES and v is not None:
+                arr = np.asarray(v, dtype=np.float64).ravel()
+                if arr.size >= 3 and np.all(np.isfinite(arr[:3])):
+                    tbl[k] = arr[:3]
     # 低色度（灰/黑/白）：不属于三色目标
     if chroma < CHROMA_CUT:
         return {"name": "未知", "hex": None, "de": None,
                 "conf": 0.0, "alt": None, "alt_de": None, "chroma": round(chroma, 1)}
-    names = list(RGB_NAMES)
+    names = [n for n in RGB_NAMES if n in tbl]
     refs = np.stack([tbl[n] for n in names], axis=0)
     des = delta_e_2000(np.array([L, A, B], dtype=np.float64), refs)
     order = np.argsort(des)
@@ -508,6 +553,75 @@ def find_rectangles(mask: np.ndarray, min_area_ratio=None,
     return _nms(out, max_items)
 
 
+def explain_no_candidate(mask: np.ndarray, thr: Optional[Dict[str, object]] = None) -> str:
+    """掩膜里有彩色块、却**一个候选都没通过**时，说清"最可能是哪一条拦掉的"。
+
+    ★ 为什么必须有它（2026-10-08 现场实测得出结论）：
+      "检测不到"这句话对现场毫无指导意义 —— 现场需要知道**下一步该动什么**：
+        · "物体超出画面" → 把方块往里挪，别怼到镜头前；
+        · "物体太小"     → 把方块放近/调焦距；
+        · "形状不完整"   → 拿开遮挡物 / 换个角度；
+        · "颜色不在三色" → 确认拿的是红/绿/蓝料。
+      以前这些情况一律报"未发现候选（可能太小/太暗/颜色不在红绿蓝）"，
+      现场只能瞎试。这里按**优先级**逐条给出具体量值与建议。
+
+    ★ 判定顺序刻意与 `find_rectangles` 的门槛链一致（面积 → 短边 → 长宽比 → 填充率 → 实心度），
+      这样"它说的话"与"实际拦它的那一条"是同一个判据，不会指错方向。
+    ★ 画面裁切（贴边）放在**最前面**：实测里这是最常见的真因，而且和其它项会同时成立
+      （被裁切的形状天然 fill/solidity 都低），先说它才不会把人往"形状不好"上带偏。
+    """
+    t = norm_thr(thr)
+    h, w = mask.shape[:2]
+    total = float(h * w)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return "画面里没有彩色块（目标太暗 / 颜色不在红绿蓝 / 镜头被挡）"
+    c = max(cnts, key=cv2.contourArea)
+    area = float(cv2.contourArea(c))
+    if area < 1:
+        return "画面里没有彩色块（目标太暗 / 颜色不在红绿蓝 / 镜头被挡）"
+    (cx, cy), (rw, rh), ang = cv2.minAreaRect(c)
+    short, long = min(rw, rh), max(rw, rh)
+    fill = area / float(rw * rh) if rw * rh > 0 else 0.0
+    hull = cv2.convexHull(c)
+    ha = float(cv2.contourArea(hull))
+    sol = area / ha if ha > 1 else 0.0
+    x, y, bw, bh = cv2.boundingRect(c)
+    edges = []
+    if x <= 2:
+        edges.append("左")
+    if y <= 2:
+        edges.append("上")
+    if x + bw >= w - 2:
+        edges.append("右")
+    if y + bh >= h - 2:
+        edges.append("下")
+
+    if edges:
+        return ("物体超出画面（贴%s边缘，被裁掉）：把方块完整放进画面再测"
+                "（当前彩色块 %d px，短边 %.0f px）" % ("/".join(edges), int(area), short))
+    if area < max(float(t["min_area_abs"]), float(t["min_area_ratio"]) * total):
+        return ("彩色块太小：%d px（需要 ≥ %d px）：把方块放近些或调大焦距"
+                % (int(area), int(max(float(t["min_area_abs"]),
+                                      float(t["min_area_ratio"]) * total))))
+    if short < float(t["min_side"]):
+        return "彩色块太窄：短边 %.0f px（需要 ≥ %d px）：换个角度让方块正面朝向镜头" % (
+            short, int(t["min_side"]))
+    # ⚠ 别写成 `if long/short if short else 99 > x`：三元优先级会把它解析成
+    #   `(long/short) if short else (99 > x)`，判据就废了（我第一版就写错了）。
+    ar = (long / short) if short else 99.0
+    if ar > float(t["aspect_max"]):
+        return "形状太细长（长宽比 %.1f > %.1f）：看它是条状物，不是方形料" % (
+            ar, float(t["aspect_max"]))
+    if fill < float(t["min_fill"]):
+        return "形状不像方形（填充率 %.2f < %.2f）：可能被遮挡或只露出一部分" % (
+            fill, float(t["min_fill"]))
+    if sol < float(t["solidity_min"]):
+        return "形状不完整（实心度 %.2f < %.2f）：可能被遮挡 / 有缺口 / 只露出一部分" % (
+            sol, float(t["solidity_min"]))
+    return "彩色块存在但未通过矩形判定（填充率 %.2f / 实心度 %.2f）" % (fill, sol)
+
+
 def pick_best(results, conf_thr: float = 0.0) -> List[Dict[str, object]]:
     """**只保留唯一目标**：先按置信度阈值过滤，再取面积最大者（面积并列取置信度高者）。
 
@@ -673,7 +787,20 @@ def dominant_lab(frame_bgr: np.ndarray, mask: np.ndarray,
     if w.size > 1:
         w[-1] = max(0.0, 1.0 - float(w[:-1].sum()))
     n = min(5000, ys.size)
-    idx = np.random.choice(ys.size, size=n, replace=False, p=w)
+    # ★★ 2026-10-08 修 P0：`np.random.choice(size=n, replace=False, p=w)` 有一条硬约束 ——
+    #   **p 中非零元素的个数必须 ≥ n**。中心加权 w=exp(-d²/2σ²) 在离质心远的地方会**下溢成 0**，
+    #   物体一大（点集铺开）就满足 `非零数 < n` → 直接抛
+    #   `ValueError: Fewer non-zero entries in p than size` → 整帧 detect() 崩掉。
+    #   现场表现：某个位置的方块一出现，检测线程就抛异常（连"未知"都不返回）。
+    #   修法：**只在非零权重里采样**（语义不变，本来就是"按权重取点"）；
+    #   非零点不够 n 时退回"允许重复"（加权有放回采样），既不崩、也不改变颜色结论。
+    nz = np.nonzero(w)[0]
+    if nz.size >= n:
+        wn = w[nz]
+        wn = wn / wn.sum()
+        idx = nz[np.random.choice(nz.size, size=n, replace=False, p=wn)]
+    else:
+        idx = np.random.choice(ys.size, size=n, replace=True, p=w)
 
     samples = lab_img[ys[idx], xs[idx], :].astype(np.float32)
     samples[:, 0] *= 100.0 / 255.0
@@ -811,6 +938,20 @@ class VisionEngine:
         for name, lab in refs.items():
             if name in self.card and isinstance(lab, (list, tuple)) and len(lab) == 3:
                 self.card[name] = np.array([float(x) for x in lab], dtype=np.float64)
+        # ★★ 2026-10-09 新增：**三色现场卡**（红/绿/蓝的实测 Lab）。
+        #   与上面的 18 类 self.card 分开存：色分拣走的是 classify_rgb，
+        #   它以前只认写死的 RGB_CARD_LAB —— 现场标定写了也没人读（"标了不生效"）。
+        #   现在把 calib["card"] 里的三色项挑出来给 classify_rgb 用。
+        self.rgb_card: Dict[str, np.ndarray] = {}
+        for name in RGB_NAMES:
+            v = refs.get(name)
+            if isinstance(v, (list, tuple)) and len(v) >= 3:
+                try:
+                    arr = np.array([float(x) for x in v[:3]], dtype=np.float64)
+                except (TypeError, ValueError):
+                    continue
+                if np.all(np.isfinite(arr)):
+                    self.rgb_card[name] = arr
 
     def apply_gains(self, bgr: np.ndarray) -> np.ndarray:
         """白平衡通道增益（灰卡标定产物）。"""
@@ -915,7 +1056,10 @@ class VisionEngine:
         alt_de = None
         chroma = 0.0
         name_l = "未知"
-        lab_conf = 0.0
+        # ★ lab_conf 仍算出来，但**不再参与置信度**（见下方"置信度重做"的说明）：
+        #   它是"与固定标准色卡的贴合度"，现场光照下必然偏低，拿它当门会误杀。
+        #   保留赋值仅供调试/落盘观察，命名加下划线前缀以免被误当成生效判据。
+        _lab_conf = 0.0
         lab_arr = [round(float(v), 2)
                    for v in cv2.cvtColor(roi, cv2.COLOR_BGR2LAB).reshape(-1, 3).mean(axis=0)]
         if dom["ok"]:
@@ -925,26 +1069,150 @@ class VisionEngine:
             alt = cr["alt"]
             alt_de = cr["alt_de"]
             chroma = cr["chroma"]
-            lab_conf = cr["conf"]
+            _lab_conf = cr["conf"]
             lab_arr = [round(float(v), 2) for v in dom["lab"]]
+        # ★★ 矩形硬门槛（2026-10-08，用户口径"只需要识别矩形"）：
+        #   形状明显不像矩形 → **直接不给颜色结论**，并说明是"非矩形"（而不是含糊的"未知"）。
+        #   fill 由 minAreaRect 的长×宽算出，**与旋转无关**，不会误杀斜着举的方块。
+        #   阈值 0 表示关闭该门槛（现场可退回旧行为）；默认 0.55（见 DEFAULT_THR 的说明：
+        #   必须低于现场实测最低值 0.67，0.72 会误杀真矩形）。
+        fill_min = float(self.thr.get("fill_min") or 0.0)
+        fill_warn = float(self.thr.get("fill_warn") or 0.0)
+        if fill_min > 0 and fill < fill_min:
+            return {"name": "未知", "hex": None, "conf": 0.0, "alt": alt,
+                    "reason": "非矩形(填充率 %.2f < %.2f)" % (fill, fill_min),
+                    "ratio": round(fill, 3), "fill": round(fill, 3), "lab": lab_arr,
+                    "de": de, "alt_de": alt_de, "chroma": chroma}
         if not name:
             return {"name": "未知", "hex": None, "conf": 0.0, "alt": alt,
                     "reason": "非红绿蓝三色", "ratio": round(fill, 3),
                     "fill": round(fill, 3), "lab": lab_arr,
                     "de": de, "alt_de": alt_de, "chroma": chroma}
-        # 置信度 = HSV 一致性 × 方正度，再与 Lab ΔE 置信取较严者（交叉门控更稳）
+        # =====================================================================
+        # ★★ 置信度（2026-10-08 重做，修"三色全都检不出"）
+        #
+        # 旧实现：`conf = min(hsv_conf, lab_conf)` —— 把 HSV 与 Lab 两个判据**取较严者**。
+        #   听起来更稳，实际是**拿一个坏判据去否决一个好判据**：
+        #     · HSV 色相投票：与光照无关，实测 **100% 正确**（现场图里红/绿/蓝的
+        #       主色相分别稳定落在 H=2~4 / 69~70 / 104~106，全在各自色带内）；
+        #     · Lab ΔE 最近邻：用**固定标准色卡**（红 #E02020 的 a*=69.2）比实测色，
+        #       现场光照偏暗时实测只有 a*=12~14 → **ΔE 26~34** → lab_conf = 1-ΔE/25 **=0**
+        #       → conf=0 → 被 min_conf 卡掉 → 报"检测不到"。
+        #   现场证据：红 fill=0.98（形状完美）却 conf=0.00；蓝 ΔE=21.6 → conf=0.13。
+        #   **颜色本来判对了，是被 Lab 拖死的。**
+        #
+        # 新口径：**HSV 为主判据**（它才是那个稳的），Lab 只做"复核/提示"：
+        #   · 两者一致     → 置信度**略升**（互相印证，最高 1.0）
+        #   · 两者分歧     → 置信度**降一半左右**（但不归零，交回上层按 min_conf 决定）
+        #   · Lab 偏差过大 → 只写进 reason 提示"建议现场标定"，**不影响能否给出颜色**
+        # 这样"红/绿/蓝都能给出颜色"，同时分歧/偏差仍然看得见（不掩盖问题）。
+        # =====================================================================
         hsv_conf = float(ratio_color * (0.5 + 0.5 * min(1.0, max(0.0, fill))))
-        conf = round(float(min(hsv_conf, lab_conf)), 3) if dom["ok"] else round(hsv_conf, 3)
+        conf = hsv_conf
         reason = ""
-        if name_l != name:
-            reason = "HSV/Lab 分歧(%s)" % name_l
-        elif fill < 0.72:
+        if dom["ok"]:
+            if name_l == name:
+                conf = min(1.0, hsv_conf * 1.15)          # 一致 → 略升（封顶 1.0）
+            else:
+                conf = hsv_conf * 0.55                    # 分歧 → 降，但不归零
+                reason = "HSV/Lab 分歧(%s)" % name_l
+        # Lab 与固定色卡差得远 → 提示标定（**不参与置信度**，只提示）
+        if de is not None and de > 20.0:
+            tip = "与标准色卡偏差大(ΔE=%.0f)建议现场标定" % de
+            reason = (reason + "；" + tip) if reason else tip
+        # 形状偏"杂" → 软提示（不拦检）
+        if not reason and fill_warn > 0 and fill < fill_warn:
             reason = "杂色（建议复核）"
         return {"name": name, "hex": {"红": "#E02020", "绿": "#1FA74A", "蓝": "#1F4FD8"}[name],
-                "conf": conf, "alt": alt,
+                "conf": round(float(min(1.0, max(0.0, conf))), 3), "alt": alt,
                 "reason": reason,
                 "ratio": round(fill, 3), "fill": round(fill, 3), "lab": lab_arr,
                 "de": de, "alt_de": alt_de, "chroma": chroma}
+
+
+# =====================================================================
+# 7.5 三色自学习标定（2026-10-09 新增）
+#
+#   为什么要有它（三个真问题）：
+#     ① **标了不生效**：`classify_rgb()` 的 `card` 参数此前从未被使用，
+#        现场"实物标定"写进 calib["card"] 也影响不到判色 —— 白做。
+#     ② **单帧采样太脆**：原 `calibrate_sample` 直接取"最近一次判定"的 Lab，
+#        一帧的反光/抖动就进了色卡（而且没有任何质量门槛）。
+#     ③ **标完不知道有没有变好**：没有任何手段检验标定效果，只能靠现场反复试。
+#
+#   本模块用**稳健统计**解决 ②：多帧入池 → 中位 + MAD 离群剔除 → 取中位做主参考。
+#   中位数对离群天然不敏感（比均值稳得多），MAD 用来显式挑出"这一帧明显偏了"。
+# =====================================================================
+class ColorSampler:
+    """某色的实测样本池（每色最多 keep 帧），返回稳健的代表值。
+
+    用法：
+        s = ColorSampler()
+        s.add("红", [48.2, 69.1, 50.3], conf=0.93)
+        rep = s.representative("红")     # -> {ok, lab, n, used, outliers, spread}
+    """
+
+    def __init__(self, keep: int = 40, mad_k: float = 3.5):
+        self.keep = int(keep)          # 每色最多保留多少帧
+        self.mad_k = float(mad_k)      # 离群阈值：|x-median| > k*MAD 视为离群
+        self.pool: Dict[str, List[List[float]]] = {c: [] for c in RGB_NAMES}
+
+    def add(self, name: str, lab: Sequence[float], conf: float = 1.0) -> bool:
+        """入池。★ 只收三色名 + 有限值；按 keep 截断（保留最新的）。"""
+        if name not in self.pool:
+            return False
+        try:
+            arr = [float(x) for x in lab][:3]
+        except (TypeError, ValueError):
+            return False
+        if len(arr) != 3 or not all(math.isfinite(v) for v in arr):
+            return False
+        if float(conf) <= 0:
+            return False
+        self.pool[name].append(arr)
+        if len(self.pool[name]) > self.keep:
+            del self.pool[name][:len(self.pool[name]) - self.keep]
+        return True
+
+    def reset(self, name: Optional[str] = None) -> None:
+        if name in self.pool:
+            self.pool[name] = []
+        elif name is None:
+            for c in self.pool:
+                self.pool[c] = []
+
+    def _mad(self, vals: np.ndarray) -> Tuple[np.ndarray, float, np.ndarray]:
+        """返回 (中位, MAD, 离群掩膜)。MAD = median(|x - median|)。"""
+        med = np.median(vals, axis=0)
+        dev = np.abs(vals - med).max(axis=1)          # 每个样本到中位的最大分量偏差
+        mad = float(np.median(dev))
+        if mad <= 1e-9:
+            # MAD=0（样本几乎完全一致）→ 用极小的兜底尺度，避免把所有样本都判成离群
+            thr = 1e-6
+        else:
+            thr = self.mad_k * mad
+        return med, mad, dev > thr
+
+    def representative(self, name: str) -> Dict[str, object]:
+        """稳健代表值：剔除离群后取中位。样本不足时如实说明"还没标定"。"""
+        vals = self.pool.get(name) or []
+        n = len(vals)
+        if n == 0:
+            return {"ok": False, "n": 0, "used": 0, "reason": "还没有样本"}
+        arr = np.asarray(vals, dtype=np.float64)
+        med, mad, out = self._mad(arr)
+        kept = arr[~out]
+        if kept.size == 0:                            # 极端情形：全被判离群 → 退回全量中位
+            kept = arr
+        lab = np.median(kept, axis=0)
+        spread = float(np.max(np.abs(kept - lab))) if kept.size else 0.0
+        return {"ok": True, "n": n, "used": int(kept.shape[0]),
+                "outliers": int(out.sum()), "lab": [round(float(v), 2) for v in lab],
+                "mad": round(mad, 3), "spread": round(spread, 2)}
+
+    def state(self) -> Dict[str, object]:
+        return {c: {"n": len(self.pool[c]), "rep": self.representative(c)}
+                for c in RGB_NAMES}
 
 
 # =====================================================================

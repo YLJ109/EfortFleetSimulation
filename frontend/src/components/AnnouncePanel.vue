@@ -140,7 +140,7 @@ const timeText = (d) => new Date(d).toLocaleTimeString("zh-CN", { hour12: false 
 .ap-panel { position: absolute; right: 16px; top: 54px; width: 380px; max-height: calc(100vh - 76px);
   display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line);
   border-radius: 10px; box-shadow: var(--shadow-lg); overflow: hidden; }
-.ap-head { display: flex; align-items: center; gap: 7px; padding: 9px 12px; font-size: 13px;
+.ap-head { display: flex; align-items: center; gap: 7px; padding: 9px 10px; font-size: 13px;
   border-bottom: 1px solid var(--line); background: linear-gradient(180deg, var(--veil), transparent); }
 .ap-ico { color: var(--accent); }
 .ap-title { font-weight: 600; }
@@ -148,7 +148,7 @@ const timeText = (d) => new Date(d).toLocaleTimeString("zh-CN", { hour12: false 
   align-items: center; justify-content: center; border: none; background: transparent;
   color: var(--muted); cursor: pointer; border-radius: 6px; }
 .ap-x:hover { background: var(--veil2); color: var(--txt); }
-.ap-body { padding: 10px 12px 14px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.ap-body { padding: 10px; overflow: auto; display: flex; flex-direction: column; gap: 5px; }
 .ap-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
 .ap-row.wrap { flex-wrap: wrap; }
 .ap-row .k { color: var(--muted); flex: none; }

@@ -1,10 +1,8 @@
 // =====================================================================
-// J6 末端执行器（真实工具：法兰 + 两块矩形立板 + 两个红色真空吸盘）
+// J6 末端执行器（真实工具：法兰 + 两块矩形立板 + 三个白色小吸盘三角排列）
 //
 // ★★ 单一来源：**官方数模**（manager.js 的 tcpNode）与**残影 Ghost**
 //    （ghost.js 的 J6 法兰节点）都调用本函数 —— 从此两边外观不可能漂移。
-//    以前的教训：残影自己手写了一份简化版，挂着挂着就和官方不一致，
-//    现场表现就是"残影跟随看不到 J6 上的那个工具"。
 //
 // ★ 尺度约定（务必注意，写错就是 1000 倍事故）：
 //   本函数的几何尺寸是"近似 mm 的设计值"，内部再乘 EE_SCALE 放大；
@@ -13,100 +11,147 @@
 //   （见 ghost.js 的调用点），否则会放大 1000 倍。
 //
 // 依赖方向：endEffector.js → materials.js（单向，无环）。
+//
+// ★★ 2026-10-09 用户反馈三改：
+//    ① 整体缩小  → EE_SCALE 1.5 → **1.2**
+//    ② 红色吸盘 → 三个白色小吸盘，三角形排列（前1后2）
+//    ③ 吸盘前移 → 整体前移 + 三角形中心更靠前
 // =====================================================================
 import * as THREE from "three";
 import { skinMat, SKIN_HARD, SKIN_METAL } from "./materials.js";
 
-const EE_FACE = 8;
-const EE_SCALE = 2;
-// ★ P1-E13：原 const EE_OPEN0 = 46（夹爪默认开口）本文件从未引用 —— 实际开口量
-//   直接写在 buildEndEffector() 的手指几何里，留一个"看似生效的常量"反而误导。
+const EE_BACK = -2;          // 工具最后端 z（设计单位；负 = 压进法兰一点，消除缝隙）
+const FLANGE_T = 10;         // 法兰定位盘厚度
+const EE_SCALE = 1.2;        // 设计单位 → 真实 mm 的比例（缩小版）
+const CUP_FWD = 18;          // ★ 吸盘整体前移量
+// ★★ 夹具几何常量提到模块级：吸盘口坐标（suckerLocalMm）与建模必须**同源**
+const PLATE_W = 8;           // 立板厚度(x)
+const PLATE_H = 36;          // 立板高度(y)
+const PLATE_D = 70;          // 立板深度(z，沿法兰轴向)
+const PLATE_GAP = 22;        // 两块立板内间距(x 方向净空)
+// 三角形吸盘布局参数
+const TRI_CUP_R = 5;         // 单个吸盘橡胶圈半径
+const TRI_CUP_H = 4;         // 单个吸盘高度
+const TRI_SPREAD_X = 14;     // 后方两杯的水平间距（半宽）
+const TRI_SPREAD_Z = 10;     // 前杯与后杯的z方向间距
+const CUP_MOUNT_Z = 12;      // 吸盘安装板相对立板中心的前移量
+
+// ★ 关键几何参数外露
+export const EE_META = {
+  back: EE_BACK,
+  scale: EE_SCALE,
+  cupFwd: CUP_FWD,
+  flangeT: FLANGE_T,
+};
+
+// ★★ 吸盘口（工件被吸住的位置）在**法兰坐标系**里的局部坐标（真实 mm）。
+//   四个吸盘：左右立板外侧各2个（上下排列），开口朝外（±x）
+//   返回 +x 侧（右侧）吸盘口位置，工件中心 = 吸盘口 + 半个料厚
+export function suckerLocalMm(pieceThickMm = 0) {
+  const outer = PLATE_W + PLATE_GAP / 2;           // 立板外表面 x（设计单位）
+  const cupX = outer + TRI_CUP_H + 3;              // 吸盘口平面（+x 侧）
+  const plateZ = EE_BACK + PLATE_D / 2;
+  const cupZ = plateZ + CUP_FWD;                   // 吸盘z位置
+  const halfThickDesign = (Number(pieceThickMm) || 0) / 2 / EE_SCALE;
+  return [
+    (cupX + halfThickDesign) * EE_SCALE,           // 真实 mm，法兰系
+    0,                                              // y=0（中间高度）
+    cupZ * EE_SCALE,                                // 真实 mm，法兰系
+  ];
+}
 
 /**
  * 构建 J6 末端工具。
- * @returns {{group: THREE.Group}} group 的局部原点 = J6 法兰面；调用方负责挂到
- *          正确的法兰节点上（官方 tcpNode / 残影 flangeNode）。
+ * @returns {{group: THREE.Group}} group 的局部原点 = J6 法兰面
  */
 export function buildEndEffector() {
   const outer = new THREE.Group();
   outer.name = "end-effector";
-  // J6 末端：吸盘默认就沿法兰 +z（前方）开口，避免多余旋转导致朝向错乱。仅改末端模型，不动机器人关节。
   outer.rotation.set(0, 0, 0);
   const g = new THREE.Group();
   g.scale.setScalar(EE_SCALE);
   outer.add(g);
 
-  // 本局部坐标为设计尺寸(近似 mm)，整体经 g 放大 EE_SCALE 倍渲染。
   const m = (c, mr, mm) => skinMat(c, mr, mm);
 
-  // ---- 法兰定位盘 + 6 颗螺栓（沿用） ----
-  const plate = new THREE.Mesh(new THREE.CylinderGeometry(30, 30, 10, 36), m(SKIN_METAL, 0.8, 0.28));
+  // ---- 法兰定位盘 + 6 颗螺栓 ----
+  const plate = new THREE.Mesh(new THREE.CylinderGeometry(30, 30, FLANGE_T, 36),
+                               m(SKIN_METAL, 0.8, 0.28));
   plate.rotation.x = Math.PI / 2;
-  plate.position.z = EE_FACE + 5;
+  plate.position.z = EE_BACK + FLANGE_T / 2;
   g.add(plate);
   for (let k = 0; k < 6; k++) {
     const a = (k / 6) * Math.PI * 2;
     const b = new THREE.Mesh(new THREE.CylinderGeometry(3.5, 3.5, 6, 12), m(SKIN_HARD, 0.85, 0.3));
     b.rotation.x = Math.PI / 2;
-    b.position.set(Math.cos(a) * 23, Math.sin(a) * 23, EE_FACE + 11);
+    b.position.set(Math.cos(a) * 23, Math.sin(a) * 23, EE_BACK + FLANGE_T + 3);
     g.add(b);
   }
 
-  // ---- 真空吸盘夹具：两块大矩形立板贴住法兰，每块外表面各装一个吸盘，垂直于矩形中心、开口朝外 ----
-  const plateW = 10;             // 立板厚度(x)
-  const plateH = 50;             // 立板高度(y)
-  const plateD = 90;             // 立板深度(z，沿法兰轴向)
-  const plateGap = 30;           // 两块立板内间距(x方向净空)
-  const plateZ = EE_FACE + plateD / 2;  // 立板中心z
+  // ---- 两块矩形立板 ----
+  const plateW = PLATE_W;
+  const plateH = PLATE_H;
+  const plateD = PLATE_D;
+  const plateGap = PLATE_GAP;
+  const plateZ = EE_BACK + plateD / 2;
 
-  // 1) 两块大矩形立板，分置 x±，贴住法兰前端
   for (let s = -1; s <= 1; s += 2) {
-    const plate = new THREE.Mesh(
+    const p = new THREE.Mesh(
       new THREE.BoxGeometry(plateW, plateH, plateD),
       m(0x9aa2ab, 0.6, 0.4)
     );
-    plate.position.set(s * (plateW / 2 + plateGap / 2), 0, plateZ);
-    g.add(plate);
+    p.position.set(s * (plateW / 2 + plateGap / 2), 0, plateZ);
+    g.add(p);
   }
 
-  // 2) 每块立板外表面各装一个红色吸盘，吸盘垂直于矩形中心、开口朝外(±x)
-  function cup(side) {
+  // ---- 六个白色吸盘：左右立板外侧各3个（三角形：后2前1），开口朝外 ----
+  const cupY_top = plateH * 0.2;   // 后两杯上y位置
+  const cupY_bot = -plateH * 0.2;  // 后两杯下y位置
+  const cupZ_back = plateZ;        // 后两杯z位置（立板中心）
+  const cupZ_front = plateZ + CUP_FWD;  // 前一杯z位置（前移）
+
+  function sideCup(side, y, z) {
     // side = -1(左板, 开口朝 -x) 或 +1(右板, 开口朝 +x)
     const grp = new THREE.Group();
     const xOuter = side * (plateW + plateGap / 2);  // 立板外表面 x 坐标
 
-    // 阀体：圆柱贴在立板外表面
+    // 阀体（小圆柱）
     const valve = new THREE.Mesh(
-      new THREE.CylinderGeometry(7, 7, 12, 16),
-      m(0x8a8f95, 0.6, 0.5)
+      new THREE.CylinderGeometry(TRI_CUP_R * 0.7, TRI_CUP_R * 0.7, 4, 12),
+      m(0xd0d4d8, 0.5, 0.5)
     );
     valve.rotation.z = Math.PI / 2;   // 圆柱轴沿 x
-    valve.position.set(xOuter + side * 6, 0, plateZ);
+    valve.position.set(xOuter + side * 3, y, z);
     grp.add(valve);
 
-    // 波纹吸盘：圆锥开口朝外
+    // 白色波纹吸盘（圆锥，开口朝 ±x）
     const bell = new THREE.Mesh(
-      new THREE.ConeGeometry(15, 20, 24),
-      m(0x7a1f1f, 0.15, 0.25)
+      new THREE.ConeGeometry(TRI_CUP_R, TRI_CUP_H, 16),
+      m(0xf0f0f0, 0.1, 0.3)
     );
-    bell.rotation.z = side * Math.PI / 2;  // 圆锥开口朝 ±x
-    bell.position.set(xOuter + side * 18, 0, plateZ);
+    bell.rotation.z = side * Math.PI / 2;  // 开口朝 ±x
+    bell.position.set(xOuter + side * (TRI_CUP_H / 2 + 3), y, z);
     grp.add(bell);
 
-    // 橡胶圈
+    // 橡胶圈（白色环）
     const rim = new THREE.Mesh(
-      new THREE.CylinderGeometry(16.5, 16.5, 3, 24),
-      m(0x5a1717, 0.25, 0.5)
+      new THREE.CylinderGeometry(TRI_CUP_R + 1.5, TRI_CUP_R + 1.5, 2, 16),
+      m(0xe8e8e8, 0.2, 0.4)
     );
     rim.rotation.z = Math.PI / 2;
-    rim.position.set(xOuter + side * 28, 0, plateZ);
+    rim.position.set(xOuter + side * (TRI_CUP_H + 3), y, z);
     grp.add(rim);
 
     return grp;
   }
-  g.add(cup(-1));   // 左板吸盘
-  g.add(cup(1));    // 右板吸盘
 
-  // 吸盘夹具无"开合指"：吸气/放气由业务信号驱动，无需张开动画
+  // 左侧3个（后2前1）+ 右侧3个（后2前1）
+  g.add(sideCup(-1, cupY_top, cupZ_back));    // 左后上
+  g.add(sideCup(-1, cupY_bot, cupZ_back));    // 左后下
+  g.add(sideCup(-1, 0, cupZ_front));          // 左前中
+  g.add(sideCup(1, cupY_top, cupZ_back));     // 右后上
+  g.add(sideCup(1, cupY_bot, cupZ_back));     // 右后下
+  g.add(sideCup(1, 0, cupZ_front));           // 右前中
+
   return { group: outer };
 }

@@ -13,7 +13,7 @@ FIT（团队）+ 埃夫特（厂商/机型归属）+ 智能机器人 + 远程控
 缩写保持 FIT-RCMS 不变（它是导出文件名前缀，现场已有带该前缀的导出文件）。
 """
 
-SERVICE_NAME = "FIT 埃夫特智能机器人远程控制与监控系统"
+SERVICE_NAME = "工业机器人远程智控与数字孪生系统"
 SERVICE_NAME_EN = "FIT EFORT Intelligent Robot Remote Control & Monitoring System"
 SERVICE_ABBR = "FIT-RCMS"
 SERVICE_VERSION = "0.4.0"

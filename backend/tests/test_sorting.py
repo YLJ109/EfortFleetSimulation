@@ -127,6 +127,85 @@ def _f(name, conf=0.8):
     return {"name": name, "conf": conf}
 
 
+# ---- ★★ P0 回归：真实 /vision/detect 结构（颜色嵌在 results[i].color 里）----
+# 为什么单列一组：旧用例喂的都是**自己造的扁平结构** _f()，与真实接口对不上，
+# 于是 22 条全绿、真机却**永远**判不出色（现场那句"检测不到（无有效判定（全部未知…））"）。
+# 这里用**真实抓取**的帧当夹具（camera/tools 的 VisionEngine 跑中灰底红方块导出），
+# 读法一旦改回顶层就会立刻红。
+import json  # noqa: E402
+import os  # noqa: E402
+
+_FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "data", "vision_detect_frame.json")
+
+
+def _real_frame():
+    with open(_FIXTURE, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def test_fixture_is_real_detect_shape():
+    """夹具本身必须是真实结构 —— 否则这组回归又变成"自己骗自己"。"""
+    d = _real_frame()
+    assert set(d.keys()) >= {"ok", "results"}
+    assert isinstance(d["results"], list) and d["results"], "夹具必须含至少一个候选"
+    assert "color" in d["results"][0] and "name" in d["results"][0]["color"]
+    assert "name" not in d, "真实返回的 name 不在顶层（这正是 P0 的成因）"
+
+
+def test_vote_color_reads_real_detect_payload():
+    """★ 真实结构 → 必须判出颜色（三帧一致 → 采信）。"""
+    fr = _real_frame()
+    v = S.vote_color([fr, fr, fr], 0.28)
+    assert v["ok"] is True, "真实结构判不出色 = P0 复发：%s" % v["reason"]
+    assert v["color"] == fr["results"][0]["color"]["name"]
+    assert v["conf"] > 0.28
+
+
+def test_frame_color_extracts_nested_color():
+    got = S.frame_color(_real_frame(), 0.28)
+    assert got["name"] == "红" and got["conf"] > 0.9 and got["area"] > 0
+
+
+def test_vote_color_says_no_candidate_when_results_empty():
+    """画面里没有候选 → 原因必须写"没有候选"，不能与"读法写错"共用一句话。"""
+    empty = {"ok": True, "results": [], "tracker": {}}
+    v = S.vote_color([empty] * 3, 0.28)
+    assert v["ok"] is False and "没有候选" in v["reason"]
+
+
+def test_vote_color_surfaces_server_error():
+    """相机没开/服务报错 → 原因里必须带上服务端原话（无画面），方便现场判断。"""
+    v = S.vote_color([{"ok": False, "error": "无画面"}] * 3, 0.28)
+    assert v["ok"] is False and "无画面" in v["reason"]
+
+
+def test_frame_color_picks_valid_over_larger_invalid():
+    """一帧里有多个候选：**名次有效且过阈**的优先，不按面积盲取最大。"""
+    fr = _real_frame()
+    big_unknown = {"area": 999999, "box": [[0, 0]], "center": [0, 0],
+                   "color": {"name": "未知", "conf": 0.0, "reason": "非矩形(填充率 0.30 < 0.72)"}}
+    fr2 = {"ok": True, "results": [big_unknown] + fr["results"], "tracker": {}}
+    got = S.frame_color(fr2, 0.28)
+    assert got["name"] == "红", "面积最大的'未知'不该压过有效的红"
+
+
+def test_frame_color_reports_nonrect_reason():
+    """只有非矩形候选时：原因要能带出"非矩形"（现场才调得对旋钮）。"""
+    fr = {"ok": True, "results": [
+        {"area": 5000, "box": [[0, 0]], "center": [0, 0],
+         "color": {"name": "未知", "conf": 0.0, "reason": "非矩形(填充率 0.55 < 0.72)"}}],
+        "tracker": {}}
+    v = S.vote_color([fr] * 3, 0.28)
+    assert v["ok"] is False and "非矩形" in v["reason"]
+
+
+def test_frame_color_low_conf_reports_threshold():
+    """顶层结构（旧调用方）低置信 → 原因里带出阈值，便于现场调。"""
+    v = S.vote_color([{"name": "红", "conf": 0.10}] * 3, 0.28)
+    assert v["ok"] is False and "置信度" in v["reason"]
+
+
 def test_vote_majority_accepted():
     v = S.vote_color([_f("红", 0.9), _f("红", 0.7), _f("绿", 0.95)], 0.3)
     assert v["ok"] is True and v["color"] == "红"
@@ -196,3 +275,286 @@ def test_api_points_endpoint(client):
 def test_api_start_requires_control(client):
     r = client.post("/api/sorting/start", json={"dry_run": True})
     assert r.status_code in (401, 403), r.text
+
+
+# ---------------------------------------------------------------- 6. 每次运行必须从头开始
+def test_fresh_run_state_is_clean():
+    """★ 用户口径（2026-10-08）："每次运行必须从头开始"。
+
+    每轮开始的状态必须是**全新的**：进度 0、三列占位全空、没有上一轮的颜色/目标/
+    停止原因/夹持/疑似标记。否则会出现"第二轮接着第一轮的占位跑"或
+    "刚点开始就显示上一轮的错误"。
+    """
+    st = S.fresh_run_state(dry_run=True, max_pieces=3, judge=False)
+    assert st["piece"] == 0 and st["total"] == 3
+    assert st["stage"] == "准备"
+    assert st["color"] == "" and st["conf"] == 0.0 and st["target"] == ""
+    assert [c["filled"] for c in st["placement"]] == [0, 0, 0]
+    assert all(c["used"] == [] for c in st["placement"])
+    assert st["error"] == "" and st["finished"] is False and st["ok"] is None
+    assert st["holding"] is False and st["suspect_pick"] is False
+    assert st["sim_color"] is False
+    assert st["judge"] is False            # 空跑不判色
+
+
+def test_fresh_run_state_judge_flag_follows_input():
+    """真实下发且双闸开 → judge=True（本轮会真判色）。"""
+    st = S.fresh_run_state(dry_run=False, max_pieces=9, judge=True)
+    assert st["judge"] is True and st["total"] == 9
+
+
+def test_two_fresh_states_are_independent():
+    """两次构造必须互不影响（共享可变对象会让第二轮"继承"第一轮的占位）。"""
+    a = S.fresh_run_state(True, 3, False)
+    b = S.fresh_run_state(True, 3, False)
+    a["placement"][0]["used"].append("B1")
+    a["placement"][0]["filled"] = 1
+    assert b["placement"][0]["used"] == [] and b["placement"][0]["filled"] == 0
+
+
+def test_start_from_scratch_uses_A1_first():
+    """引擎顺序必须**每轮从 A1 开始**（不是接着上一轮的第 n 个槽）。"""
+    assert list(S.A_SLOTS[:3]) == ["A1", "A2", "A3"]
+    assert list(S.A_SLOTS) == ["A%d" % i for i in range(1, 10)]
+
+
+# ---------------------------------------------- 7. 3D 摆位接口（尺寸 / 相机高度）
+def _ctrl(client):
+    """控制类接口所需的鉴权头（与 test_api._ctrl_headers 同法）。"""
+    r = client.post("/api/auth/login", json={"password": "test1234"})
+    assert r.status_code == 200, r.text
+    return {"X-Control-Token": r.json()["token"]}
+
+
+def test_api_blocks_requires_control(client):
+    """摆位接口暴露全部点位坐标 → 同样必须带控制令牌。"""
+    r = client.get("/api/sorting/blocks")
+    assert r.status_code in (401, 403), r.text
+
+
+def test_api_blocks_defaults_match_user_request(client):
+    """★ 用户口径（2026-10-08 第 2 轮）：
+
+    · "矩形大一点点…现在四倍大" → 30 → **70mm**（受实测列距限制，见下一条）
+    · "摄像头在地上看着上面的" → 相机底座高 **0**（坐在地面/台面上，镜头朝上）
+    """
+    d = client.get("/api/sorting/blocks", headers=_ctrl(client)).json()
+    assert d["ok"] is True
+    assert d["block_mm"] == [70.0, 70.0, 14.0]
+    assert d["camera_height_mm"] == 0.0
+
+
+def test_api_blocks_block_size_is_under_measured_spacing(client):
+    """★★ 70mm 是**实测槽距之下**的上限，不许再往上调：
+
+    重叠判定用 max(长,宽)×1.05（70 → 73.5mm）。实测列距 85~88mm、行距 97~105mm，
+    所以 73.5 < 85 仍然安全；一旦 ≥85，整片 A/B 槽位都会被判成"重叠风险"而**全部不画**
+    —— 症状是"3D 里一个方块都没有"，而不是报错，最难查。
+    """
+    from app.api import sorting as API
+
+    side = max(API.BLOCK_MM_DEFAULT[0], API.BLOCK_MM_DEFAULT[1])
+    assert side * 1.05 < 85.0, "超过实测列距下限 85mm：整片槽位会被判重叠"
+    assert side * 1.05 < 97.8, "超过实测行距下限 97.8mm：整片槽位会被判重叠"
+    # 反证：判据不是恒真的（120mm 的料必须被判重叠，说明这个上限真的在起作用）
+    assert 120.0 * 1.05 > 85.0
+
+
+def test_api_blocks_cam_h_can_be_overridden(client):
+    """相机底座高度仍可覆盖（现场实测底座 40mm 时用得上）。"""
+    d = client.get("/api/sorting/blocks?cam_h=40", headers=_ctrl(client)).json()
+    assert d["camera_height_mm"] == 40.0
+
+
+def test_api_blocks_block_mm_override_and_bad_input_falls_back(client):
+    """block= 覆盖可用；坏输入**回落默认**，不能把 0/负数当尺寸（会画出 0 厚方块）。"""
+    h = _ctrl(client)
+    got = client.get("/api/sorting/blocks?block=50x50x20", headers=h).json()["block_mm"]
+    assert got == [50.0, 50.0, 20.0]
+    for bad in ("0,0,0", "abc", "10,20"):
+        got = client.get("/api/sorting/blocks?block=" + bad, headers=h).json()["block_mm"]
+        assert got == [70.0, 70.0, 14.0], "坏输入 %r 必须回落默认尺寸" % bad
+
+
+def test_api_blocks_units_and_plane_are_declared(client):
+    """单位/坐标系必须显式声明（前端换算只认这三个字段，改口径要一起改）。"""
+    d = client.get("/api/sorting/blocks", headers=_ctrl(client)).json()
+    assert d["unit"] == "mm_base" and "Z-up" in d["frame"]
+    assert "非视觉定位" in d["note"]
+    assert len(d["slots"]) == 18
+    assert d["camera"]["name"] == S.CAMERA_POINT
+
+
+# ------------------------------------- 8. 摆放面高度（"不要悬浮"）与落料时序（"一直吸住"）
+def test_api_blocks_plane_h_defaults_to_zero(client):
+    """★★ 用户 2026-10-08 第三轮："19 个摆放的 3D 物体怎么悬浮起来了啊，放在地上啊"。
+
+    根因：把示教点 Z 当成了料的高度 —— 示教点 FK 出的是**法兰中心**（工具安装面），
+    料在工具下方低着"一个工具长度"。所以摆放高度必须来自 `plane_h_mm`（默认 0 =
+    站台台面 = 机器人底座平面），**不是** `plane_z`（法兰高度）。
+    """
+    h = _ctrl(client)
+    # 先示教一个点，让 plane_z（示教算出来的法兰高度）真的有值
+    r = client.post("/api/sorting/teach",
+                    json={"name": "A1", "joints": [10.0, 20.0, 30.0, 0.0, 40.0, 0.0]}, headers=h)
+    assert r.status_code == 200, r.text
+
+    d = client.get("/api/sorting/blocks", headers=h).json()
+    assert d["plane_h_mm"] == 0.0            # ★ 摆放面：默认坐台面
+    assert d["plane_z"] > 0                   # 法兰高度（体检用）
+    assert d["plane_z"] != d["plane_h_mm"]    # 两者不是一回事
+    assert "仅用于共面性体检" in d["height_note"]
+    assert "站台台面" in d["height_note"]
+    # 该槽位必须被画出来（taught=True 且给了 FK 位置）
+    a1 = [s for s in d["slots"] if s["name"] == "A1"][0]
+    assert a1["taught"] is True and a1["pos"] and a1["pos"][2] > 0
+
+
+def test_api_blocks_plane_h_can_be_overridden(client):
+    """现场若垫了底板/托盘有厚度，可用 plane_h 抬起来（单位 mm，基座系）。"""
+    d = client.get("/api/sorting/blocks?plane_h=25", headers=_ctrl(client)).json()
+    assert d["plane_h_mm"] == 25.0
+    # 反证：不是恒等返回 0（否则上面那条会假过）
+    assert d["plane_h_mm"] != 0.0
+
+
+def test_plane_h_and_plane_z_are_independent(client):
+    """两个字段口径必须彻底分开：plane_z 是示教算出来的（不可控），plane_h 是摆位参数。
+
+    若哪天有人把摆放高度又接回 plane_z，这条会立刻红。
+    """
+    h = _ctrl(client)
+    client.post("/api/sorting/teach",
+                json={"name": "B1", "joints": [10.0, 20.0, 30.0, 0.0, 40.0, 0.0]}, headers=h)
+    d1 = client.get("/api/sorting/blocks", headers=h).json()
+    d2 = client.get("/api/sorting/blocks?plane_h=25", headers=h).json()
+    assert d1["plane_z"] == d2["plane_z"] > 0, "plane_z 只跟示教数据有关"
+    assert d1["plane_h_mm"] != d2["plane_h_mm"]
+    # 槽位表本身也不该被 plane_h 改动（改的是"摆多高"，不是"摆在哪"）
+    assert [(s["name"], s["pos"]) for s in d1["slots"]] == \
+           [(s["name"], s["pos"]) for s in d2["slots"]]
+
+
+def test_start_blow_default_is_500ms(client):
+    """★ 用户口径："到了 B 区停止吸气然后再放气 0.5 秒，停止放气" → 默认 500ms。
+
+    语义也变了：以前 blow_ms 是"放气后留在原位多久再走"（放气本身保持到回起点），
+    现在是**放气持续时间**，吹完就地停止放气。
+    """
+    from app.api.sorting import StartIn
+
+    m = StartIn()
+    assert m.blow_ms == 500
+    assert "放气持续" in StartIn.model_fields["blow_ms"].description
+
+
+def test_start_suck_hold_default_is_500(client):
+    """★ 用户流程口径（2026-10-09）："吸取 → 等待0.5秒 → 抬起"。
+
+    吸上后**先停一下再抬**，等真空建立/吸牢 —— 立刻抬起容易在半空掉件，
+    而现场没有真空反馈，掉了只能等判色失败才发现。默认 500ms。
+    """
+    from app.api.sorting import StartIn
+
+    m = StartIn()
+    assert m.suck_hold_ms == 500
+    assert "吸牢" in StartIn.model_fields["suck_hold_ms"].description
+
+
+def test_vote_color_returns_per_frame_detail_and_best():
+    """★★ 用户口径（2026-10-09）："捕捉3张（只显示一张置信度最高的）"。
+
+    逐帧明细必须**如实**返回（含未判出的帧），`best_frame` 指向命中帧里置信度最高的那一个。
+    以前只有 `votes`（每色几票），现场看不到"这 3 帧各自看到什么" ——
+    判不出时无法判断是"三帧都低"还是"两帧对一帧错"。
+    """
+    frames = [
+        {"ok": True, "results": [{"color": {"name": "红", "conf": 0.70}, "area": 5000}]},
+        {"ok": True, "results": [{"color": {"name": "红", "conf": 0.95}, "area": 5000}]},
+        {"ok": True, "results": [{"color": {"name": "蓝", "conf": 0.40}, "area": 5000}]},
+    ]
+    v = S.vote_color(frames, 0.3)
+    assert v["ok"] is True and v["color"] == "红"
+    assert len(v["frame_detail"]) == 3, "3 帧都要有明细"
+    assert [f["color"] for f in v["frame_detail"]] == ["红", "红", "蓝"]
+    assert v["frame_detail"][1]["conf"] == 0.95
+    assert v["best_frame"] == 1, "best 必须指向命中帧里置信度最高的那张"
+    assert all(f["ok"] for f in v["frame_detail"])       # 三帧都过了阈值
+
+
+def test_vote_color_frame_detail_survives_failure():
+    """判不出时**同样**要给逐帧明细 —— 现场要看到"三帧各自是什么"，
+    而不是只收到一句"检测不到"（那只能瞎调旋钮）。
+    """
+    frames = [
+        {"ok": True, "results": []},                      # 画面里没候选
+        {"ok": False, "error": "相机未开"},                # 视觉服务报错
+        {"ok": True, "results": [{"color": {"name": "红", "conf": 0.10}, "area": 5000}]},
+    ]
+    v = S.vote_color(frames, 0.3)
+    assert v["ok"] is False
+    assert len(v["frame_detail"]) == 3
+    assert all(f["ok"] is False for f in v["frame_detail"])
+    assert "画面里没有候选" in v["frame_detail"][0]["reason"]
+    assert "相机未开" in v["frame_detail"][1]["reason"]
+    assert v["frame_detail"][2]["color"] == "红" and v["frame_detail"][2]["conf"] == 0.10
+
+
+def test_fresh_state_clears_frame_detail():
+    """每轮开头必须清掉抓帧明细（"每次运行从头开始"）——
+    否则新一轮界面会显示上一轮抓到的颜色。
+    """
+    st = S.fresh_run_state(True, 3, False)
+    assert st["frame_detail"] == []
+    assert st["best_frame"] is None
+    assert st["votes"] == {}
+
+
+def test_air_dry_keeps_semantic_stage():
+    """★★ 空跑时阶段名必须**保留语义**：写 "取料·吸(空跑)"，不能退化成 "吸(空跑)"。
+
+    因为"吸"与"放"在流程里是两个完全不同的步骤（取料·吸 / 放料·放气），
+    丢掉语义后界面的执行流程高亮会跳错步 —— 而空跑恰恰是最常用来排练流程的模式。
+    """
+    import inspect
+
+    from app.api import sorting as API
+
+    src = inspect.getsource(API._air)
+    assert 'stage=("%s(空跑)" % stage)' in src, "空跑分支必须带上调用方的语义化 stage"
+    assert 'stage="%s(空跑)" % label' not in src.replace('stage=("%s(空跑)" % stage)', ""), \
+        "不许再退回只剩气泡标签（吸/放）的写法"
+
+
+def test_engine_air_sequence_source_pins():
+    """★★ "顺序即工艺"：吸气全程保持 → 到 B 才「停止吸 → 放气 → 等 → 停止放气」。
+
+    引擎整跑需要真机（运动 + 气路），在 CI 里跑不了；这里用**源码位置**把顺序钉死，
+    并断言异常/收尾路径一定会收掉两路气（电平保持型气路最怕"程序结束了阀还开着"）。
+
+    ★ 只在**主管线切片**里找位置：文件头的流程注释里也有这些词，
+      全文 indexOf 会指到注释上（第一版就踩了：算出"回起点在第 367 字"）。
+    """
+    import inspect
+
+    from app.api import sorting as API
+
+    src = inspect.getsource(API)
+    loop = src[src.index("for idx, a_slot in enumerate"):]
+    i_suck = loop.index('_air(ctx, "suck"')
+    i_rel = loop.index('_air(ctx, "release"')
+    i_blow = loop.index('_air(ctx, "blow"')
+    i_unblow = loop.index('_air(ctx, "unblow"')
+    i_at_a = loop.index("取料·下落")
+    i_at_b = loop.index("放料·正上方")
+    # 锚"真实调用"，不锚词（注释里也会写"回起点"解释历史写法）
+    i_back = loop.index('_move(ctx, pmap, start, speed, dry, "回起点")')
+
+    assert i_suck > i_at_a, "吸气必须在落到 A 槽之后"
+    assert i_rel > i_at_b, "★ 停止吸必须在到 B 正上方之后（送检全程吸住）"
+    assert i_rel < i_blow, "先停止吸，再放气"
+    assert i_blow < i_unblow < i_back, "★★ 放气就地停（不再保持到回起点）"
+    # 异常/收尾兜底：三处判断 + 两路气的动作都必须存在
+    assert src.count("if not dry and (blow_on or suck_on)") >= 3
+    assert src.count("suck_on = False") >= 3 and src.count("blow_on = False") >= 3
+

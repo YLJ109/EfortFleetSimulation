@@ -231,10 +231,10 @@ async function claim(id) {
 /* 展开面板：向上浮出，不挤压 3D 视口高度 */
 .link-pop { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 121;
   width: 320px; background: var(--panel); border: 1px solid var(--line);
-  border-radius: 10px; box-shadow: var(--shadow-lg); padding: 12px; }
+  border-radius: 10px; box-shadow: var(--shadow-lg); padding: 10px; }
 .link-pop.wide { width: 400px; }
 .pop-head { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 700;
-  color: var(--txt); margin-bottom: 8px; }
+  color: var(--txt); }
 .pop-head svg { color: var(--accent); }
 .pop-x { flex: none; width: 22px; height: 22px; margin-left: auto; padding: 0;
   display: flex; align-items: center; justify-content: center;

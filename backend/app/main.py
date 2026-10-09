@@ -16,11 +16,13 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import (
+    ai,
     asr,
     auth,
     control,
     events,
     frames,
+    gamepad,
     points,
     programs,
     recordings,
@@ -29,6 +31,7 @@ from app.api import (
     settings,
     sorting,
     system,
+    tictactoe,
     vision,
     ws,
 )
@@ -243,6 +246,10 @@ app.include_router(asr.router)
 app.include_router(asr.ws_router)
 # ★ 三色方块分拣（独立页）：38 点位体检 + 分拣引擎（复用同一套停止/暂停/进度设施）
 app.include_router(sorting.router)
+app.include_router(ai.router)
+app.include_router(tictactoe.router)
+# ★ 手柄状态（后端直读 XInput，只读免令牌）：浏览器读不到手柄时的替代输入源
+app.include_router(gamepad.router)
 
 
 # 存活探针/根信息：必须在静态挂载之前注册，否则被 mount("/") 拦截。

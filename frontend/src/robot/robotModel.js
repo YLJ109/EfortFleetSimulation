@@ -112,6 +112,12 @@ export function buildRobot(dh, mounting = "floor") {
   //   与官方模型那条链上的 tcpNode 语义一致 —— 供**残影**挂同一份末端工具用，
   //   避免在外部硬编码 z 偏移（硬编码会把工具埋进腕部筒身里，看不见）。
   let flangeNode = null;
+  // ★ 末端工具挂载点：挂在 J6 的**链末端帧 rx**（z=0），与 manager.js
+  //   buildArticulatedOfficial 的实体机 tcpNode 完全同位 —— 残影工具与实体机
+  //   工具才能在空间上严格重合（2026-10-09 踩坑：挂 flangeNode 再"补回 z"，
+  //   因 flangeNode 在关节帧 jg 下、与末端帧差 d6/a6/alpha6 三个变换，
+  //   工具被旋进腕部筒身里整块消失，且与示教点位对不上）。
+  let eeNode = null;
 
   for (let i = 0; i < J.length; i++) {
     const j = J[i];
@@ -199,6 +205,10 @@ export function buildRobot(dh, mounting = "floor") {
       flangeNode.name = "Flange";
       flangeNode.position.z = 0.02 + Math.max(d, 0.02) + 0.01;
       jg.add(flangeNode);
+      // ★ 末端工具挂载点：链末端帧（rx）原点 —— 与实体机 tcpNode 同位（z=0）
+      eeNode = new THREE.Group();
+      eeNode.name = "EEMount";
+      rx.add(eeNode);
       joints.push(jg); parent = rx; continue;
     }
 
@@ -229,5 +239,5 @@ export function buildRobot(dh, mounting = "floor") {
   //   地面碰撞检测会误判成"穿地(碰撞红闪)"。
   applyJoints(new Array(joints.length).fill(0));
 
-  return { root, applyJoints, getTcp, joints, flangeNode };
+  return { root, applyJoints, getTcp, joints, flangeNode, eeNode };
 }

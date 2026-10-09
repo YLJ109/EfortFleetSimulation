@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,6 +25,13 @@ os.environ["EFORT_SIMULATE"] = "always"
 # 若测试进程继承它，任何 /control/move、/control/jog 测试都会**真的写控制器寄存器** ——
 # 测试绝不允许动机器人。这里在导入任何 app 模块之前强制置 0。
 os.environ["EFORT_REAL_MOTION"] = "0"
+
+# ★★ 日志必须与生产隔离（2026-10-09 事故）：
+#   app 被真实构造时日志 handler 指向生产 `logs/app.log`，于是测试里**注入的异常**
+#   traceback 写进了生产日志 —— 现场查日志时会看到"凭空出现的报错"，
+#   分不清是真故障还是测试噪音。这里指到临时目录（在任何 app 模块被 import 之前设置）。
+os.environ.setdefault("EFORT_LOGS_DIR", os.path.join(tempfile.gettempdir(),
+                                                     "efort_test_logs"))
 
 
 @pytest.fixture(scope="session")

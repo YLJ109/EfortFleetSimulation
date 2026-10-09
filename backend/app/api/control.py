@@ -41,6 +41,7 @@ from app.services.limits import load_limits as _load_limits
 from app.services.limits import violations as _violations_of
 from app.core.safety_const import clamp_speed
 from app.services.motion import motion, real_write_enabled
+from app.services.rc_ready import ReadinessService
 from app.services.runmode import MODES as RUN_MODES
 from app.services.runmode import runmode
 from app.services.safety_guard import check as guard_check
@@ -95,12 +96,21 @@ def _start_joints(current: Optional[List[float]]) -> List[float]:
 
 
 def _ik_best(target, q0: List[float], limits: List[dict], rot_weight: float) -> dict:
-    """多初值 IK：优先取"收敛 + 在限位内 + 误差最小"的解。"""
+    """多初值 IK：优先取"收敛 + 在限位内 + 误差最小 + 与当前位形最接近"的解。
+    
+    ★ 修复"旋转乱跑"：加入与当前关节角的接近程度作为评分因素。
+      当多个解都能满足位置/姿态约束时，优先选择与 q0（当前关节角）最接近的解，
+      避免关节角大幅变化导致的"看起来乱转"现象。
+    """
     best = None
     for c0 in (q0, [0.0] * 6, [180.0, 0, 0, 0, 0, 0], [0, 0, 0, 180.0, 0, 0]):
         r = ikine(target, c0, limits, rot_weight=rot_weight)
         ok_lim = _in_limits(r["joints"], limits)
-        score = (0 if (r["ok"] and ok_lim) else 1, r["pos_err"])
+        # 计算与当前关节角的接近程度（各轴偏差的平方和）
+        joint_diff = sum((r["joints"][i] - q0[i]) ** 2 for i in range(6))
+        # 评分：(是否可行, 位置误差, 关节角变化量)
+        # 优先级：可行 > 位置误差小 > 关节角变化小
+        score = (0 if (r["ok"] and ok_lim) else 1, r["pos_err"], joint_diff)
         if best is None or score < best[0]:
             best = (score, r)
     return best[1]
@@ -1866,6 +1876,24 @@ def api_run_mode_clear(tok: str = Depends(require_control)):
     emit_event("control", "info", "control.run_mode_clear",
                "示教器档位声明已撤销（回到未确认）", {}, actor=_actor(tok))
     return {"ok": True, **st}
+
+
+@router.post("/clear-error")
+def api_clear_error(tok: str = Depends(require_control)):
+    """清除示教器（控制器）报警信息：读快照 → 有报警且在跑则先 CMD_STOP 停机
+    → CMD_CLEAR(0x1009) 重试清报警 → 读回确认。
+
+    ★ 只清报警，不重新上电/加载/运行（那是「一键就绪」的职责）。
+      「清除报错」≠「就绪」：清完报警后伺服可能已掉电，需再点「一键就绪」。
+    ★ 铁律：清报警前若程序在跑必须停机，否则 0.5s 内被运行中程序顶回（5005）。
+    """
+    res = ReadinessService().clear_alarm()
+    return {"ok": res.get("ok", False),
+            "cleared": res.get("cleared", False),
+            "was_alarm": res.get("was_alarm", False),
+            "message": res.get("message") or res.get("error") or "",
+            "error": res.get("error"),
+            "steps": res.get("steps", [])}
 
 
 # ---------------------------------------------------------------- 点动（示教）

@@ -509,6 +509,12 @@ onMounted(() => {
       <!-- ★ 密码输入框必须包在 <form> 里：裸的 type="password" 会触发浏览器告警
            "Password field is not contained in a form"，也拿不到回车提交与密码管理器语义。 -->
       <form class="stg-pw" @submit.prevent="doChangePassword">
+        <!-- ★ 可访问性修复：Chromium 要求密码表单带（可隐藏的）用户名框，否则报警告。
+             这里用视觉隐藏的 username 字段提供语义，不干扰布局。 -->
+        <input type="text" name="username" autocomplete="username"
+               style="position:absolute;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none;"
+               tabindex="-1" aria-hidden="true"
+               :value="pw.role" readonly />
         <label class="stg-pw-row">
           <span>角色</span>
           <select class="stg-in" v-model="pw.role">
@@ -597,15 +603,15 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.stg { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 14px;
-  display: flex; flex-direction: column; gap: 12px; align-items: center; }
+.stg { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 10px;
+  display: flex; flex-direction: column; gap: 10px; align-items: center; }
 /* ★ 需求：设置页内容宽度 1200px 并水平居中（每张卡片/分组各自居中，超宽屏不再拉满） */
 .stg > * { width: 100%; max-width: 1200px; }
 
 /* ---- 顶部 ---- */
-.stg-top { display: flex; align-items: center; gap: 12px; padding: 14px 16px;
+.stg-top { display: flex; align-items: center; gap: 10px; padding: 10px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
-.stg-top-l { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; }
+.stg-top-l { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
 .stg-mark { flex: none; width: 40px; height: 40px; display: grid; place-items: center;
   border-radius: 10px; color: var(--accent);
   background: var(--accent-soft); border: 1px solid var(--accent-line); }
@@ -616,7 +622,7 @@ onMounted(() => {
 .stg-top-r { flex: none; }
 
 /* ---- 按钮 ---- */
-.stg-btn { display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px;
+.stg-btn { display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px;
   font-size: 12px; border-radius: 7px; border: 1px solid var(--line);
   background: var(--panel2); color: var(--txt); cursor: pointer; }
 .stg-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
@@ -630,7 +636,7 @@ onMounted(() => {
 
 /* ---- 未保存改动条 ---- */
 .stg-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
-  padding: 10px 14px; border-radius: 9px;
+  padding: 10px; border-radius: 9px;
   border: 1px solid var(--accent-line); background: var(--accent-soft3); }
 .stg-bar-n { display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
   font-weight: 600; color: var(--accent); }
@@ -658,7 +664,7 @@ onMounted(() => {
 
 /* ---- 消息 ---- */
 .stg-msg { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.6;
-  padding: 9px 13px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel2); }
+  padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel2); }
 .stg-msg svg { flex: none; }
 .stg-msg.ok { color: var(--ok); border-color: var(--ok-line); }
 .stg-msg.err { color: var(--err); border-color: var(--err-line); }
@@ -666,7 +672,7 @@ onMounted(() => {
 .stg-hint { font-style: normal; color: var(--muted); margin-left: 6px; }
 
 /* ---- env 锁定 ---- */
-.stg-env { padding: 11px 14px; border-radius: 9px; border: 1px solid var(--warn-line);
+.stg-env { padding: 10px; border-radius: 9px; border: 1px solid var(--warn-line);
   background: var(--warn-soft); }
 .stg-env-h { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--warn); font-weight: 600; }
 .stg-env-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
@@ -677,7 +683,7 @@ onMounted(() => {
 /* ---- 实时卡 ---- */
 .stg-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 9px; }
 .stg-card { border: 1px solid var(--line); border-left-width: 3px; border-radius: 8px;
-  background: var(--panel); padding: 10px 12px; }
+  background: var(--panel); padding: 10px; }
 .stg-card.ok { border-left-color: var(--ok); }
 .stg-card.warn { border-left-color: var(--warn); }
 .stg-card.err { border-left-color: var(--err); }
@@ -699,7 +705,7 @@ onMounted(() => {
 
 /* ---- 分组 ---- */
 .stg-group { border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
-  padding: 13px 14px; scroll-margin-top: 48px; }
+  padding: 10px; scroll-margin-top: 48px; }
 .stg-group-h { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--txt); flex-wrap: wrap; }
 .stg-group-h svg { color: var(--accent); flex: none; }
 .stg-group-d { margin: 8px 0 12px; font-size: 11px; color: var(--muted); line-height: 1.75;
@@ -712,8 +718,8 @@ onMounted(() => {
 .stg-danger { border-color: var(--err-line); }
 
 /* ---- 字段 ---- */
-.stg-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 11px; }
-.stg-field { border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); padding: 10px 11px; }
+.stg-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 10px; }
+.stg-field { border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); padding: 10px; }
 .stg-field.locked { opacity: .68; }
 .stg-field.dirty { border-color: var(--accent-line); }
 .stg-f-head { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
@@ -779,7 +785,7 @@ onMounted(() => {
 
 /* ---- 危险区 ---- */
 .stg-confirm { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--txt);
-  line-height: 1.7; padding: 10px 12px; border-radius: 8px;
+  line-height: 1.7; padding: 10px; border-radius: 8px;
   border: 1px solid var(--err-line); background: var(--err-soft); }
 .stg-confirm input { flex: none; margin-top: 3px; accent-color: var(--err); }
 .stg-danger-btns { display: flex; align-items: center; gap: 10px; margin-top: 10px; }

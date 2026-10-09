@@ -9,18 +9,25 @@ import { useUiStore } from "./stores/ui.js";
 import { switchView, renderFrame, resizeView, onSafety, applyRobotPose, disposeAll, onGlState } from "./three/manager.js";
 import Icon from "./components/Icon.vue";
 import { useAuthStore } from "./stores/auth.js";
+// ★ 速度边界来自**唯一来源**（core/safetyConst.js，与后端 safety_const.py 同口径）。
+//   以前这里写死 min="1"、而 store 里写死 5 —— 两处会各自漂移（就出过
+//   "滑块能拖到 1%，后端却按 5% 跑"的事故）。现在都引用常量，只有一个地方能改。
+import { SPEED_MIN, SPEED_MAX } from "./core/safetyConst.js";
 import { useAsrStore } from "./stores/asr.js";
+import { useCameraStore } from "./stores/camera.js";
 import RealMonitor from "./components/RealMonitor.vue";
 import SimMonitor from "./components/SimMonitor.vue";
 import PointExecView from "./components/PointExecView.vue";
 import ProgramExecView from "./components/ProgramExecView.vue";
 import EventsView from "./components/EventsView.vue";
 import SortingView from "./components/SortingView.vue";
+import AiControlView from "./components/AiControlView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import AboutView from "./components/AboutView.vue";
 import AnnouncePanel from "./components/AnnouncePanel.vue";
 import GuideBar from "./components/GuideBar.vue";
 import StatusStrip from "./components/StatusStrip.vue";
+import LinkPanel from "./components/LinkPanel.vue";
 import { announce, unlockAudio, annCfg } from "./services/announcer.js";
 import { BRAND, brandSubtitle } from "./brand.js";
 import {
@@ -29,6 +36,7 @@ import {
 import { useLinkStore } from "./stores/link.js";
 import { useExecStore } from "./stores/exec.js";
 import { useRcReadyStore } from "./stores/rcReady.js";
+import { useSorting3dStore } from "./stores/sorting3d.js";
 import {
   resolveKey, isTypingTarget, tabKeyFor, SHORTCUT_BY_ID,
 } from "./shortcuts.js";
@@ -42,9 +50,15 @@ import { apiControl } from "./net/control.js";   // ★ P0-3：围栏上报需�
 const robot = useRobotStore();
 const safe = useSafetyStore();
 const ui = useUiStore();
+const cam = useCameraStore();   // ★ 2026-10-09 用户需求："每次启动项目自动打开摄像头"
 // 链路自检（机器人/摄像头/示教器档位）：★ 由本组件做**唯一**的启停者，
 // 底栏状态灯与引导条都只是它的消费者 —— 两个轮询者必然出现自相矛盾的界面。
 const link = useLinkStore();
+
+// ★ 真机链路面板的展开/隐藏开关。面板浮在 3D 视口上（fixed），
+//   LinkPanel 只是 link store 的消费者（App 级统一轮询），这里只控制显隐。
+const showLinkPanel = ref(false);
+function toggleLinkPanel() { showLinkPanel.value = !showLinkPanel.value; }
 
 // ★ 权限相关的页面，没拿到权限时**不显示入口**（定义与门控逻辑见 src/tabs.js）：
 //   - needAuth  (点位执行 / 程序执行)：要有控制令牌（管理员或操作员都行）。
@@ -86,6 +100,12 @@ const exec = useExecStore();
 // ★ 需求：底栏"控制中"也要以控制器就绪为准 —— 只授权、未就绪时显示"已授权·待就绪"。
 //   rcReady 的 rc_status 快照由 robot store 经 WS 全局注入，不依赖是否打开过点位执行页。
 const rc = useRcReadyStore();
+// ★ 需求（用户 2026-10-08）："真实监控／模拟仿真／点位执行／程序执行／分拣／AI 执行
+//   全部要显示"18 块料 + A/B 托盘盒 + C 区摄像头。以前只有「分拣」页挂载时才拉一次
+//   /api/sorting/blocks 并在离开时隐藏 —— 别的页面看到的是空机器人。
+//   现在装填与状态轮询收敛到本 store，由这里（App 级）驱动：拿到控制令牌即装填，
+//   之后**切页面不再隐藏**，各页共用同一份 3D 显示。
+const s3d = useSorting3dStore();
 
 /** 快捷键反馈提示（一次性，2 秒后自清）。 */
 const keyHint = ref("");
@@ -230,7 +250,11 @@ function connectEvents() {
   } catch (e) { /* 忽略 */ }
 }
 // ★ P1-B6：登录/登出都要重建事件流（onMounted 时可能还没令牌）。
-watch(() => auth.controlActive, () => connectEvents());
+// ★ 同一处顺带管分拣 3D：令牌到手才装填（没令牌必然 401），令牌失效即停轮询。
+watch(() => auth.controlActive, (on) => {
+  connectEvents();
+  if (on) s3d.start(); else s3d.stop();
+});
 
 // ---------- 围栏实时状态上报（阶段 4：服务端互锁） ----------
 // 围栏余量是在前端 3D 里逐帧算出来的，后端看不见。这里每秒把状态喂给后端，
@@ -382,9 +406,11 @@ function onVisibility() {
   if (document.hidden) {
     stopLiveReports();
     link.stop();
+    s3d.stop();                  // ★ 分拣 3D 状态轮询同样隐藏即停（与渲染帧一起停）
     stopLoop();                  // ★ 隐藏即停渲染帧（后台标签页不再空耗 GPU）
   } else {
     if (robot.connected) { startLiveReports(); link.start(); }
+    if (auth.controlActive) s3d.start();
     startLoop();                 // 回到前台：场景与模型原地保留，直接续帧
   }
 }
@@ -408,10 +434,15 @@ onMounted(async () => {
   //   但若本次 /auth/status 失败（后端刚起/网络抖动）而本地仍持有有效令牌，
   //   心跳就不会启动 → 倒计时看起来"冻住"。这里再兜一次。
   if (auth.controlActive) auth.startTtlTick();
+  // ★ 分拣 3D 装填 + 状态轮询（各页共用；无令牌时 store 内部直接不打）
+  if (auth.controlActive) s3d.start();
   onSafety((s) => { safety.value = s; safe.ingest(s); });
   asr.loadConfig();        // 语音字幕配置（是否启用/有没有密钥）→ 底栏按钮才能如实提示
   await robot.loadMeta();  // 初始化机器人模型（子组件 onMounted 已登记容器）
   robot.connect();         // 建立 WebSocket（连上后由上面的 watch 拉起轮询）
+  // ★ 2026-10-09 用户需求："每次启动项目自动打开摄像头"。
+  //   先探一次状态：服务在、相机还没开 → 自动 open；服务不可达/已开 → 交给面板自愈，不重复触发。
+  cam.refresh().then(() => { if (cam.opened) return; if (!cam.serviceDown) cam.open(); });
   await safe.load();       // 拉取安全围栏配置并应用到 3D
   switchView(HOME_VIEW);   // canvas 挂到 live 视图（restoreView 若不动作就停在这里）
   restoreView();           // 恢复上次停留的页面：刷新后回到同一页
@@ -422,7 +453,7 @@ onMounted(async () => {
   ttlTimer = setInterval(checkTtl, 1000);      // 令牌到期 → 自动收回执行页入口
   connectEvents();                              // 订阅后端事件（用于语音播报）
   link.start();                                 // 链路自检轮询（状态灯 + 引导条共用）
-  window.addEventListener("keydown", onKeydown); // 全局快捷键（1~8 / E / Q / 空格 / Esc / Enter）
+  window.addEventListener("keydown", onKeydown); // 全局快捷键（1~9 / E / Q / 空格 / Esc / Enter）
   // 浏览器自动播放策略：首次手势（点击 / 按键）后再允许出声。
   // ★ AudioContext 必须在这个手势里创建（见 services/announcer.js），
   //   纯键盘操作的用户不会点鼠标，所以 pointerdown 与 keydown 都要挂。
@@ -431,20 +462,6 @@ onMounted(async () => {
 });
 
 /** 语音字幕开关：一次点击 = 开/关（换页不中断，配置在挂载时拉过）。 */
-/** 底栏「一键就绪」：未就绪 → 就绪（幂等，已就绪点它不做任何事）。 */
-async function onReadyClick() {
-  if (rc.ready) return;      // 已就绪不重复下发，避免无谓的停/启
-  await rc.doReady();
-}
-/** 取消就绪：停机 + 清触发，**保持伺服上电**（"发了指令没动"后最常用的复位手段）。 */
-async function onCancelReady() {
-  await rc.cancelReady(false);
-}
-/** 伺服下电：停程序并断伺服。与"取消就绪"分开，因为断电后手臂可能下沉。 */
-async function onServoOff() {
-  if (!window.confirm("伺服下电会让手臂失去支撑（可能因重力下沉）。\n确认现场安全后再继续？")) return;
-  await rc.cancelReady(true);
-}
 
 function toggleAsr() {
   if (asr.active || asr.connecting) asr.stop();
@@ -472,6 +489,7 @@ onBeforeUnmount(() => {
   try { robot.disconnect(); } catch (e) { /* 卸载阶段异常不阻塞其他清理 */ }
   try { exec.dispose(); } catch (e) { /* 同上 */ }
   link.stop();
+  s3d.stop();          // ★ 分拣 3D 的状态轮询同样必须停（否则卸载后仍在打后端）
   document.removeEventListener("visibilitychange", onVisibility);
   if (keyHintTimer) clearTimeout(keyHintTimer);
   window.removeEventListener("keydown", onKeydown);
@@ -485,30 +503,37 @@ onBeforeUnmount(() => {
 <template>
   <div id="app">
     <header id="topbar">
-      <!-- 品牌区：logo + 项目名（最左侧，固定不参与 tab 的伸缩）
-           ★ 副标题（机型 · 实时监控 · 示教操控 · 安全互锁）已按要求从顶部栏移除 ——
-             顶栏空间留给导航。这段信息没有丢：悬停仍能看全，且机型本就出现在
-             浏览器标题栏与「运维审计」的健康卡里，不靠顶栏重复一遍。 -->
+      <!-- 左侧 4 个 tab -->
+      <div class="tabs-left">
+        <button v-for="t in visibleTabs.slice(0, 4)" :key="t.key" class="tab"
+                :class="{ active: robot.activeView === t.key }" @click="setView(t.key)">
+          <Icon :name="t.icon" :size="15" /> {{ t.label }}
+        </button>
+      </div>
+      <!-- 居中标题 -->
       <div id="brand" :title="BRAND.name + ' · ' + brandSubtitle()">
         <span class="brand-mark"><Icon :name="BRAND.logo" :size="19" /></span>
         <span class="brand-text">
           <span class="brand-name">{{ BRAND.name }}</span>
         </span>
       </div>
-      <div id="tabs">
-        <button v-for="t in visibleTabs" :key="t.key" class="tab"
+      <!-- 右侧 4 个 tab -->
+      <div class="tabs-right">
+        <button v-for="t in visibleTabs.slice(4)" :key="t.key" class="tab"
                 :class="{ active: robot.activeView === t.key }" @click="setView(t.key)">
           <Icon :name="t.icon" :size="15" /> {{ t.label }}
         </button>
       </div>
-      <!-- ★ 全局执行速度：所有"动真机的执行"（点位/程序/按文件）共用同一份 speed，
-           一处调、处处生效。细轴 + 百分比数字，只作执行档位，不影响点动/示教速度。 -->
-      <div id="global-speed" title="全局执行速度（点位 / 程序 / 文件执行共用）">
-        <Icon name="sliders" :size="15" />
-        <span class="gs-lbl">速度</span>
-        <input class="gs-range" type="range" min="5" max="100" step="1"
-               v-model.number="exec.speed" @input="exec.saveSpeed()" />
-        <span class="gs-val">{{ exec.speed }}%</span>
+      <!-- 速度滑块 -->
+      <!-- ★ 全项目唯一速度口径。min/max 直接引用 core/safetyConst.js 的常量
+           （与后端 SPEED_MIN/SPEED_MAX 同口径）：以前这里写 min="1"，
+           而操作 1~4 会被后端拒绝或夹到 5 —— 表现为"我设了 1% 却按 5% 跑"。
+           有静态守卫盯着两处一致（tools/verify_speed.mjs）。 -->
+      <div class="speed-control">
+        <span class="speed-label">速度</span>
+        <input type="range" :min="SPEED_MIN" :max="SPEED_MAX"
+               v-model.number="exec.speed" class="speed-slider" />
+        <span class="speed-value">{{ exec.speed }}%</span>
       </div>
     </header>
     <div v-if="showBanner" id="safety-banner" :class="safety.state">
@@ -521,6 +546,7 @@ onBeforeUnmount(() => {
       <PointExecView v-show="robot.activeView === 'point'" />
       <ProgramExecView v-show="robot.activeView === 'program'" />
       <SortingView v-show="robot.activeView === 'sort'" />
+      <AiControlView v-show="robot.activeView === 'ai'" />
       <EventsView v-show="robot.activeView === 'ops'" />
       <!-- 系统设置 / 关于：纯数据页，没有 3D 容器。
            它们也走 v-show 保活（设置页填了一半切走再切回来，草稿不能丢）。 -->
@@ -542,6 +568,10 @@ onBeforeUnmount(() => {
       <GuideBar />
     </div>
 
+    <!-- 真机链路面板：由底部「真机链路」按钮折叠切换。浮在 3D 视口上（fixed），
+         详面板内含三盏灯 + 重连 + 档位声明，数据与底栏共用同一份 link store。 -->
+    <LinkPanel :open="showLinkPanel" @close="showLinkPanel = false" @request-control="requestControl" />
+
     <!-- 快捷键反馈：只在按了键之后出现 2 秒。
          位置固定在 3D 视口底部居中偏上，不遮底栏状态灯，也不进主布局流。 -->
     <transition name="kh-fade">
@@ -559,6 +589,14 @@ onBeforeUnmount(() => {
            见 components/SafetyChip.vue（由 MonitorLayout 渲染）。
          ★ 放在 #main **之后**：视口紧贴 Tab 栏、高度稳定，引导条出现/消失不会挤动 3D。 -->
     <div id="bottom-zone">
+      <!-- 真机链路：切换按钮折叠底栏常驻三盏灯与重连/档位声明的完整面板 -->
+      <button class="link-toggle" :class="{ on: showLinkPanel }" @click="toggleLinkPanel"
+              :title="showLinkPanel ? '收起真机链路面板' : '展开真机链路面板（三盏灯 + 重连 + 档位声明）'">
+        <Icon name="plug" :size="14" />
+        <span>真机链路</span>
+        <Icon :name="showLinkPanel ? 'chevronUp' : 'chevronDown'" :size="12" />
+      </button>
+
       <!-- 机器人链路 / 摄像头 / 示教器档位：常驻显示，点开可重连或声明档位 -->
       <StatusStrip @request-control="requestControl" />
 
@@ -592,32 +630,12 @@ onBeforeUnmount(() => {
           <Icon name="alert" :size="12" /> {{ asr.err }}
         </span>
         <template v-if="auth.controlActive">
-          <!-- ★ 一键就绪入口放**底栏**（任何页面都能点）：
-               原先只有「点位执行」「分拣」两页的**可折叠右栏**里有它就绪按钮，
-               程序执行/真实监控页完全没有入口 —— 现场反映"也没有一键就绪啊"。
-               一键就绪是所有运动的前置，不该埋在某个页面的折叠栏里。 -->
-          <button class="ctrl-badge ready-btn" :class="{ op: !auth.isAdmin, on: rc.ready }"
-                  :disabled="rc.busy || !rc.ready && rc.jogTrig"
-                  :title="rc.ready
-                    ? '已就绪：伺服上电 + 程序运行 + 自动档 + 无报警。点击可查看明细（各页右栏的就绪卡）'
-                    : (rc.busy ? '正在就绪…' : '点击「一键就绪」：清位 → 清报警 → 伺服上电 → 加载并运行常驻程序')"
-                  @click="onReadyClick">
-            <Icon :name="rc.ready ? 'shield' : 'power'" :size="14" />
-            {{ rc.ready ? "控制中" : (rc.busy ? "就绪中…" : "一键就绪") }}<span v-if="auth.roleLabel"> · {{ auth.roleLabel }}</span> · {{ auth.ttlText }}
-          </button>
-          <!-- ★ 拆成两个明确动作（用户口径"取消就是取消伺服"）：
-               停程序 与 伺服下电 是两件事，混在一个按钮里最容易出事
-               （伺服下电后手臂可能因重力下沉）。 -->
-          <button v-if="rc.ready" class="ctrl-release"
-                  title="取消就绪：停机 + 清触发（**保持伺服上电**，程序不再跑）"
-                  @click="onCancelReady">
-            <Icon name="close" :size="14" /> 取消就绪
-          </button>
-          <button v-if="rc.ready" class="ctrl-release"
-                  title="伺服下电：停程序并断伺服。⚠ 断电后手臂可能因重力下沉，请先支撑/远离"
-                  @click="onServoOff">
-            <Icon name="power" :size="14" /> 伺服下电
-          </button>
+          <!-- ★ 一键就绪 / 取消就绪已收进底部「真机链路」面板（点开即完整 RcReadyCard），
+               这里只保留必要的状态与动作，避免同一功能在底栏出现两遍。
+               显示：授权角色 + 剩余有效时间；动作：释放控制权限。 -->
+          <span class="ctrl-badge" :title="'控制授权有效，剩余：' + auth.ttlText" style="font-variant-numeric:tabular-nums">
+            {{ auth.roleLabel ? auth.roleLabel + " · " : "" }}<Icon name="clock" :size="13" /> {{ auth.ttlText }}
+          </span>
           <button class="ctrl-release" @click="releaseControl" title="释放控制权限">
             <Icon name="power" :size="14" /> 释放
           </button>
@@ -676,92 +694,121 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* ---- 顶栏：毛玻璃半透明 + 底部发光线 ---- */
 #topbar { display: flex; align-items: stretch;
-  background: linear-gradient(180deg, var(--panel2), var(--panel) 62%);
-  border-bottom: 1px solid var(--line); box-shadow: 0 1px 0 var(--glass-line); }
+  background: linear-gradient(180deg, rgba(10,16,26,0.94), rgba(8,12,20,0.8));
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--line); position: relative; }
+#topbar::after { content: ''; position: absolute; bottom: -1px; left: 6%; right: 6%;
+  height: 1px; background: linear-gradient(90deg, transparent, rgba(47,214,240,0.4), transparent);
+  pointer-events: none; }
 
-/* ---- 品牌区（顶部栏最左）：logo + 项目名 ---- */
-/* ★ 全名较长（FIT 埃夫特智能机器人远程控制与监控系统），而 #tabs 在窄屏是
-   flex:0 0 auto 不收缩 —— 品牌区不给上限的话窄屏会把 tab 顶出可视区。
-   所以给整块一个 max-width，名称允许省略号截断；完整名称在 title 提示里。 */
+/* ---- 三段式顶栏：左 tabs | 居中标题 | 右 tabs ---- */
+.tabs-left, .tabs-right { flex: 1; display: flex; min-width: 0; }
+.tabs-left { justify-content: flex-end; }
+.tabs-right { justify-content: flex-start; }
+
+/* ---- 居中标题 ---- */
 #brand { flex: none; display: flex; align-items: center; gap: 10px;
-  padding: 0 16px; border-right: 1px solid var(--line); max-width: 380px; min-width: 0; }
+  padding: 0 10px; white-space: nowrap; }
 .brand-mark { width: 32px; height: 32px; flex: none; display: grid; place-items: center;
-  border-radius: 9px; color: var(--accent2);
+  border-radius: 9px; color: var(--accent);
   background: linear-gradient(145deg, var(--accent-soft2), var(--accent-soft3));
   border: 1px solid var(--accent-line);
   box-shadow: 0 0 14px var(--accent-soft), inset 0 0 0 1px var(--accent-soft3); }
-/* 只剩项目名一行：不再需要纵向排列，居中即可（副标题已移除） */
 .brand-text { display: flex; align-items: center; min-width: 0; overflow: hidden; }
-.brand-name { font-size: 14px; font-weight: 600; color: var(--txt); white-space: nowrap;
-  letter-spacing: .2px; overflow: hidden; text-overflow: ellipsis; }
-#tabs { flex: 1; display: flex; border-bottom: none; }
+.brand-name { font-size: 18px; font-weight: 800; white-space: nowrap;
+  letter-spacing: .04em; overflow: hidden; text-overflow: ellipsis;
+  font-family: 'Chakra Petch', var(--font);
+  background: linear-gradient(120deg, var(--accent), #6ea8ff);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  filter: drop-shadow(0 0 12px rgba(47,214,240,0.25)); }
 
-/* ---- 全局执行速度（顶栏右侧）---- */
-#global-speed { flex: none; display: flex; align-items: center; gap: 8px;
-  padding: 0 14px; border-left: 1px solid var(--line); color: var(--accent); }
-#global-speed .gs-lbl { font-size: 12px; color: var(--muted); white-space: nowrap; }
-#global-speed .gs-val { font-size: 12px; color: var(--txt); font-variant-numeric: tabular-nums;
-  font-family: var(--num); min-width: 42px; text-align: right; white-space: nowrap; }
-.gs-range { -webkit-appearance: none; appearance: none; width: 110px; height: 4px;
-  border-radius: 3px; background: linear-gradient(90deg, var(--line), var(--line));
-  outline: none; cursor: pointer; }
-.gs-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 13px; height: 13px;
-  border-radius: 50%; background: var(--accent); border: 2px solid var(--bg);
-  box-shadow: 0 0 0 1px var(--accent); cursor: pointer; }
-.gs-range::-moz-range-thumb { width: 13px; height: 13px; border-radius: 50%; background: var(--accent);
-  border: 2px solid var(--bg); box-shadow: 0 0 0 1px var(--accent); cursor: pointer; }
-.gs-range::-moz-range-track { height: 4px; border-radius: 3px; background: var(--line); }
-/* ---- 播报 / 控制权限：★ 从顶栏搬到底栏最右 ----
-   - 去掉"撑满顶栏高度"的假设，改成与状态灯同高的小胶囊；
-   - 保留 border-left 作为与引导条的分隔线；
-   - margin-left:auto 是兜底：窄屏 flex-wrap 换到第二行时，仍然贴右（"放在右侧就行"）。 */
+/* ---- 速度滑块 ---- */
+.speed-control { flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 0 10px; border-left: 1px solid var(--line); white-space: nowrap; }
+.speed-label { font-size: 11px; color: var(--muted); font-weight: 600; }
+.speed-slider { width: 90px; height: 4px; -webkit-appearance: none; appearance: none;
+  background: var(--panel3); border-radius: 2px; outline: none; cursor: pointer; }
+.speed-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  box-shadow: 0 0 8px rgba(47,214,240,0.4); cursor: pointer; }
+.speed-slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; border: none;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  box-shadow: 0 0 8px rgba(47,214,240,0.4); cursor: pointer; }
+.speed-value { font-size: 12px; color: var(--accent); font-weight: 700;
+  font-family: var(--num); min-width: 36px; text-align: right; }
+
+/* ---- 底栏控制区 ---- */
 #control-zone { flex: none; display: flex; align-items: center; gap: 10px;
-  padding: 0 4px 0 12px; margin-left: auto; border-left: 1px solid var(--line); }
+  padding: 0 4px 0 10px; margin-left: auto; border-left: 1px solid var(--line); }
 .ctrl-badge { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ok);
   font-variant-numeric: tabular-nums; white-space: nowrap; }
-/* ★ 全维度审查 N-01：轴锁模式常驻徽标（顶栏控制区最左侧） */
 .lock-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
   color: var(--ok); white-space: nowrap; padding: 3px 9px; border-radius: 999px;
   border: 1px solid var(--line); background: var(--bg); font-variant-numeric: tabular-nums; }
 .lock-badge.on { color: var(--warn); border-color: var(--warn-line); background: var(--warn-soft); }
-/* 操作员令牌：权限低一档，用强调色和绿色区分，避免现场误以为"什么都能改" */
+/* ---- 真机链路切换按钮（bottom-zone 左侧，与 StatusStrip 同款底栏风格） ---- */
+.link-toggle { display: inline-flex; align-items: center; gap: 6px; flex: none;
+  padding: 6px 10px; border-radius: 8px; font-size: 12px; cursor: pointer;
+  border: 1px solid var(--glass-line); background: var(--panel2); color: var(--muted);
+  user-select: none; transition: border-color .14s ease, background .14s ease, color .14s ease; }
+.link-toggle:hover { border-color: var(--accent); color: var(--txt); }
+.link-toggle.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.link-toggle > span { white-space: nowrap; }
 .ctrl-badge.op { color: var(--accent); }
-.ctrl-request, .ctrl-release { flex: none; width: auto; padding: 7px 14px;
+.ctrl-request, .ctrl-release { flex: none; width: auto; padding: 7px 10px;
   display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .ctrl-release { color: var(--warn); }
 .ctrl-release:hover { border-color: var(--warn); }
 .ctrl-request:disabled { opacity: .4; cursor: not-allowed; }
 .ann-btn { flex: none; width: 30px; height: 30px; padding: 0; display: inline-flex;
-  align-items: center; justify-content: center; color: var(--accent); }
+  align-items: center; justify-content: center; color: var(--accent);
+  border-radius: var(--radius-sm); }
 .ann-btn.off { color: var(--muted); opacity: .75; }
-/* ★ 语音字幕：识别中用红色（与播报的"静音灰"区分开）；错误文字贴在按钮右侧 */
-.ann-btn.rec { color: #fff; background: #c0392b; border-color: #c0392b;
+.ann-btn.rec { color: #fff; background: linear-gradient(135deg, #ff5c7a, #e02a4e);
+  border-color: transparent; box-shadow: 0 0 12px rgba(255,77,109,0.4);
   animation: asrPulse 1.6s ease-in-out infinite; }
 @keyframes asrPulse { 0%,100% { opacity: 1; } 50% { opacity: .62; } }
 .asr-err { display: inline-flex; align-items: center; gap: 4px; max-width: 280px;
-  font-size: 11px; color: #ffb4b4; cursor: pointer;
+  font-size: 11px; color: var(--err-fg); cursor: pointer;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.modal-mask { position: fixed; inset: 0; z-index: 200; background: rgba(8, 10, 14, .62);  backdrop-filter: blur(3px); display: flex; align-items: center; justify-content: center; }
-.modal { width: 360px; max-width: 92vw; background: var(--panel); border: 1px solid var(--line);
-  border-radius: 12px; box-shadow: 0 18px 50px rgba(0, 0, 0, .55); padding: 18px; }
+/* ---- 模态框：Sentinel 风格 ---- */
+.modal-mask { position: fixed; inset: 0; z-index: 200;
+  background: rgba(3, 6, 12, 0.72); backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center;
+  animation: modalFadeIn .18s ease-out; }
+@keyframes modalFadeIn { from { opacity: 0; } }
+.modal { width: 380px; max-width: 92vw;
+  background: linear-gradient(180deg, #111a2a, #0c1320);
+  border: 1px solid var(--line2); border-radius: 14px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5); padding: 10px;
+  position: relative; overflow: hidden;
+  animation: modalPop .22s cubic-bezier(0.2,0.9,0.3,1.2); }
+.modal::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(47,214,240,0.35), transparent);
+  opacity: 0.6; pointer-events: none; }
+@keyframes modalPop { from { opacity: 0; transform: scale(0.95) translateY(10px); } }
 .modal-head { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700;
-  color: var(--txt); }
+  color: var(--txt); font-family: 'Chakra Petch', var(--font); }
 .modal-head .modal-x { flex: none; width: 26px; height: 26px; margin-left: auto; display: flex;
-  align-items: center; justify-content: center; background: transparent; border: none;
-  color: var(--muted); cursor: pointer; }
-.modal-head .modal-x:hover { color: var(--txt); }
-.modal-tip { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 8px 0 10px; }
-.modal-roles { margin: 0 0 14px; padding-left: 18px; font-size: 12px; color: var(--muted);
+  align-items: center; justify-content: center; background: transparent; border: 1px solid var(--line);
+  border-radius: 6px; color: var(--muted); cursor: pointer; }
+.modal-head .modal-x:hover { color: var(--txt); border-color: var(--accent); }
+.modal-tip { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 8px 0 0; }
+.modal-roles { margin: 10px 0 0; padding-left: 10px; font-size: 12px; color: var(--muted);
   line-height: 1.65; }
 .modal-roles b { color: var(--txt); font-weight: 600; }
-.modal-input { display: flex; align-items: center; gap: 8px; background: var(--bg);
-  border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; color: var(--muted); }
-.modal-input:focus-within { border-color: var(--accent); }
+.modal-input { display: flex; align-items: center; gap: 8px; background: #080e19;
+  border: 1px solid var(--line2); border-radius: 10px; padding: 0 10px; color: var(--muted);
+  transition: border-color .18s, box-shadow .18s; }
+.modal-input:focus-within { border-color: rgba(47,214,240,0.55);
+  box-shadow: 0 0 0 3px rgba(47,214,240,0.1); }
 .modal-input.invalid { border-color: var(--err); }
 .modal-input input { flex: 1; background: transparent; border: none; outline: none; color: var(--txt);
-  font-size: 14px; padding: 11px 0; }
+  font-size: 14px; padding: 10px 0; }
 .modal-err { display: flex; align-items: center; gap: 6px; color: var(--err); font-size: 12px;
   margin: 10px 0 0; }
 .modal-btns { display: flex; gap: 10px; margin-top: 16px; }
@@ -769,27 +816,25 @@ onBeforeUnmount(() => {
 .spin { animation: ctrl-spin .8s linear infinite; }
 @keyframes ctrl-spin { to { transform: rotate(360deg); } }
 
-/* ---- 快捷键反馈条 ----
-   ★ position: fixed 而不是放进布局流：它出现/消失绝不能挤动 3D 视口高度。
-   bottom 留出底栏（状态灯 + 引导条）的空间，落在 3D 视口内的下缘。 */
+/* ---- 快捷键反馈条 ---- */
 #key-hint { position: fixed; left: 50%; bottom: 92px; transform: translateX(-50%);
   z-index: 120; display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 14px; border-radius: 20px; font-size: 12px; color: var(--txt);
-  background: var(--panel); border: 1px solid var(--line);
-  box-shadow: 0 8px 26px rgba(0, 0, 0, .45); pointer-events: none; white-space: nowrap; }
+  padding: 7px 10px; border-radius: 20px; font-size: 12px; color: var(--txt);
+  background: var(--glass-solid); border: 1px solid var(--line2);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5); pointer-events: none; white-space: nowrap;
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
 #key-hint svg { color: var(--accent); }
 .kh-fade-enter-active, .kh-fade-leave-active { transition: opacity .18s ease, transform .18s ease; }
 .kh-fade-enter-from, .kh-fade-leave-to { opacity: 0; transform: translateX(-50%) translateY(6px); }
 
-/* ---- WebGL 上下文丢失提示 ----
-   与快捷键条同一套浮层语言：position: fixed，绝不挤动 3D 视口高度。
-   位置更高一点，避免与底部引导条/快捷键提示叠在一起。 */
+/* ---- WebGL 上下文丢失提示 ---- */
 #gl-banner { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
   z-index: 130; display: inline-flex; align-items: center; gap: 8px;
-  padding: 10px 18px; border-radius: 10px; font-size: 13px; font-weight: 600;
-  color: var(--warn); background: rgba(22, 27, 34, .94);
+  padding: 10px; border-radius: 10px; font-size: 13px; font-weight: 600;
+  color: var(--warn); background: rgba(17,26,42,0.97);
   border: 1px solid var(--warn-line);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .5); pointer-events: none; white-space: nowrap; }
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); pointer-events: none; white-space: nowrap;
+  backdrop-filter: blur(12px); }
 #gl-banner svg { color: var(--warn); }
 .gl-fade-enter-active, .gl-fade-leave-active { transition: opacity .18s ease; }
 .gl-fade-enter-from, .gl-fade-leave-to { opacity: 0; }
