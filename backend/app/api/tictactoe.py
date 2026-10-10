@@ -59,10 +59,11 @@ BLOW_MS = 500           # 吹气时长
 #   自证模式取件抬起后先去 C 检测位拍照，颜色必须等于"该格应有的颜色"。
 VERIFY_FRAMES = 3       # 送检拍几帧（与分拣判色同量级，再投票）
 VERIFY_DWELL_MS = 600   # 到 C 位后停顿再拍（等机械停稳，避免拖影判错）
-# ★ 装料约定：圆=红（A1–A5 装红件）/ 叉=蓝（A6–A9 装蓝件）。
-#   自证据此判断"取到的这件是不是该格应有的颜色"。
-#   ★ 现场装料若与约定不同，**只改这一处**（卡片上会显示该约定，便于当场核对）。
+# ★ 装料约定的**默认值**：圆=红（A1–A5 装红件）/ 叉=蓝（A6–A9 装蓝件）。
+#   ★ 2026-10-10 用户口径："对井字棋就是那样！也可以切换别的颜色，用户自己选吧" ——
+#     所以它只是缺省，**可从界面按符号各选红/绿/蓝**（经 `/start` 的 `colors` 传进来）。
 SYMBOL_COLOR = {"O": "红", "X": "蓝"}
+ALLOWED_COLORS = ("红", "绿", "蓝")
 
 
 def is_game_running() -> bool:
@@ -93,14 +94,17 @@ def _needed_points(verify: bool = False) -> List[str]:
 # ---------------------------------------------------------------- 状态
 def _new_state(dry: bool, difficulty: str, user_sym: str, robot_sym: str,
                first: str, speed_pct: int, verify_color: bool = False,
-               min_conf: float = 0.3) -> Dict:
+               min_conf: float = 0.3, symbol_color: Optional[Dict[str, str]] = None) -> Dict:
     """一局全新的 state（每次「开始」都重建，绝不继承上一局残留）。"""
+    sc = dict(SYMBOL_COLOR)
+    sc.update({k: v for k, v in (symbol_color or {}).items() if v in ALLOWED_COLORS})
     return {
         "dry_run": bool(dry),
         "difficulty": difficulty,
         "speed_pct": int(speed_pct),      # ★ 本局速度（= 右上角全局速度）
         # ★ 两种模式（用户 2026-10-10）：默认模式不判色；自证模式取件后拍照核对颜色
         "verify_color": bool(verify_color),
+        "symbol_color": sc,               # ★ 自证约定（圆/叉各是什么颜色，界面可改）
         "min_conf": float(min_conf),      # 自证判色门槛（跟随视觉服务配置）
         "board": TT.new_board(),          # 9 格，与 B1..B9 同序
         "user_sym": user_sym, "robot_sym": robot_sym,
@@ -205,7 +209,7 @@ def _play(ctx, pmap, st, dry, sym: str, cell: int) -> None:
     # ★ 自证模式（`verify_color`）：取件抬起后先去 C 位拍照核对颜色；不符/判不出 → 放回原位并停
     _carry(ctx, pmap, st, dry, src, dst, who_cn, via_start=True,
            verify=bool(st.get("verify_color")),
-           expect_color=SYMBOL_COLOR.get(sym, ""),
+           expect_color=((st.get("symbol_color") or SYMBOL_COLOR).get(sym, "")),
            min_conf=float(st.get("min_conf") or 0.3))
     # ★ 就地更新（保持 st 里的 list 引用稳定，供 /state 深拷贝读出）；
     #   真正的"落子"发生在搬运完成之后 —— 界面不会出现"还没搬就说已落子"。
@@ -351,6 +355,10 @@ class StartIn(BaseModel):
     # ★ 两种模式（用户 2026-10-10）：false = 默认（不判色，直接下）；true = 拍照自证
     verify_color: bool = Field(default=False,
                                description="拍照自证：取件后到 C 位拍照核对颜色")
+    # ★ 自证约定（用户 2026-10-10："也可以切换别的颜色，用户自己选"）：
+    #   {"O":"红","X":"蓝"} —— 缺省即默认；只接受 红/绿/蓝，非法值忽略（回落缺省）
+    colors: Optional[Dict[str, str]] = Field(default=None,
+                                             description="圆/叉各自应有的颜色（自证用）")
 
 
 @router.post("/start")
@@ -395,7 +403,7 @@ def api_start(body: StartIn, tok: str = Depends(require_control)):
     user_sym, robot_sym = (TT.O, TT.X) if first == "user" else (TT.X, TT.O)
     st = _new_state(body.dry_run, difficulty, user_sym, robot_sym, first,
                     int(body.speed_pct), verify_color=bool(body.verify_color),
-                    min_conf=min_conf)
+                    min_conf=min_conf, symbol_color=body.colors)
     snap = _snap(st)
     q: "queue.Queue" = queue.Queue()
     ctx = new_run("井字棋", kind="tictactoe")

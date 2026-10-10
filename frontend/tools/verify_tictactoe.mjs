@@ -502,10 +502,15 @@ console.log("== M. 后端来源（Windows XInput 直读兜底） ==");
   ok("游戏默认模式不判色（verify_color 默认 false、判色被 not dry 门控）",
     /verify_color: bool = Field\(default=False/.test(gpApiTtt)
     && /if verify and not dry:/.test(gpApiTtt));
-  ok("卡片有「模式」开关（默认 / 拍照自证）+ 自证约定说明",
-    /verifyColor/.test(tttCard) && /拍照自证/.test(tttCard) && /圆 = 红/.test(tttCard));
+  ok("卡片有「模式」开关（默认 / 拍照自证）+ 自证约定编辑组件",
+    /verifyColor/.test(tttCard) && /拍照自证/.test(tttCard)
+    && /自证约定（可改）/.test(tttCard));
   ok("store 开局透传 verify_color",
     /verify_color: this\.verifyColor/.test(tttStore));
+  // ★ 2026-10-10 用户口径："也可以切换别的颜色，用户自己选吧"
+  ok("自证约定用户可改（圆/叉各一个颜色下拉 + store 透传 colors）",
+    /selfColor/.test(tttStore) && /colors: \{ O: this\.selfColor\.O/.test(tttStore)
+    && /v-model="ttt\.selfColor\.O"/.test(tttCard));
 }
 
 console.log("");

@@ -63,6 +63,17 @@ const runCtx = ref(null);
 /** 进度气泡 → 代码式步骤 + 当前步（-1 = 还没进入任何一步） */
 const steps = (m) => planSteps(m.ctx && m.ctx.plan);
 const cur = (m) => stepIndex((m.st || {}).stage, steps(m));
+/** 计划里的逐格约束（禁取/禁放）—— 界面用**黑色方块**标出来（2026-10-10 用户口径） */
+const banOf = (m) => {
+  const b = (m.parsed && m.parsed.plan && m.parsed.plan.ban) || {};
+  return { from: b.from || [], to: b.to || [] };
+};
+/** 禁用格 = **黑色方块**（用户口径："禁止摆放你就放黑色方块就行了"） */
+const BAN_SQ = {
+  display: "inline-block", marginLeft: "4px", padding: "0 5px",
+  background: "#000", color: "#fff", border: "1px solid #555",
+  borderRadius: "3px", fontStyle: "normal", fontSize: "11px",
+};
 const atBottom = ref(true);
 const scroller = ref(null);
 
@@ -304,6 +315,20 @@ const stageLine = (m) => {
               <div class="plan-t">
                 {{ (m.parsed && m.parsed.echo && m.parsed.echo.title) || "我理解为" }}
                 <span class="muted">· {{ (m.parsed && m.parsed.echo && m.parsed.echo.detail) || "" }}</span>
+              </div>
+              <!-- ★ 2026-10-10 用户口径："禁止摆放你就放黑色方块就行了"：
+                   禁用格一律渲染成**黑色方块**，一眼看出哪格不能拿/不能放。 -->
+              <div v-if="banOf(m).from.length || banOf(m).to.length"
+                   :style="{ fontSize: '11px', margin: '4px 0', display: 'flex',
+                             gap: '10px', flexWrap: 'wrap' }">
+                <span v-if="banOf(m).from.length">
+                  不能取：
+                  <i v-for="s in banOf(m).from" :key="'f' + s" :style="BAN_SQ">{{ s }}</i>
+                </span>
+                <span v-if="banOf(m).to.length">
+                  不能放：
+                  <i v-for="s in banOf(m).to" :key="'t' + s" :style="BAN_SQ">{{ s }}</i>
+                </span>
               </div>
               <div v-if="m.parsed && m.parsed.echo && m.parsed.echo.note" class="plan-n">
                 {{ m.parsed.echo.note }}

@@ -51,6 +51,9 @@ export const useTicTacToeStore = defineStore("tictactoe", {
     // ★ 两种模式（2026-10-10 用户口径）：false = 默认（不判色、不去 C 位）；
     //   true = 拍照自证（取件后到 C 位拍照核对颜色，不符/判不出 → 放回原位并停）
     verifyColor: false,
+    // ★ 自证约定（2026-10-10 用户口径："也可以切换别的颜色，用户自己选吧"）
+    //   圆/叉各自应有的颜色 —— 缺省 红/蓝，界面可改，开局随 colors 传给后端。
+    selfColor: { O: "红", X: "蓝" },
     // 复盘（仅 2D 回放，不动机器人）
     replay: null,
     replayIdx: 0,
@@ -180,7 +183,8 @@ export const useTicTacToeStore = defineStore("tictactoe", {
           // ★ 速度沿用**右上角那份全局速度**（用户口径："右上角多少，机器人速度多少"）
           body: JSON.stringify({ difficulty: this.difficulty, dry_run: this.dryRun,
                                  speed_pct: useExecStore().speed,
-                                 verify_color: this.verifyColor }),
+                                 verify_color: this.verifyColor,
+                                 colors: { O: this.selfColor.O, X: this.selfColor.X } }),
         });
         if (r.status === 401 || r.status === 403) { this._needAuth(); return false; }
         const d = await r.json().catch(() => ({}));

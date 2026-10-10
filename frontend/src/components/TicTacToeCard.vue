@@ -25,6 +25,8 @@ const ttt = useTicTacToeStore();
 const robot = useRobotStore();
 
 const DIFFS = ["easy", "normal", "hard"].map((k) => ({ k, cn: diffCn(k) }));
+// ★ 自证约定的可选颜色（2026-10-10 用户口径："也可以切换别的颜色，用户自己选吧"）
+const COLORS = ["红", "绿", "蓝"];
 
 const running = computed(() => ttt.running);
 const paused = computed(() => ttt.paused);
@@ -143,9 +145,20 @@ onBeforeUnmount(() => {
                 @click="ttt.verifyColor = true">拍照自证</button>
       </span>
     </div>
+    <!-- ★ 自证约定的**编辑组件**：圆/叉各一个颜色下拉（红/绿/蓝），开局后锁定 -->
     <div v-if="ttt.verifyColor" class="ttt-hint">
-      自证约定：<b>圆 = 红</b>（A1–A5）· <b>叉 = 蓝</b>（A6–A9）；
-      需 C 检测位已示教、相机三色识别已开启。判不出 / 不符 → <b>放回原位并停止</b>（空跑不判色）。
+      自证约定（可改）：
+      <span class="sc-pick">圆
+        <select v-model="ttt.selfColor.O" :disabled="locked">
+          <option v-for="c in COLORS" :key="'o' + c" :value="c">{{ c }}</option>
+        </select>
+      </span>
+      <span class="sc-pick">叉
+        <select v-model="ttt.selfColor.X" :disabled="locked">
+          <option v-for="c in COLORS" :key="'x' + c" :value="c">{{ c }}</option>
+        </select>
+      </span>
+      需 C 检测位已示教、相机三色识别已开启；判不出 / 不符 → <b>放回原位并停止</b>（空跑不判色）。
     </div>
 
     <!-- 空跑 / 真实下发：默认空跑 -->
