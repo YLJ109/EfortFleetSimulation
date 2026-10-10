@@ -285,17 +285,7 @@ def api_start(body: StartIn, tok: str = Depends(require_control)):
     need_vision = (not bool(body.dry_run)) and real_write_enabled()
     min_conf = 0.3
     if need_vision:
-        st, js, err = camera_client.get_json("/vision/status", timeout=6)
-        if st != 200 or err:
-            raise HTTPException(502, detail="视觉服务不可达：%s（先启动相机服务）" % (err or st))
-        v = js or {}
-        if not v.get("color_capable"):
-            raise HTTPException(400, detail="当前相机不是彩色相机，无法判色（换彩色相机/USB 摄像头）")
-        if not v.get("enabled"):
-            raise HTTPException(400, detail="颜色识别未开启（摄像头面板里打开三色识别）")
-        if not v.get("thread_alive"):
-            raise HTTPException(400, detail="颜色识别线程未运行（视觉服务异常，重启相机服务）")
-        min_conf = float(body.min_conf if body.min_conf is not None else (v.get("min_conf") or 0.3))
+        min_conf = vision_preflight(body.min_conf)
 
     ctx = new_run("三色分拣", kind="sorting")
     # ★ 每轮**全新状态**（"每次运行必须从头开始"）—— 由 services/sorting.fresh_run_state()
@@ -432,6 +422,52 @@ def _capture(ctx, frames: int, min_conf: float, stage: str, st=None) -> Dict:
     return v
 
 
+def _put_back(ctx, pmap, src_slot: str, speed: int, dry: bool,
+              blow_ms: int = 500, prefix: str = "放回原位", st=None) -> None:
+    """★ 2026-10-10 用户口径：**判不出色（或自证不符）→ 把件原路放回取料格**。
+
+    调用前提：件正被吸着、机器人停在半路（分拣停在 C 检测位）。
+    工艺与"取料"完全对称、只是反过来：
+        当前位置 → A{n}上方 → 下落 → 停止吸 → 放气 → 等 blow_ms → 停止放气 → 抬起 → 回起点
+
+    ★ 为什么必须"回到原格上空再放"而不是就地松手：就地松件会掉在 C 区/半路，
+      位置随机 —— 现场得满地找件，而且下一次取料还会撞上它。
+    ★ 两路气在**这里正常关断**（不靠异常收尾兜底），所以调用方随后要把
+      suck_on/blow_on 置 False，免得收尾再关一次。
+    """
+    _move(ctx, pmap, src_slot + "上", speed, dry, "%s·到原格上方" % prefix, st)
+    _move(ctx, pmap, src_slot, speed, dry, "%s·下落" % prefix, st)
+    _air(ctx, "release", dry, "%s·停止吸" % prefix, st)
+    _air(ctx, "blow", dry, "%s·放气" % prefix, st)
+    if int(blow_ms) > 0:
+        ctx.sleep(int(blow_ms) / 1000.0)
+    _air(ctx, "unblow", dry, "%s·停止放气" % prefix, st)
+    _set(st, holding=False, stage="%s·完成" % prefix)
+    _move(ctx, pmap, src_slot + "上", speed, dry, "%s·抬起" % prefix, st)
+    _move(ctx, pmap, S.START_POINT, speed, dry, "%s·回起点" % prefix, st)
+
+
+def vision_preflight(body_min_conf: Optional[float] = None) -> float:
+    """视觉服务前置校验 + 取本次判色门槛（**分拣 / 井字棋拍照自证 共用**）。
+
+    ★ 只在"真的要判色"时才调用：空跑 / 双闸未开时物体到不了 C 区，
+      判色必然"检测不到"，拿相机当门槛只会挡住空跑验证（原分拣口径）。
+    ★ 校验项与文案与原分拣实现逐字一致 —— 抽出来只为共用，不改变行为。
+    返回：本次判色所用的 min_conf。
+    """
+    st, js, err = camera_client.get_json("/vision/status", timeout=6)
+    if st != 200 or err:
+        raise HTTPException(502, detail="视觉服务不可达：%s（先启动相机服务）" % (err or st))
+    v = js or {}
+    if not v.get("color_capable"):
+        raise HTTPException(400, detail="当前相机不是彩色相机，无法判色（换彩色相机/USB 摄像头）")
+    if not v.get("enabled"):
+        raise HTTPException(400, detail="颜色识别未开启（摄像头面板里打开三色识别）")
+    if not v.get("thread_alive"):
+        raise HTTPException(400, detail="颜色识别线程未运行（视觉服务异常，重启相机服务）")
+    return float(body_min_conf if body_min_conf is not None else (v.get("min_conf") or 0.3))
+
+
 def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -> None:
     dry = bool(body.dry_run)
     speed = int(body.speed_pct)
@@ -516,8 +552,17 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
                      frame_detail=v.get("frame_detail") or [],
                      best_frame=v.get("best_frame"))
                 if not v["ok"]:
-                    raise _Stop("检测不到（%s）%s" % (v["reason"], _HINT_NO_PIECE),
-                                "判色", idx)
+                    # ★★ 2026-10-10 用户口径：**判不出色 → 原路放回取料格，然后停止**。
+                    #    绝不再"就地放掉"（件会掉在 C 区/半路，位置随机、现场要满地找件，
+                    #    而且下一件取料还可能撞上它）。分拣 / AI / 井字棋自证三条链路统一。
+                    #    也不做"跳过继续"（用户明确否掉）—— 放回完这一轮就结束。
+                    _set(stage="无法识别·放回原位", target="")
+                    _put_back(ctx, pmap, a_slot, speed, dry,
+                              blow_ms=int(body.blow_ms), prefix="放回原位 %s" % a_slot)
+                    suck_on = False          # 两路气已在 _put_back 内正常关断
+                    blow_on = False
+                    raise _Stop("颜色无法识别（%s）%s，已放回原位 %s"
+                                % (v["reason"], _HINT_NO_PIECE, a_slot), "判色", idx)
             _set(color=v["color"], conf=v["conf"])
             # 4) 按色选槽
             plan = S.build_piece_plan(placement, v["color"])

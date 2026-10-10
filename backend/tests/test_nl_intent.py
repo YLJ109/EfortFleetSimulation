@@ -152,6 +152,64 @@ def test_vague_speed_rejected():
         assert r["ok"] is False and "速度" in r["error"]
 
 
+def test_goto_start_is_a_real_action():
+    """★ 2026-10-10 用户口径：「让它回到起点」—— 这是**可执行动作**。
+
+    此前没有这个动作 → 规则层听不懂 → 落进大模型闲聊 → 模型只能编
+    "已回到起点位置"（它没有任何执行权，纯属谎报设备状态）。
+    """
+    for t in ("回到起点", "回起点", "回原点", "回零", "返回起点", "去起点", "回到开始/结束点"):
+        r = N.parse(t)
+        assert r["ok"] and r["intent"] == "goto_start", (t, r)
+        assert r["plan"] == {"action": "goto_start"}, (t, r)
+    # 它是**运动**，不是停：别被"回"字带进停止/急停
+    assert N.parse("回到起点")["intent"] != "estop"
+    assert N.parse("回到起点")["intent"] != "sorting"
+
+
+def test_ban_slots_parsed():
+    """★ 2026-10-10 用户口径：任意「某格不能拿 / 某格不能放」都要能解析（无规则也要认）。"""
+    cases = [
+        ("A4不能拿", {"from": ["A4"], "to": []}),
+        ("A5不能放", {"from": [], "to": ["A5"]}),
+        ("不要拿A4", {"from": ["A4"], "to": []}),
+        ("禁止取A1", {"from": ["A1"], "to": []}),
+        ("B5、B9禁止摆放物体", {"from": [], "to": ["B5", "B9"]}),   # 先枚举后动词
+        ("B5和B9不能放", {"from": [], "to": ["B5", "B9"]}),
+        ("A4不能拿，A5不能放", {"from": ["A4"], "to": ["A5"]}),      # 一句里两个方向
+        ("B3不要放和A2不要拿", {"from": ["A2"], "to": ["B3"]}),
+    ]
+    for text, exp in cases:
+        r = N.parse(text + "，把A1放到B1")
+        assert r["ok"], (text, r)
+        assert r["plan"].get("ban") == exp, (text, r["plan"])
+    # ★ 约束不得污染目标解析：说了"B6不能放"≠ 要放到 B6
+    r = N.parse("把A1放到B1，B6不能放")
+    assert r["plan"]["to"]["slot"] == "B1", r["plan"]
+    assert r["plan"]["ban"] == {"from": [], "to": ["B6"]}
+    assert any("不能放料" in w for w in r["warnings"])
+    # 非法格号 → 明说，不静默忽略
+    bad = N.parse("把A1放到B1，B0不能放")
+    assert bad["ok"] is False and "格号" in bad["error"]
+
+
+def test_query_and_inventory_intents():
+    """★ 2026-10-10 用户口径：状态查询（**只读**）与盘点（**运动**）都要能解析。"""
+    for t in ("A区有几个盒子", "A区有几个物体", "A区几个红几个蓝", "A区有哪些颜色",
+              "A区还有几个空位", "A区有几个无效颜色", "B区放了什么"):
+        r = N.parse(t)
+        assert r["ok"] and r["intent"] == "query_state", (t, r)
+    for t in ("盘点A区", "清点一下A区", "把A区数一遍"):
+        r = N.parse(t)
+        assert r["ok"] and r["intent"] == "inventory", (t, r)
+    # ★ 不能把搬运指令误判成查询（含"搬到"一律走搬运）
+    r = N.parse("把A区的3个红色，2个蓝色，1个绿色搬到B区")
+    assert r["intent"] == "move_quota", r
+    # ★ 单格看颜色仍是 look_color（不是整区查询）
+    r = N.parse("A区第1行第1列是什么颜色")
+    assert r["intent"] == "look_color", r
+
+
 def test_unknown_does_not_guess():
     for t in ("你好", "今天天气怎么样", "把那个东西弄一下"):
         r = N.parse(t)

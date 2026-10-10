@@ -30,7 +30,8 @@ from pydantic import BaseModel, Field
 from app.api.auth import require_control
 from app.api.control import (_is_paused, _reject_if_run_active, new_run,
                              request_cancel)
-from app.api.sorting import _Stop, _air, _move, _set as _set_state  # 复用同一套原语
+from app.api.sorting import (_Stop, _air, _capture, _move,  # 复用同一套原语
+                             _put_back, _set as _set_state, vision_preflight)
 from app.core.logger import get_logger
 from app.db.crud import list_points
 from app.db.database import SessionLocal
@@ -53,6 +54,15 @@ _job: Dict[str, object] = {"thread": None, "ctx": None, "state": None,
 DEFAULT_SPEED_PCT = 5
 SUCK_HOLD_MS = 500      # 吸牢再抬（与分拣同口径）
 BLOW_MS = 500           # 吹气时长
+# ★ 拍照自证（2026-10-10 用户口径："要两种模式，一个是拍照自证，一个是默认的"）：
+#   默认模式**不判色、不去 C 位**（符号本来就由格位决定，A1–A5=圆 / A6–A9=叉）；
+#   自证模式取件抬起后先去 C 检测位拍照，颜色必须等于"该格应有的颜色"。
+VERIFY_FRAMES = 3       # 送检拍几帧（与分拣判色同量级，再投票）
+VERIFY_DWELL_MS = 600   # 到 C 位后停顿再拍（等机械停稳，避免拖影判错）
+# ★ 装料约定：圆=红（A1–A5 装红件）/ 叉=蓝（A6–A9 装蓝件）。
+#   自证据此判断"取到的这件是不是该格应有的颜色"。
+#   ★ 现场装料若与约定不同，**只改这一处**（卡片上会显示该约定，便于当场核对）。
+SYMBOL_COLOR = {"O": "红", "X": "蓝"}
 
 
 def is_game_running() -> bool:
@@ -63,28 +73,35 @@ def is_game_running() -> bool:
 
 
 # ---------------------------------------------------------------- 点位
-def _needed_points() -> List[str]:
-    """井字棋需要的点位（= 分拣 38 点减去 C 检测位，共 37 个）。
+def _needed_points(verify: bool = False) -> List[str]:
+    """井字棋需要的点位（默认 = 分拣 38 点减去 C 检测位，共 37 个）。
 
-    ★ 不判色 → 不需要 C 检测位。缺哪个就报哪个，不给"跑了但做不了"的假象。
+    ★ 默认模式不判色 → 不需要 C 检测位；**拍照自证模式要送检 → 必须要有**。
+      缺哪个就报哪个，不给"跑了但做不了"的假象。
     """
     out: List[str] = []
     for s in S.A_SLOTS:
         out += [s, s + "上"]
     for s in S.B_SLOTS:
         out += [s, s + "上"]
+    if verify:
+        out.append(S.CAMERA_POINT)
     out.append(S.START_POINT)
     return out
 
 
 # ---------------------------------------------------------------- 状态
 def _new_state(dry: bool, difficulty: str, user_sym: str, robot_sym: str,
-               first: str, speed_pct: int) -> Dict:
+               first: str, speed_pct: int, verify_color: bool = False,
+               min_conf: float = 0.3) -> Dict:
     """一局全新的 state（每次「开始」都重建，绝不继承上一局残留）。"""
     return {
         "dry_run": bool(dry),
         "difficulty": difficulty,
         "speed_pct": int(speed_pct),      # ★ 本局速度（= 右上角全局速度）
+        # ★ 两种模式（用户 2026-10-10）：默认模式不判色；自证模式取件后拍照核对颜色
+        "verify_color": bool(verify_color),
+        "min_conf": float(min_conf),      # 自证判色门槛（跟随视觉服务配置）
         "board": TT.new_board(),          # 9 格，与 B1..B9 同序
         "user_sym": user_sym, "robot_sym": robot_sym,
         "first": first,                   # "user" | "robot"
@@ -108,7 +125,8 @@ def _snap(st: Dict) -> Dict:
 
 # ---------------------------------------------------------------- 搬运原语
 def _carry(ctx, pmap, st, dry, src_slot: str, dst_slot: str, who_cn: str,
-           via_start: bool = False) -> None:
+           via_start: bool = False, verify: bool = False, expect_color: str = "",
+           min_conf: float = 0.3) -> None:
     """把一件从 src_slot 搬到 dst_slot（= 分拣搬一件的**精简版**：无判色、无 C 检测）。
 
     取料：src上方 → src → 吸 → 等吸牢 → 抬起
@@ -131,6 +149,34 @@ def _carry(ctx, pmap, st, dry, src_slot: str, dst_slot: str, who_cn: str,
         ctx.sleep(SUCK_HOLD_MS / 1000.0)
     _set_state(st, holding=True)
     _move(ctx, pmap, src_slot + "上", speed, dry, "%s·抬起" % who_cn, st)
+    if verify and not dry:
+        # ★★ 拍照自证（用户 2026-10-10 口径 · 两种模式里的"自证"那一种）：
+        #    抬起后先去 C 检测位拍 3 帧 → 投票判色。
+        #    · 判不出色      → **原路放回取料格 + 停止**（与分拣同一条统一口径）
+        #    · 判出但不是该格应有的颜色 → 同样放回 + 停止，但文案点明"不符"
+        #      （两句话必须分清，否则现场会往错的方向查：一个查相机、一个查装料）
+        _move(ctx, pmap, S.CAMERA_POINT, speed, dry, "%s·送检" % who_cn, st)
+        _set_state(st, stage="拍照自证", target="")
+        if ctx.sleep(VERIFY_DWELL_MS / 1000.0):
+            raise _Stop("已被停止", "自证")
+        v = _capture(ctx, VERIFY_FRAMES, min_conf, "自证", st)
+        _set_state(st, color=v.get("color") or "", conf=float(v.get("conf") or 0.0),
+                   votes=v.get("votes") or {},
+                   frame_detail=v.get("frame_detail") or [],
+                   best_frame=v.get("best_frame"))
+        if not v.get("ok"):
+            _set_state(st, stage="自证失败·放回原位")
+            _put_back(ctx, pmap, src_slot, speed, dry, blow_ms=BLOW_MS,
+                      prefix="放回原位 %s" % src_slot, st=st)
+            raise _Stop("颜色无法识别（%s），已放回原位 %s"
+                        % (v.get("reason") or "无有效判定", src_slot), "自证")
+        if expect_color and v.get("color") != expect_color:
+            _set_state(st, stage="自证不符·放回原位")
+            _put_back(ctx, pmap, src_slot, speed, dry, blow_ms=BLOW_MS,
+                      prefix="放回原位 %s" % src_slot, st=st)
+            raise _Stop("自证不符：该格应为 %s，实拍 %s，已放回原位 %s"
+                        % (expect_color, v.get("color"), src_slot), "自证")
+        _set_state(st, stage="自证通过")
     if via_start:
         # ★ 经起点再过去：抬起后不直接横移到 dst 正上方，先回原点把"抬着件横扫"这段消掉
         _move(ctx, pmap, S.START_POINT, speed, dry, "%s·经起点" % who_cn, st)
@@ -156,7 +202,11 @@ def _play(ctx, pmap, st, dry, sym: str, cell: int) -> None:
     dst = TT.cell_to_slot(cell)
     who_cn = "你" if sym == st["user_sym"] else "机器人"
     # ★ A→B 下棋：经起点再落子（不许"正上方→正上方"直接平移，用户口径 2026-10-10）
-    _carry(ctx, pmap, st, dry, src, dst, who_cn, via_start=True)
+    # ★ 自证模式（`verify_color`）：取件抬起后先去 C 位拍照核对颜色；不符/判不出 → 放回原位并停
+    _carry(ctx, pmap, st, dry, src, dst, who_cn, via_start=True,
+           verify=bool(st.get("verify_color")),
+           expect_color=SYMBOL_COLOR.get(sym, ""),
+           min_conf=float(st.get("min_conf") or 0.3))
     # ★ 就地更新（保持 st 里的 list 引用稳定，供 /state 深拷贝读出）；
     #   真正的"落子"发生在搬运完成之后 —— 界面不会出现"还没搬就说已落子"。
     used.append(src)
@@ -298,6 +348,9 @@ class StartIn(BaseModel):
     # ★ 沿用右上角那份全局速度（与分拣同口径）：**右上角多少，机器人多少**。
     speed_pct: int = Field(default=DEFAULT_SPEED_PCT, ge=5, le=100,
                            description="沿用右上角那份全局速度")
+    # ★ 两种模式（用户 2026-10-10）：false = 默认（不判色，直接下）；true = 拍照自证
+    verify_color: bool = Field(default=False,
+                               description="拍照自证：取件后到 C 位拍照核对颜色")
 
 
 @router.post("/start")
@@ -314,6 +367,9 @@ def api_start(body: StartIn, tok: str = Depends(require_control)):
             raise HTTPException(409, detail="分拣正在运行，先「停止」分拣再开局")
     if not body.dry_run and not real_write_enabled():
         raise HTTPException(403, detail="真实下发未开启（EFORT_REAL_MOTION=1 且 motion.real_write=true）")
+    # ★ 自证只在"真的要判色"时才要求相机：空跑 / 双闸未开时物体到不了 C 区，
+    #   判色必然"检测不到" —— 拿相机当门槛只会挡住空跑验证（与分拣同一条口径）。
+    need_verify = bool(body.verify_color) and (not body.dry_run) and real_write_enabled()
 
     db = SessionLocal()
     try:
@@ -321,19 +377,25 @@ def api_start(body: StartIn, tok: str = Depends(require_control)):
         pmap = {p.name: p for p in rows}
     finally:
         db.close()
-    miss = [n for n in _needed_points() if n not in pmap]
+    # ★ 自证模式比默认模式**多要一个 C 检测位**（要送检拍照）
+    miss = [n for n in _needed_points(need_verify) if n not in pmap]
     if miss:
         raise HTTPException(400, detail={
             "message": "点位不齐，缺 %d 个：%s（先在「点位」页补齐示教）"
                        % (len(miss), "、".join(miss[:8])),
             "missing": miss})
+    min_conf = 0.3
+    if need_verify:
+        # ★ 相机没就绪 → **开局就拒**（不进入任何运动），不给"跑起来才发现判不了色"的假象
+        min_conf = vision_preflight(None)
 
     difficulty = TT.norm_difficulty(body.difficulty)
     first = random.choice(["user", "robot"])
     # 先手执圆：先手 = O，后手 = X
     user_sym, robot_sym = (TT.O, TT.X) if first == "user" else (TT.X, TT.O)
     st = _new_state(body.dry_run, difficulty, user_sym, robot_sym, first,
-                    int(body.speed_pct))
+                    int(body.speed_pct), verify_color=bool(body.verify_color),
+                    min_conf=min_conf)
     snap = _snap(st)
     q: "queue.Queue" = queue.Queue()
     ctx = new_run("井字棋", kind="tictactoe")
@@ -344,11 +406,12 @@ def api_start(body: StartIn, tok: str = Depends(require_control)):
         _job["thread"] = th
     th.start()
     emit_event("tictactoe", "info", "tictactoe.start",
-               "开始井字棋（%s，难度 %s，先手 %s，速度 %d%%）" % (
+               "开始井字棋（%s，难度 %s，%s，先手 %s，速度 %d%%）" % (
                    "空跑" if body.dry_run else "真实下发", TT.diff_cn(difficulty),
+                   "拍照自证" if body.verify_color else "默认模式",
                    "你" if first == "user" else "机器人", int(body.speed_pct)),
                {"difficulty": difficulty, "first": first, "dry_run": body.dry_run,
-                "speed_pct": int(body.speed_pct)},
+                "speed_pct": int(body.speed_pct), "verify_color": bool(body.verify_color)},
                actor="control")
     return {"ok": True, "run_id": ctx.run_id, "state": snap}
 

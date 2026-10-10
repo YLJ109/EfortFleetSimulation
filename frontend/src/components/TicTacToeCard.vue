@@ -29,6 +29,13 @@ const DIFFS = ["easy", "normal", "hard"].map((k) => ({ k, cn: diffCn(k) }));
 const running = computed(() => ttt.running);
 const paused = computed(() => ttt.paused);
 const locked = computed(() => running.value || paused.value);
+// ★ 本局模式文案：开局后以**后端 state** 为准（本地开关只用于"开工前"）。
+//   空跑不判色 —— 必须如实标出来，别让人以为"自证已经在跑"（本项目铁律：不知道就说不知道）。
+const modeText = computed(() => {
+  const on = ttt.st ? !!ttt.st.verify_color : !!ttt.verifyColor;
+  if (!on) return "默认（不判色）";
+  return ttt.dryRun ? "拍照自证（空跑不判色）" : "拍照自证";
+});
 const canCtrl = computed(() => auth.controlActive && !ttt.busy);
 
 const st = computed(() => ttt.st || {});
@@ -124,6 +131,23 @@ onBeforeUnmount(() => {
       </span>
     </div>
 
+    <!-- ★ 两种模式（2026-10-10 用户口径）：默认 / 拍照自证 —— 开局后锁定 -->
+    <div class="ttt-row">
+      <span class="k">模式</span>
+      <span class="seg">
+        <button :class="{ on: !ttt.verifyColor }" :disabled="locked"
+                title="不判色、不去 C 位：取料后直接去 B 落子（节拍快）"
+                @click="ttt.verifyColor = false">默认</button>
+        <button :class="{ on: ttt.verifyColor }" :disabled="locked"
+                title="取件后先去 C 检测位拍照核对颜色：判不出 / 不是该格应有的颜色 → 放回原位并停止"
+                @click="ttt.verifyColor = true">拍照自证</button>
+      </span>
+    </div>
+    <div v-if="ttt.verifyColor" class="ttt-hint">
+      自证约定：<b>圆 = 红</b>（A1–A5）· <b>叉 = 蓝</b>（A6–A9）；
+      需 C 检测位已示教、相机三色识别已开启。判不出 / 不符 → <b>放回原位并停止</b>（空跑不判色）。
+    </div>
+
     <!-- 空跑 / 真实下发：默认空跑 -->
     <label class="dry-toggle">
       <input type="checkbox" :checked="ttt.dryRun" :disabled="locked" @change="onDryChange" />
@@ -165,6 +189,9 @@ onBeforeUnmount(() => {
     <div class="ttt-row"><span class="k">速度</span>
       <span class="v">{{ ttt.speedPct ? ttt.speedPct + "%" : "—" }}
         <span class="muted">（跟顶栏）</span></span>
+    </div>
+    <div class="ttt-row"><span class="k">模式</span>
+      <span class="v">{{ modeText }}</span>
     </div>
     <div class="ttt-row"><span class="k">阶段</span><span class="v">{{ stageText }}</span></div>
     <div class="ttt-row"><span class="k">进度</span>
@@ -212,6 +239,9 @@ onBeforeUnmount(() => {
 .ttt-row .v { color: var(--txt); }
 .ttt-row .v.win { color: var(--accent); font-weight: 600; }
 .ttt-row .muted { color: var(--muted); font-size: 11px; }
+/* ★ 模式说明（自证约定）—— 只在选中"拍照自证"时出现，别常驻占位 */
+.ttt-hint { font-size: 11px; line-height: 1.5; color: var(--muted); margin: 4px 0 6px; }
+.ttt-hint b { color: var(--accent); }
 /* ★ 手柄提示行：未连接=灰、已连接=青（现场一眼看出手柄到底认到没有） */
 .pad-row { display: flex; align-items: flex-start; gap: 5px; margin-top: 6px;
   font-size: 11px; color: var(--muted); line-height: 1.45; }

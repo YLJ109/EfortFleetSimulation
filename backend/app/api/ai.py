@@ -73,6 +73,65 @@ def batch_max() -> int:
     return max(1, min(9, _env_int("EFORT_AI_BATCH_MAX", 3)))
 
 
+def _ban_of(plan: Dict) -> Dict:
+    """取计划里的**逐格约束**（2026-10-10 用户口径："某格不能拿 / 某格不能放"）。
+
+    缺省 = 没有任何约束（返回空表）→ 分拣/井字棋/普通搬运行为完全不变。
+    """
+    b = plan.get("ban") or {}
+    up = lambda xs: [str(x).strip().upper() for x in (xs or [])]  # noqa: E731
+    return {"from": up(b.get("from")), "to": up(b.get("to"))}
+
+
+# ---------------------------------------------------------------- 盘点记录（只读查询的数据源）
+# ★ 2026-10-10 用户口径："A区有几个盒子、什么颜色、有效的几个、几个红、几个蓝、几个无效颜色"。
+#   ★ 硬事实：**相机只对着 C 检测位，照不到 A 区** —— 系统没有"A 区有几个盒子"的直接观测。
+#     所以这里只存"**真盘过**"的结果：查询一律标注来源与时间；没盘过就老实说不知道。
+_inv: Dict[str, object] = {"at": 0.0, "A": {}}
+
+
+def _inv_summary(res: Dict[str, str]) -> Dict:
+    """统计 {槽位: 颜色} → 总数 / 各色件数 / 无效（判不出）件数。"""
+    counts = {"红": 0, "绿": 0, "蓝": 0}
+    unknown = 0
+    for c in (res or {}).values():
+        if c in counts:
+            counts[c] += 1
+        else:
+            unknown += 1
+    return {"total": len(res or {}), "counts": counts, "unknown": unknown}
+
+
+def inv_answer(text: str) -> Optional[str]:
+    """按**已盘点的记录**回答；没记录返回 None（调用方给"请先盘点"的引导）。
+
+    ★ 绝不编数量：A 区颜色只能靠逐件拍照得到，没有记录就只能说不知道。
+    """
+    at = float(_inv.get("at") or 0)
+    res = _inv.get("A") or {}
+    if not at or not res:
+        return None
+    s = _inv_summary(res)
+    age = int(max(0, time.time() - at))
+    head = "据 %d 秒前的盘点记录" % age
+    t = text or ""
+    ask_n = ("几" in t or "多少" in t)
+    if "红" in t and ask_n:
+        return "%s：A 区红色 %d 件。" % (head, s["counts"]["红"])
+    if "蓝" in t and ask_n:
+        return "%s：A 区蓝色 %d 件。" % (head, s["counts"]["蓝"])
+    if "绿" in t and ask_n:
+        return "%s：A 区绿色 %d 件。" % (head, s["counts"]["绿"])
+    if "无效" in t or "判不出" in t or "未知" in t:
+        return "%s：A 区无效（判不出色）%d 件。" % (head, s["unknown"])
+    if "哪些颜色" in t or "什么颜色" in t or "有什么颜色" in t:
+        got = [k for k in ("红", "绿", "蓝") if s["counts"][k]]
+        return "%s：A 区有 %s。" % (head, "、".join(got) if got else "（没判出任何有效颜色）")
+    return ("%s：A 区共 **%d 件** —— 红 %d、绿 %d、蓝 %d，无效（判不出）%d。"
+            % (head, s["total"], s["counts"]["红"], s["counts"]["绿"],
+               s["counts"]["蓝"], s["unknown"]))
+
+
 def _occupied(slots: List[str]) -> List[str]:
     """A 区"认为有料"的格：没记录过的一律当作有料（现场默认就是满的）→ 保序返回。"""
     return [s for s in slots if _occ["A"].get(s, True)]
@@ -176,6 +235,15 @@ def _echo(intent: str, plan: Dict) -> Dict:
               "pause": "暂停", "resume": "继续"}.get(plan.get("op"), plan.get("op"))
         return {"title": "分拣流程", "detail": zh,
                 "note": "「停止」= 当前动作结束后停并回起点；急停请明说「急停」"}
+    if a == "inventory":
+        return {"title": "盘点 A 区",
+                "detail": "逐件 取料 → 送 C 位判色 → **原格放回**（不搬运、不改变 A 区）",
+                "note": "属运动：每件走一趟；跑完会说清「共几件 / 红多少 / 蓝多少 / 无效多少」"}
+    if a == "goto_start":
+        # ★ 2026-10-10 用户口径：「让它回到起点」—— 这是个**真实运动**，必须出计划卡 + 确认
+        return {"title": "回开始/结束点",
+                "detail": "机器人运动到「开始/结束点」（即回起点）",
+                "note": "这是运动（会真的走）；「停止」也能让它在结束动作后回起点"}
     if a == "look_color":
         return {"title": "看颜色",
                 "detail": "取 %s 的件送到 C 区判色，判完放回原格" % _loc_zh(plan.get("from"), "from"),
@@ -302,6 +370,15 @@ def api_chat(body: ChatIn, tok: str = Depends(require_control)):
         raise HTTPException(status_code=422, detail="先说点什么")
     parsed = _parse_to_plan(text)
     if parsed.get("ok"):
+        # ★ 状态查询（2026-10-10）：**只读**，有记录就直接答，
+        #   绝不弹计划卡让人点"执行"（那会让人以为要动机器人）。
+        if parsed.get("intent") == "query_state":
+            ans = inv_answer(text)
+            if ans:
+                return {"ok": True, "mode": "chat", "reply": ans, "source": "inv"}
+            return {"ok": True, "mode": "chat", "source": "inv",
+                    "reply": "A 区的颜色我**没有实测过** —— 相机只对着 C 检测位，照不到 A 区。"
+                             "要说准就先说「盘点A区」：逐件拍照判色后**放回原处**（属运动，需要确认）。"}
         return {"ok": True, "mode": "plan", "parsed": parsed,
                 "source": parsed.get("source") or "rule"}
     # 不是指令 → 闲聊/问答（history 只留 user/assistant 文本，最多 10 条）
@@ -656,8 +733,43 @@ def _run(ctx, plan: Dict, pmap: Dict[str, object], st: Dict, dry: bool,
     phase = "done"
     blow_on = False
     start = S.START_POINT
+    # ★★ 逐格约束（2026-10-10 用户口径："某格不能拿 / 某格不能放"）—— 说到做到：
+    #   ① 单件：源/目标命中禁格 → **直接拒绝**（不静默改成别的格）；
+    #   ② 批量/配额：取件候选里**剔除禁取格**；
+    #   ③ 禁放：列内**自动落位会跳过**被禁的格（用户口径还含"这格已经有物体了"——
+    #      那一半由占位表覆盖）；跳满时原因会写明"被禁用格占掉了"。
+    ban = _ban_of(plan)
+    if act == "move_one":
+        if (plan.get("from") or {}).get("slot") in ban["from"]:
+            raise _Stop("你指定了 %s 不能拿" % plan["from"]["slot"], "约束")
+        if (plan.get("to") or {}).get("slot") in ban["to"]:
+            raise _Stop("你指定了 %s 不能放" % plan["to"]["slot"], "约束")
     try:
-        if act == "look_color":
+        if act == "inventory":
+            # ★★ 盘点（2026-10-10 用户口径）：逐件 取料 → 送 C 位判色 → **原格放回**
+            #    （复用 look_only 的那条路：取真件、判真色、放回原格，**不搬走、不改变 A 区**）。
+            #    跑完把结果写进 `_inv`，供"几个红/几个蓝/几个无效"这类只读查询回答。
+            slots = [s for s in _occupied(["A%d" % i for i in range(1, 10)])
+                     if s not in ban["from"]]
+            res: Dict[str, str] = {}
+            _set_state(st, total=len(slots), stage="盘点")
+            for i, s in enumerate(slots, start=1):
+                if ctx.cancelled():
+                    stop_reason, phase = "已被停止", "cancelled"
+                    break
+                _set_state(st, piece=i, stage="盘点 %s" % s, color="", conf=0.0)
+                _piece(ctx, pmap, st, dry, s, None, True, speed, min_conf)
+                res[s] = str(st.get("color") or "")
+            _inv.update({"at": time.time(), "A": res})
+            _set_state(st, stage="盘点完成", inventory=res,
+                       inv_summary=_inv_summary(res), piece=None)
+        elif act == "goto_start":
+            # ★ 2026-10-10 用户口径：AI 要能"回起点"。
+            #   此前**没有这个动作** → 用户说「回到起点」时落进闲聊 → 大模型只能编
+            #   "已回到起点位置"（它没有执行权，纯属谎报）。现在是一条真运动。
+            _set_state(st, stage="回开始/结束点")
+            _move(ctx, pmap, start, speed, dry, "回开始/结束点", st)
+        elif act == "look_color":
             _piece(ctx, pmap, st, dry, plan["from"]["slot"], None, True,
                    speed, min_conf)
         elif act == "move_one":
@@ -670,6 +782,7 @@ def _run(ctx, plan: Dict, pmap: Dict[str, object], st: Dict, dry: bool,
             if plan.get("shuffle"):
                 random.shuffle(srcs)
             srcs = srcs[:batch_max()]
+            srcs = [s for s in srcs if s not in ban["from"]]      # ★ 禁取格剔除（2026-10-10）
             color_col = plan["to"].get("kind") == "color_col"
             _set_state(st, total=len(srcs))
             for i, s in enumerate(srcs, start=1):
@@ -680,7 +793,8 @@ def _run(ctx, plan: Dict, pmap: Dict[str, object], st: Dict, dry: bool,
                 # 目标：颜色列 → 每件判色后选该列空位；固定格 → 就是那一格（已在 exec 校验过）
                 dst = None if color_col else plan["to"].get("slot")
                 _piece(ctx, pmap, st, dry, s, dst, False, speed, min_conf,
-                       prefer_color=plan["to"].get("color") if color_col else None)
+                       prefer_color=plan["to"].get("color") if color_col else None,
+                       skip_to=ban["to"])      # ★ 自动落位跳过禁放格（2026-10-10）
             _set_state(st, piece=None)
         elif act == "move_quota":
             # ★★ 2026-10-09 新增（用户口径："全部要学会解析，如果没有检测到放回原位"）：
@@ -708,7 +822,8 @@ def _run(ctx, plan: Dict, pmap: Dict[str, object], st: Dict, dry: bool,
                     break
                 _set_state(st, piece=done + 1, src=s)
                 before = dict(quotas)
-                _piece(ctx, pmap, st, dry, s, None, False, speed, min_conf, quotas=quotas)
+                _piece(ctx, pmap, st, dry, s, None, False, speed, min_conf,
+                       quotas=quotas, skip_to=ban["to"])   # ★ 跳过禁放格（2026-10-10）
                 if sum(quotas.values()) < sum(before.values()):
                     done += 1
             _set_state(st, piece=done)
@@ -757,7 +872,8 @@ def _run(ctx, plan: Dict, pmap: Dict[str, object], st: Dict, dry: bool,
 def _piece(ctx, pmap, st, dry, src: str, dst: Optional[str], look_only: bool,
            speed: int, min_conf: float,
            prefer_color: Optional[str] = None, zone: str = "B",
-           quotas: Optional[Dict[str, int]] = None) -> None:
+           quotas: Optional[Dict[str, int]] = None,
+           skip_to: Optional[List[str]] = None) -> None:
     """取一件 → 判色 → 放到目标（或放回原格 / 按颜色列选位 / **按配额决定放还是放回**）。
 
     ★ 与分拣引擎**同一套原语**（`_move/_air/_capture` 来自 api/sorting.py），
@@ -795,6 +911,10 @@ def _piece(ctx, pmap, st, dry, src: str, dst: Optional[str], look_only: bool,
     color = st.get("color") or ""
 
     # ---- 目标解析 ----
+    # ★ 禁放格（2026-10-10 用户口径："B5、B9 禁止摆放" / "B6 不能放"）：
+    #   列内**自动选槽**时一律跳过；用户口径里"禁止摆放"也含"这格已经有物体了"的意思 ——
+    #   那一半由 `_occ["B"]` 占位表覆盖（已放过的格本就不会再被选中）。
+    _skip = set(skip_to or ())
     if quotas is not None:
         # ★★ 按颜色配额（"3个红色，2个蓝色，1个绿色"）：
         #   判色结果说了算 —— 该颜色还缺就放走，不缺或**没判出颜色**就放回原位。
@@ -803,7 +923,8 @@ def _piece(ctx, pmap, st, dry, src: str, dst: Optional[str], look_only: bool,
         want = int(quotas.get(color) or 0) if color else 0
         if want > 0:
             quotas[color] = want - 1
-            cands = [s for s in NL.color_column_slots(color, zone) if not _occ["B"].get(s)]
+            cands = [s for s in NL.color_column_slots(color, zone)
+                     if not _occ["B"].get(s) and s not in _skip]
             if not cands:
                 quotas[color] = want          # 放不进去就把配额还回去（否则会凭空少一件）
                 raise _Stop("B 区「%s」列已满" % color, "选槽")
@@ -818,9 +939,11 @@ def _piece(ctx, pmap, st, dry, src: str, dst: Optional[str], look_only: bool,
         want = prefer_color or color
         if not want:
             raise _Stop("判色未得到颜色，无法选目标槽位", "选槽")
-        cands = [s for s in NL.color_column_slots(want, zone) if not _occ["B"].get(s)]
+        cands = [s for s in NL.color_column_slots(want, zone)
+                 if not _occ["B"].get(s) and s not in _skip]
         if not cands:
-            raise _Stop("B 区「%s」列已满" % want, "选槽")
+            raise _Stop("B 区「%s」列已满%s" % (
+                want, "（被禁用格占掉了 %s）" % "、".join(sorted(_skip)) if _skip else ""), "选槽")
         tgt_slot, mode = cands[0], "place"
     S_ok = tgt_slot in pmap
     if not S_ok:

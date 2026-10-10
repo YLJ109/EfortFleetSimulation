@@ -28,7 +28,8 @@ from app.core.logger import get_logger
 log = get_logger("llm")
 
 # 允许的动作白名单（与 nl_intent.INTENTS 一致）—— 大模型不许发明新动作
-ALLOWED_ACTIONS = ("look_color", "move_one", "move_all", "sorting", "estop")
+ALLOWED_ACTIONS = ("look_color", "move_one", "move_all", "sorting", "estop",
+                   "goto_start")
 # ★ 2026-10-09：**故意不含 `move_quota`**（按颜色配额搬运，如"3个红色2个蓝色"）。
 #   理由："要几个什么颜色"是**结构化配额**，规则解析（nl_intent）已能稳定识别；
 #   让大模型也去生成 quotas，等于给它多开一个"可能编数量"的口子 ——
@@ -192,7 +193,17 @@ CHAT_SYSTEM_PROMPT = """你是「工业机器人远程智控与数字孪生系�
 这台机器人支持的操作（用户说这些话会生成执行计划）：
 - 搬运：如「把A区第1行第1列放到B区红列」「把A区全部搬到B区」
 - 查询：如「A区第1行第1列是什么颜色」
+- 回位：如「回到起点」（运动到开始/结束点）
 - 流程：「开始分拣」「暂停」「继续」「停止执行」「急停」
+
+★ 铁律（违反会误导现场操作员，必须遵守）：
+- **你没有任何执行权**：你不能让机器人动、不能启停流程。凡是"做动作"的事，都得用户
+  说指令 → 出计划卡 → 说「执行」才发生。
+- **禁止**说「已执行 / 正在执行 / 已经回到 / 已停下 / 已启动 / 已完成」这类话 ——
+  你有没有做，操作员看画面就知道；编造等于谎报设备状态。
+- 用户要你做机器人动作时，把他**该说的指令原话**给他（例：「你可以说：回到起点」），
+  并说明"会先生成执行计划，说「执行」才动"。
+- 「停下」要说清是**软停**（当前动作跑完才停）；真急停必须明说「急停」。
 
 原则：
 - 用户想操作机器人但说得不清楚时，引导他直接说上面这些指令，**不要**替他编造指令。
@@ -257,6 +268,9 @@ def sanitize(plan: Dict) -> Dict:
         if not src or src["kind"] != "slot":
             return {"ok": False, "error": "大模型没给出有效的格号（看颜色要指定具体某一格）"}
         return {"ok": True, "plan": {"action": "look_color", "from": src}, "source": "llm"}
+    if action == "goto_start":
+        # ★ 回开始/结束点（2026-10-10）：无 from/to，直接就是一个运动动作
+        return {"ok": True, "plan": {"action": "goto_start"}, "source": "llm"}
     # move_one / move_all
     src = _loc(plan.get("from"), "A")
     dst = _loc(plan.get("to"), "B")

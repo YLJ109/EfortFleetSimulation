@@ -28,6 +28,33 @@ function ok(name, cond, extra = "") {
   else { fail++; console.log("  FAIL  " + name + (extra ? "   → " + extra : "")); }
 }
 
+console.log("== A0. 「回到起点」是真实动作（不是闲聊、更不许谎报） ==");
+{
+  const aiApi = read("../backend/app/api/ai.py");
+  const nl = read("../backend/app/services/nl_intent.py");
+  const llmSrc = read("../backend/app/services/llm.py");
+  const view = read("src/components/AiControlView.vue");
+  ok("规则层直接命中「回到起点」→ goto_start（规则优先，不绕大模型）",
+     /intent="goto_start"/.test(nl) && /"action": "goto_start"/.test(nl));
+  ok("后端 _run 真的会走到开始/结束点（不是一张空计划）",
+     /if act == "goto_start":/.test(aiApi)
+     && /_move\(ctx, pmap, start, speed, dry, "回开始\/结束点", st\)/.test(aiApi));
+  ok("动作白名单含 goto_start（表里没有的，大模型不许发明）",
+     /ALLOWED_ACTIONS = \([^)]*goto_start/.test(llmSrc));
+  ok("对话人格含「不许谎报动作」铁律（此前模型编造过'已回到起点'）",
+     /没有任何执行权/.test(llmSrc) && /禁止\*\*说/.test(llmSrc));
+  ok("快捷指令含「回到起点」", /回到起点/.test(view));
+  // ---- 2026-10-10：不只是执行 —— 文字描述过程 + 可视化代码过程 ----
+  const chatSrc = read("src/ai/aiChat.js");
+  ok("对话支持进度气泡带上下文（updateRun 收第 4 个参数 ctx）",
+     /function updateRun\(st, running, queued, ctx\)/.test(chatSrc));
+  ok("计划的**代码式步骤**与当前步高亮（planSteps / stepIndex 已导出）",
+     /export function planSteps/.test(chatSrc) && /export function stepIndex/.test(chatSrc));
+  ok("进度气泡显示「你问 / 我理解」+ 步骤条",
+     /你问：/.test(view) && /我理解：/.test(view) && /planSteps\(m\.ctx/.test(view));
+  ok("执行时把上下文挂到气泡（doExec 设 runCtx）", /runCtx\.value = \{/.test(view));
+}
+
 console.log("== A. 确认词判定（严进：整句匹配，不是包含） ==");
 {
   const yes = ["执行", "执行吧", "执行一下", "开始", "开始吧", "确认", "跑", "go",

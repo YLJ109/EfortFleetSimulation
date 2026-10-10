@@ -487,6 +487,25 @@ console.log("== M. 后端来源（Windows XInput 直读兜底） ==");
   ok("后端 _carry 不再写死速度（取 st[\"speed_pct\"]）",
     /int\(st\.get\("speed_pct"\) or DEFAULT_SPEED_PCT\)/.test(gpApiTtt)
     && !/\bSPEED_PCT, dry,/.test(gpApiTtt));
+
+  // ---- 统一口径：颜色无法识别 → 放回原位（2026-10-10 用户口径） ----
+  const sortApi = read("../backend/app/api/sorting.py");
+  ok("分拣判不出色 → _put_back 放回原格 + 停止（不再就地放掉）",
+    /_put_back\(ctx, pmap, a_slot/.test(sortApi) && /已放回原位 %s/.test(sortApi)
+    && /颜色无法识别（%s）/.test(sortApi));
+  ok("_put_back 工艺顺序（回原格上空→下落→停吸→放气→停放→抬起→回起点）",
+    /"%s·到原格上方"/.test(sortApi) && /"%s·下落"/.test(sortApi)
+    && /"%s·停止放气"/.test(sortApi) && /"%s·回起点"/.test(sortApi));
+  ok("游戏自证：判不出 / 不符 都放回原格并停（两种文案必须分开）",
+    /自证失败·放回原位/.test(gpApiTtt) && /自证不符：该格应为/.test(gpApiTtt)
+    && /已放回原位 %s/.test(gpApiTtt));
+  ok("游戏默认模式不判色（verify_color 默认 false、判色被 not dry 门控）",
+    /verify_color: bool = Field\(default=False/.test(gpApiTtt)
+    && /if verify and not dry:/.test(gpApiTtt));
+  ok("卡片有「模式」开关（默认 / 拍照自证）+ 自证约定说明",
+    /verifyColor/.test(tttCard) && /拍照自证/.test(tttCard) && /圆 = 红/.test(tttCard));
+  ok("store 开局透传 verify_color",
+    /verify_color: this\.verifyColor/.test(tttStore));
 }
 
 console.log("");

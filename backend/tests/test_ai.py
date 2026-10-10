@@ -18,6 +18,33 @@ from app.services import llm
 
 
 # ---------------------------------------------------------------- A. 白名单
+def test_inventory_answer_from_record(monkeypatch):
+    """★ 2026-10-10 用户口径："A区几个红/几个蓝/几个无效颜色" —— 只读回答。
+
+    铁律：**只答"记录过什么"**；没盘过就返回 None（调用方引导去「盘点」），绝不编数量。
+    """
+    from app.api import ai as ai_api
+
+    monkeypatch.setitem(ai_api._inv, "at", 0.0)      # 从没盘过
+    monkeypatch.setitem(ai_api._inv, "A", {})
+    assert ai_api.inv_answer("A区几个红") is None
+
+    ai_api._inv.update({"at": 1.0, "A": {"A1": "红", "A2": "红", "A3": "蓝", "A4": ""}})
+    s = ai_api._inv_summary(ai_api._inv["A"])
+    assert s == {"total": 4, "counts": {"红": 2, "绿": 0, "蓝": 1}, "unknown": 1}
+    assert "红色 2 件" in ai_api.inv_answer("A区几个红")
+    assert "蓝色 1 件" in ai_api.inv_answer("A区几个蓝")
+    assert "无效（判不出色）1 件" in ai_api.inv_answer("A区几个无效颜色")
+    assert "红、蓝" in ai_api.inv_answer("A区有哪些颜色")
+    assert "共 **4 件**" in ai_api.inv_answer("A区有几个盒子")
+
+
+def test_sanitize_accepts_goto_start():
+    """★ 2026-10-10：大模型也可以给出「回起点」这一动作（白名单内，无 from/to）。"""
+    r = llm.sanitize({"action": "goto_start"})
+    assert r["ok"] is True and r["plan"] == {"action": "goto_start"}, r
+
+
 def test_llm_sanitize_rejects_unknown_action():
     """编出来的动作必须被丢弃（不是"忽略字段继续执行"）。"""
     r = llm.sanitize({"action": "run_program", "code": "MJOINT(90)"})

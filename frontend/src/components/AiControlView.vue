@@ -32,7 +32,7 @@ import { useRobotStore } from "../stores/robot.js";
 import { useAuthStore } from "../stores/auth.js";
 import { useAiStore } from "../stores/ai.js";
 import { useAsrStore } from "../stores/asr.js";
-import { createAiChat, MSG } from "../ai/aiChat.js";
+import { createAiChat, MSG, planSteps, stepIndex } from "../ai/aiChat.js";
 import { classifyUtterance, CONFIRM_WORDS } from "../ai/confirmWords.js";
 import { isMuted, setMuted } from "../ai/speak.js";
 
@@ -52,12 +52,17 @@ const PRESET_GROUPS = [
     "B区全部矩形随机摆放回A区",
   ] },
   { k: "查询", items: ["A区第1行第1列是什么颜色"] },
-  { k: "流程", items: ["开始分拣", "暂停", "继续", "停止执行"] },
+  { k: "流程", items: ["开始分拣", "暂停", "继续", "回到起点", "停止执行"] },
   { k: "安全", items: ["急停"] },
 ];
 const CONFIRM_HINT = CONFIRM_WORDS.slice(0, 3).join(" / ");
 
 const msgs = computed(() => chat.messages.value);
+// ★ 本次执行上下文（你的问题 / 我的理解 / 计划）—— 供进度气泡做"代码过程"可视化
+const runCtx = ref(null);
+/** 进度气泡 → 代码式步骤 + 当前步（-1 = 还没进入任何一步） */
+const steps = (m) => planSteps(m.ctx && m.ctx.plan);
+const cur = (m) => stepIndex((m.st || {}).stage, steps(m));
 const atBottom = ref(true);
 const scroller = ref(null);
 
@@ -136,6 +141,11 @@ async function doSend(text) {
 }
 
 async function doExec() {
+  // ★ 2026-10-10 用户口径："不只是执行，要文字描述过程、回到我的问题和自己的理解"：
+  //   执行一开始就把「你的问题 + 我的理解 + 计划」挂到进度气泡上（可视化代码过程用）。
+  runCtx.value = { raw: (ai.text || "").trim(),
+                   plan: (ai.parsed && ai.parsed.plan) || null,
+                   echo: (ai.parsed && ai.parsed.echo) || null };
   const ok = await ai.exec(true);
   if (!ok) { chat.sayAI(`没能执行：${ai.err || "被拒绝"}`, { bad: true }); return; }
   chat.sayAI(ai.queued ? "已排队 —— 当前任务回起点后自动接着跑。" : "开始执行。");
@@ -184,7 +194,7 @@ function onInputKey(e) {
 
 // ---------------------------------------------------------------- 进度 → 气泡
 watch([() => ai.st, () => ai.running, () => ai.queued], () => {
-  const moved = chat.updateRun(ai.st || {}, ai.running, ai.queued);
+  const moved = chat.updateRun(ai.st || {}, ai.running, ai.queued, runCtx.value);
   if (moved) scrollBottom();
 }, { deep: false });
 
@@ -310,6 +320,28 @@ const stageLine = (m) => {
             </template>
 
             <template v-else-if="m.type === MSG.RUN">
+              <!-- ★ 2026-10-10 用户口径：不只是执行 —— 要**文字描述过程**（回到"你的问题/我的理解"）
+                   并且**可视化代码过程**（等宽步骤条，当前步高亮、已完成打勾）。 -->
+              <div v-if="m.ctx && m.ctx.raw"
+                   :style="{ fontSize: '11px', color: 'var(--muted)' }">你问：{{ m.ctx.raw }}</div>
+              <div v-if="m.ctx && m.ctx.echo && m.ctx.echo.detail"
+                   :style="{ fontSize: '13px', margin: '2px 0 4px' }">
+                我理解：{{ m.ctx.echo.detail }}
+              </div>
+              <div :style="{ fontFamily: 'Consolas, monospace', fontSize: '12px',
+                             lineHeight: '1.7', margin: '4px 0' }">
+                <div v-for="(s, i) in steps(m)" :key="i"
+                     :style="{ display: 'flex', gap: '6px',
+                               opacity: cur(m) > i ? '0.85' : (i === cur(m) ? '1' : '0.5'),
+                               color: i === cur(m) ? 'var(--accent)' : 'inherit',
+                               fontWeight: i === cur(m) ? '600' : '400' }">
+                  <span :style="{ width: '12px', textAlign: 'right', flex: 'none' }">{{ i + 1 }}</span>
+                  <span :style="{ width: '12px', flex: 'none' }">
+                    {{ cur(m) > i ? "✓" : (i === cur(m) ? "▶" : "·") }}
+                  </span>
+                  <span>{{ s }}</span>
+                </div>
+              </div>
               <div class="run">{{ m.running ? "▶ " : "" }}{{ stageLine(m) }}</div>
               <div v-if="m.queued" class="queued">
                 <Icon name="refresh" :size="12" /> 已排队：{{ m.queued.raw }}

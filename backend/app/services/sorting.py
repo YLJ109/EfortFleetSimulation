@@ -102,20 +102,31 @@ def new_placement(column_slots: Optional[Dict[str, Sequence[str]]] = None) -> Di
 
 
 def pick_target_slot(placement: Dict, color: str,
-                     column_slots: Optional[Dict[str, Sequence[str]]] = None
+                     column_slots: Optional[Dict[str, Sequence[str]]] = None,
+                     skip_slots: Optional[Sequence[str]] = None
                      ) -> Tuple[Optional[str], str]:
     """按颜色取该列的**下一个空行**。
 
+    ★ `skip_slots`（2026-10-10 用户口径"某格不能放"）：落位时**跳过被禁的格**。
+      默认 None → 与原来逐字一致（**分拣流程/井字棋完全不受影响**）。
+      跳过导致列内无位时，原因要能分清是"天然满了"还是"被禁放占掉了" ——
+      两者现场处理方式完全不同（一个加料盘、一个改约束）。
+
     返回 (槽位名 | None, 原因)。
-      槽位名非 None → 可放；None 时 reason ∈ {"未知颜色","列已满","颜色不支持"}
+      槽位名非 None → 可放；None 时 reason 说明为什么放不下
     """
     cmap = column_slots or DEFAULT_COLUMN_SLOTS
     if color not in cmap:
         return None, "未知颜色"
     slots = list(cmap[color])
     used = placement.get(color) or []
-    free = [s for s in slots if s not in used]
+    skip = set(skip_slots or ())
+    free = [s for s in slots if s not in used and s not in skip]
     if not free:
+        banned = [s for s in slots if s not in used and s in skip]
+        if banned:
+            return None, "列内可用格已用尽（禁放了 %d 个：%s）" % (
+                len(banned), "、".join(banned))
         return None, "列已满"
     return free[0], ""
 
@@ -322,13 +333,14 @@ def vote_color(frames: Sequence[Dict], min_conf: float = 0.3,
 
 # ---------------------------------------------------------------- 流程编排（纯函数）
 def build_piece_plan(placement: Dict, color: str,
-                     column_slots: Optional[Dict[str, Sequence[str]]] = None
+                     column_slots: Optional[Dict[str, Sequence[str]]] = None,
+                     skip_slots: Optional[Sequence[str]] = None
                      ) -> Dict:
     """判色之后 → 这一件的落料计划（纯计算，不执行）。
 
     返回 {"ok", "slot", "reason"}；ok=False 时 reason 即"停止原因"。
     """
-    slot, why = pick_target_slot(placement, color, column_slots)
+    slot, why = pick_target_slot(placement, color, column_slots, skip_slots)
     if slot is None:
         return {"ok": False, "slot": None, "reason": why,
                 "detail": ("%s 列已放满 %d 件" % (color, COLUMN_CAPACITY)) if why == "列已满" else why}

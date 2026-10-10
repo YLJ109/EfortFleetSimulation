@@ -48,6 +48,9 @@ export const useTicTacToeStore = defineStore("tictactoe", {
     // 界面本地两档（开始前可改；开局后卡片锁定）
     difficulty: "normal",
     dryRun: true,         // ★ 默认空跑（与全项目"默认空跑"安全口径一致）
+    // ★ 两种模式（2026-10-10 用户口径）：false = 默认（不判色、不去 C 位）；
+    //   true = 拍照自证（取件后到 C 位拍照核对颜色，不符/判不出 → 放回原位并停）
+    verifyColor: false,
     // 复盘（仅 2D 回放，不动机器人）
     replay: null,
     replayIdx: 0,
@@ -176,7 +179,8 @@ export const useTicTacToeStore = defineStore("tictactoe", {
           method: "POST", headers: { "Content-Type": "application/json" },
           // ★ 速度沿用**右上角那份全局速度**（用户口径："右上角多少，机器人速度多少"）
           body: JSON.stringify({ difficulty: this.difficulty, dry_run: this.dryRun,
-                                 speed_pct: useExecStore().speed }),
+                                 speed_pct: useExecStore().speed,
+                                 verify_color: this.verifyColor }),
         });
         if (r.status === 401 || r.status === 403) { this._needAuth(); return false; }
         const d = await r.json().catch(() => ({}));

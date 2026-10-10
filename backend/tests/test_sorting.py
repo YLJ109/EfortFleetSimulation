@@ -272,6 +272,43 @@ def test_api_points_endpoint(client):
     assert r.status_code in (401, 403), r.text
 
 
+def test_put_back_sequence(monkeypatch):
+    """★ 2026-10-10 用户口径：判不出色 → **原路放回取料格**（不是就地松手）。
+
+    钉住工艺顺序（顺序即工艺，不许调换）：
+        A{n}上 → A{n}下落 → 停止吸 → 放气 → 等 → 停止放气 → A{n}上抬起 → 回起点
+    为什么必须回原格上空再放：就地松件会掉在 C 区/半路，位置随机 ——
+    现场要满地找件，下一件取料还可能撞上它。
+    """
+    from app.api import sorting as SA
+
+    seq = []
+    monkeypatch.setattr(SA, "_move",
+                        lambda ctx, pmap, name, sp, dry, stage, st=None: seq.append(("move", name)))
+    monkeypatch.setattr(SA, "_air",
+                        lambda ctx, act, dry, stage, st=None: seq.append(("air", act)))
+    monkeypatch.setattr(SA, "_set", lambda st=None, **kw: None)
+
+    class _Ctx:
+        def sleep(self, s): return False
+
+    SA._put_back(_Ctx(), {}, "A3", 40, False, blow_ms=0, prefix="放回原位 A3")
+    assert [v for k, v in seq if k == "move"] == ["A3上", "A3", "A3上", SA.S.START_POINT]
+    assert [v for k, v in seq if k == "air"] == ["release", "blow", "unblow"]
+
+
+def test_pick_target_slot_skips_banned():
+    """★ 2026-10-10 用户口径："某格不能放" → 落位要**真的跳过**它。
+
+    跳满时原因必须能分清是"禁放占掉了"还是"天然满了"（现场处理方式完全不同）。
+    """
+    pl = S.new_placement()
+    assert S.pick_target_slot(pl, "红", None, ["B1"])[0] == "B4"      # B1 被禁 → 顺延
+    assert S.pick_target_slot(pl, "红")[0] == "B1"                   # 不传 → 行为与原来一致
+    slot, why = S.pick_target_slot(pl, "红", None, ["B1", "B4", "B7"])
+    assert slot is None and "禁放" in why, why
+
+
 def test_api_start_requires_control(client):
     r = client.post("/api/sorting/start", json={"dry_run": True})
     assert r.status_code in (401, 403), r.text

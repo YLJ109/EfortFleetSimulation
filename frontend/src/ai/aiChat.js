@@ -34,6 +34,32 @@ export const MAX_MESSAGES = 30;
 let _seq = 0;
 const nextId = () => "m" + (++_seq);
 
+/** 计划 → **代码式步骤**（可视化"现在跑到哪一步"；2026-10-10 用户口径）。 */
+export function planSteps(plan) {
+  const a = (plan || {}).action;
+  if (a === "move_one") return ["取料", "判色", "放料", "回起点"];
+  if (a === "move_all") return ["循环：取料", "判色", "放料（不需要的放回原位）", "回起点"];
+  if (a === "move_quota") return ["循环：取料", "判色", "需要则放料／不需要放回原位", "回起点"];
+  if (a === "inventory") return ["循环：取料", "送 C 判色", "原格放回", "汇总统计"];
+  if (a === "goto_start") return ["移动到开始/结束点"];
+  if (a === "sorting") return ["分拣流程：" + ((plan && plan.op) || "")];
+  if (a === "estop") return ["立即急停"];
+  return [a || "执行"];
+}
+
+/** 当前 stage → 高亮第几步（关键字匹配；匹配不到就返回 -1）。 */
+export function stepIndex(stage, steps) {
+  const s = String(stage || "");
+  const n = (steps || []).length;
+  if (!n) return -1;
+  const hit = (kw) => kw.some((k) => s.includes(k));
+  if (hit(["取料", "抬起", "送检", "索料"])) return 0;
+  if (hit(["判色", "停顿", "自证", "思考"])) return Math.min(1, n - 1);
+  if (hit(["放料", "落子", "放回", "盘点", "落料"])) return Math.min(2, n - 1);
+  if (hit(["收尾", "回开始", "回起点", "完成", "结束"])) return n - 1;
+  return -1;
+}
+
 export function createAiChat() {
   /** @type {import('vue').Ref<Array<object>>} */
   const messages = ref([]);
@@ -68,7 +94,7 @@ export function createAiChat() {
    * @param {object|null} queued 排队中的接管计划
    * @returns {boolean} 是否真的更新了（供调用方决定要不要滚到底）
    */
-  function updateRun(st, running, queued) {
+  function updateRun(st, running, queued, ctx) {
     const key = [running ? 1 : 0, (st && st.stage) || "", (st && st.piece) || "",
                  (st && st.color) || "", (st && st.target) || "",
                  (st && st.error) || "", queued ? (queued.raw || "1") : ""].join("|");
@@ -85,9 +111,10 @@ export function createAiChat() {
       // 原地更新（换对象引用以触发更新）
       messages.value = messages.value.slice(0, -1)
         .concat([{ ...last, st: { ...(st || {}) }, running, queued: queued || null,
-                   at: Date.now() }]);
+                   ctx: ctx || last.ctx || null, at: Date.now() }]);
     } else {
-      push(MSG.RUN, "", { st: { ...(st || {}) }, running, queued: queued || null });
+      push(MSG.RUN, "", { st: { ...(st || {}) }, running, queued: queued || null,
+                          ctx: ctx || null });
     }
     return true;
   }

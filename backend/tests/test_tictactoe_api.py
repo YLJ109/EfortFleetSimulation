@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from app.api import tictactoe as ttt_api
 from app.db.crud import create_point, delete_point, list_points
 from app.db.database import SessionLocal
@@ -215,6 +217,95 @@ def test_session_reports_speed(monkeypatch):
 
 
 # ---------------------------------------------------------------- 搬运行程
+# ---------------------------------------------------------------- 放回原位（统一口径）
+class _Ctx:
+    """最小 ctx：不暂停、可取消、sleep 立即返回。"""
+    def wait_pause(self): return False
+    def cancelled(self): return False
+    def sleep(self, s): return False
+
+
+def _patch_carry(monkeypatch, cap):
+    """把 _carry 的运动/吸放/放回全部换成记录器（不动机器人）。"""
+    calls = {"move": [], "air": [], "put": []}
+    monkeypatch.setattr(ttt_api, "_move",
+                        lambda ctx, pmap, name, sp, dry, stage, st=None: calls["move"].append(name))
+    monkeypatch.setattr(ttt_api, "_air",
+                        lambda ctx, act, dry, stage, st=None: calls["air"].append(act))
+    monkeypatch.setattr(ttt_api, "_capture", lambda ctx, n, mc, stage, st=None: cap)
+    monkeypatch.setattr(ttt_api, "_put_back",
+                        lambda ctx, pmap, src, sp, dry, **kw: calls["put"].append(src))
+    monkeypatch.setattr(ttt_api, "SUCK_HOLD_MS", 0)
+    monkeypatch.setattr(ttt_api, "VERIFY_DWELL_MS", 0)
+    monkeypatch.setattr(ttt_api, "BLOW_MS", 0)
+    return calls
+
+
+def _st(verify=True):
+    return {"holding": False, "speed_pct": 40, "min_conf": 0.3, "verify_color": verify}
+
+
+def test_carry_verify_unrecognized_puts_back_then_stops(monkeypatch):
+    """★ 2026-10-10 用户口径：自证**判不出色 → 原路放回取料格 + 停止**（不跳过、不继续）。"""
+    calls = _patch_carry(monkeypatch,
+                         {"ok": False, "reason": "无有效判定（无画面）",
+                          "color": "", "conf": 0.0, "votes": {}})
+    with pytest.raises(ttt_api._Stop) as ei:
+        ttt_api._carry(_Ctx(), {}, _st(), False, "A1", "B5", "你", via_start=True,
+                       verify=True, expect_color="红", min_conf=0.3)
+    assert "已放回原位 A1" in ei.value.reason, ei.value.reason
+    assert calls["put"] == ["A1"]                     # 确实走了"放回原格"
+    assert ttt_api.S.CAMERA_POINT in calls["move"]    # 确实送检过（去了 C 检测位）
+    assert "B5上" not in calls["move"]                # ★ 关键：没有去落子
+
+
+def test_carry_verify_mismatch_puts_back_then_stops(monkeypatch):
+    """★ 判出色但**不是该格应有的颜色** → 同样放回 + 停，但文案必须点明"不符"。
+
+    两句话必须分清：一个说"判不出"（查相机），一个说"不符"（查装料）。
+    """
+    calls = _patch_carry(monkeypatch,
+                         {"ok": True, "reason": "", "color": "蓝", "conf": 0.9, "votes": {}})
+    with pytest.raises(ttt_api._Stop) as ei:
+        ttt_api._carry(_Ctx(), {}, _st(), False, "A1", "B5", "你", via_start=True,
+                       verify=True, expect_color="红", min_conf=0.3)
+    assert "自证不符" in ei.value.reason and "红" in ei.value.reason, ei.value.reason
+    assert calls["put"] == ["A1"]
+    assert "B5上" not in calls["move"]
+
+
+def test_carry_verify_ok_places_normally(monkeypatch):
+    """自证通过 → 照常经起点去 B 落子，绝不放回。"""
+    calls = _patch_carry(monkeypatch,
+                        {"ok": True, "reason": "", "color": "红", "conf": 0.9, "votes": {}})
+    ttt_api._carry(_Ctx(), {}, _st(), False, "A1", "B5", "你", via_start=True,
+                   verify=True, expect_color="红", min_conf=0.3)
+    assert calls["put"] == []
+    assert "B5上" in calls["move"] and ttt_api.S.START_POINT in calls["move"]
+
+
+def test_carry_default_mode_never_judges(monkeypatch):
+    """★ 默认模式（verify=False）**绝不调相机、绝不去 C 位** —— 与现状一致，节拍不变。"""
+    calls = _patch_carry(monkeypatch, {"ok": True, "color": "红", "conf": 1.0, "votes": {}})
+    ttt_api._carry(_Ctx(), {}, _st(verify=False), False, "A1", "B5", "你", via_start=True,
+                   verify=False, expect_color="", min_conf=0.3)
+    assert calls["put"] == []
+    assert ttt_api.S.CAMERA_POINT not in calls["move"]
+
+
+def test_verify_mode_needs_camera_point():
+    """★ 自证模式比默认模式**多要 C 检测位**：点位体检必须把它算进去。"""
+    assert ttt_api.S.CAMERA_POINT not in ttt_api._needed_points(False)
+    assert ttt_api.S.CAMERA_POINT in ttt_api._needed_points(True)
+
+
+def test_start_defaults_to_default_mode():
+    """两种模式的默认值：**默认模式**（不判色）—— 不显式要求就不拍照。"""
+    assert ttt_api.StartIn().verify_color is False
+    st = ttt_api._new_state(True, "normal", TT.O, TT.X, "user", 40)
+    assert st["verify_color"] is False
+
+
 def test_carry_sends_play_via_start(monkeypatch):
     """★ 用户口径（2026-10-10）：A→B 下棋**不许「正上方 → 正上方」直接平移** ——
     抬起后必须先回 **开始/结束点（起点）** 再去 B 正上方落子；复位（B→A）保持原路。
