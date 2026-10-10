@@ -135,6 +135,27 @@ def _role_from_password(password: str) -> Optional[str]:
     return None
 
 
+# ★★ 2026-10-10 安全加固（静态评审 A4）：令牌表**原来无上限**（只在登出/过期时移除）。
+#   正常使用不会涨；但若口令泄露、或脚本反复登录，内存与"有效令牌条数"都会无限增长。
+#   这里给一个远高于真实并发需求的上限：**先清过期，再逐最旧**（保留刚签发的那个）。
+_MAX_TOKENS = 64
+
+
+def _prune_tokens(keep: Optional[str] = None) -> None:
+    now = time.time()
+    for t, rec in list(_TOKENS.items()):
+        if t != keep and rec.get("exp") is not None and rec["exp"] < now:
+            _TOKENS.pop(t, None)
+    if len(_TOKENS) <= _MAX_TOKENS:
+        return
+    # 仍超限 → 逐最旧（dict 插入有序：越靠前 = 越早签发）
+    for t in list(_TOKENS.keys()):
+        if len(_TOKENS) <= _MAX_TOKENS:
+            break
+        if t != keep:
+            _TOKENS.pop(t, None)
+
+
 def issue_token(role: str = ROLE_ADMIN) -> dict:
     tok = secrets.token_hex(24)
     ttl = get_ttl()
@@ -142,6 +163,7 @@ def issue_token(role: str = ROLE_ADMIN) -> dict:
     #   也可随时 POST /api/auth/logout 主动释放。
     exp = (time.time() + ttl) if ttl > 0 else None
     _TOKENS[tok] = {"exp": exp, "role": role}
+    _prune_tokens(keep=tok)
     return {"token": tok, "expires_at": exp, "ttl": ttl, "role": role}
 
 

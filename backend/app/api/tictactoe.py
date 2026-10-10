@@ -52,7 +52,7 @@ _job: Dict[str, object] = {"thread": None, "ctx": None, "state": None,
 #   "右上角多少，机器人速度多少"）。前端把 `exec.speed` 经 `speed_pct` 传进来；
 #   下面这个只是**客户端没带时**的兜底默认（5% 安全档）。
 DEFAULT_SPEED_PCT = 5
-SUCK_HOLD_MS = 500      # 吸牢再抬（与分拣同口径）
+SUCK_HOLD_MS = 500      # 吸牢再抬（与分拣同口径，2026-10-10 起 0.5 秒）
 BLOW_MS = 500           # 吹气时长
 # ★ 拍照自证（2026-10-10 用户口径："要两种模式，一个是拍照自证，一个是默认的"）：
 #   默认模式**不判色、不去 C 位**（符号本来就由格位决定，A1–A5=圆 / A6–A9=叉）；
@@ -300,17 +300,21 @@ def _run(ctx, q: "queue.Queue", st: Dict, dry: bool, pmap: Dict[str, object]) ->
         log.exception("井字棋异常")
         stop_reason, phase = "内部异常：%s" % str(e)[:150], "error"
     finally:
-        # ★ 收尾：气路绝不留在开着（电平保持型，最容易出的现场事故）
-        if not dry and st.get("holding"):
-            _release_air(ctx, dry, st)
-        _set_state(st, stage="结束", error=stop_reason, finished=True,
-                   ok=(phase == "done"), phase=phase, turn="none", holding=False)
+        # ★★ 2026-10-10：**注销运行登记最先做且不可跳过**（与 ai.py 同名死机修复同因）
         ctx.finish(phase)
-        emit_event("tictactoe", "info" if phase == "done" else "warn", "tictactoe.stop",
-                   ("井字棋完成：%s" % st.get("result") or "已结束") if phase == "done"
-                   else ("井字棋结束：%s" % stop_reason),
-                   {"phase": phase, "result": st.get("result"), "dry_run": dry,
-                    "moves": len(st.get("moves") or [])}, actor="control")
+        try:
+            # ★ 收尾：气路绝不留在开着（电平保持型，最容易出的现场事故）
+            if not dry and st.get("holding"):
+                _release_air(ctx, dry, st)
+            _set_state(st, stage="结束", error=stop_reason, finished=True,
+                       ok=(phase == "done"), phase=phase, turn="none", holding=False)
+            emit_event("tictactoe", "info" if phase == "done" else "warn", "tictactoe.stop",
+                       ("井字棋完成：%s" % st.get("result") or "已结束") if phase == "done"
+                       else ("井字棋结束：%s" % stop_reason),
+                       {"phase": phase, "result": st.get("result"), "dry_run": dry,
+                        "moves": len(st.get("moves") or [])}, actor="control")
+        except Exception:  # noqa: BLE001
+            log.exception("井字棋收尾异常（运行登记已注销，不影响后续指令）")
 
 
 # ---------------------------------------------------------------- 复位线程
@@ -336,13 +340,17 @@ def _reset_run(ctx, st: Dict, pmap: Dict[str, object]) -> None:
         log.exception("井字棋复位异常")
         stop_reason, phase = "内部异常：%s" % str(e)[:150], "error"
     finally:
-        _set_state(st, stage="复位结束", error=stop_reason, finished=True,
-                   ok=(phase == "done"), phase=phase, turn="none")
+        # ★★ 2026-10-10：**注销运行登记最先做且不可跳过**（与 ai.py 同名死机修复同因）
         ctx.finish(phase)
-        emit_event("tictactoe", "info" if phase == "done" else "warn", "tictactoe.reset",
-                   "井字棋复位%s%s" % ("完成" if phase == "done" else "结束",
-                                     "" if phase == "done" else "：" + stop_reason),
-                   {"phase": phase}, actor="control")
+        try:
+            _set_state(st, stage="复位结束", error=stop_reason, finished=True,
+                       ok=(phase == "done"), phase=phase, turn="none")
+            emit_event("tictactoe", "info" if phase == "done" else "warn", "tictactoe.reset",
+                       "井字棋复位%s%s" % ("完成" if phase == "done" else "结束",
+                                         "" if phase == "done" else "：" + stop_reason),
+                       {"phase": phase}, actor="control")
+        except Exception:  # noqa: BLE001
+            log.exception("井字棋复位收尾异常（运行登记已注销，不影响后续指令）")
 
 
 # ---------------------------------------------------------------- 接口
@@ -413,6 +421,7 @@ def api_start(body: StartIn, tok: str = Depends(require_control)):
                               name="tictactoe", daemon=True)
         _job["thread"] = th
     th.start()
+    ctx.set_thread(th)      # ★ 绑定执行线程：让"卡死登记"能被 is_alive() 精确识别
     emit_event("tictactoe", "info", "tictactoe.start",
                "开始井字棋（%s，难度 %s，%s，先手 %s，速度 %d%%）" % (
                    "空跑" if body.dry_run else "真实下发", TT.diff_cn(difficulty),
@@ -518,6 +527,7 @@ def api_reset(body: Optional[ResetIn] = None, tok: str = Depends(require_control
                                name="tictactoe-reset", daemon=True)
         _job["thread"] = th2
     th2.start()
+    ctx.set_thread(th2)     # ★ 绑定执行线程：让"卡死登记"能被 is_alive() 精确识别
     emit_event("tictactoe", "info", "tictactoe.reset_start",
                "井字棋复位：把 %d 颗棋子搬回 A 区" % len(st.get("moves") or []),
                {}, actor="control")

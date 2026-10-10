@@ -290,6 +290,27 @@ export const useExecStore = defineStore("exec", {
       }
     },
 
+    /**
+     * ★★ 2026-10-10：**强制复位卡死的执行登记**。
+     *   用户口径："程序正在执行中，但是没跑代码，就绪和取消都成功，无法下达指令"。
+     *   后端只清**已经死掉**的登记（线程不存在）；只要还有活着的执行就一律拒绝 ——
+     *   绝不把正在跑的机器人交给手动指令。**只动软件登记，不写任何寄存器。**
+     */
+    async forceReleaseRuns() {
+      try {
+        const r = await apiControl("/control/force-release", { method: "POST" });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.ok) {
+          this.logLine("ok", "复位执行登记：" + (d.message || "已清掉卡死的执行登记"));
+        } else {
+          this.logLine("err", "复位执行登记失败："
+            + ((d && (d.error || d.message)) || ("HTTP " + r.status)));
+        }
+      } catch (e) {
+        this.logLine("err", "复位执行登记请求失败：" + (e && e.message ? e.message : e));
+      }
+    },
+
     // ================= 全局执行速度 =================
     // ★ 2026-10-09：**不再持久化**（用户口径"每次启动默认必须是 5%"）。
     //   保留这个方法只为兼容旧调用点 —— 它现在什么都不做，并在控制台提示一次，
@@ -1007,7 +1028,15 @@ export const useExecStore = defineStore("exec", {
           }),
         });
         if (r.status === 401 || r.status === 403) { this.needAuth(); return; }
-        const d = await r.json();
+        let d = await r.json();
+        // ★★ 2026-10-10（B1）：后端已**异步化** —— POST 只回 `{started, run_id, kind}`，
+        //   真正的逐步结果去 `/control/run-state` 取（字段与老的响应体**一致**）。
+        if (d && d.started) {
+          if (d.run_id) this.runId = d.run_id;
+          if (d.kind) this.runKind = d.kind;
+          this.fileResult = null;
+          d = await this._awaitRunResult();
+        }
         this.fileResult = d;
         // FastAPI 的 HTTPException(404, detail={...}) 会把 detail 包进响应体的
         // "detail" 字段；message/candidates 实际在 d.detail 内层。这里先解一层，
@@ -1433,11 +1462,17 @@ export const useExecStore = defineStore("exec", {
           }),
         });
         if (r.status === 401 || r.status === 403) { this.needAuth(); return; }
-        const d = await r.json().catch(() => ({}));
+        let d = await r.json().catch(() => ({}));
         if (!r.ok) {
           this.seqErr = this._msgOf(d, r.status);
           this.logLine("err", "序列执行被拒：" + this.seqErr);
           return;
+        }
+        // ★★ 2026-10-10（B1）：异步化 —— 结果去轮询里取（下面的 startSeqPoll 让位给它）
+        if (d && d.started) {
+          if (d.run_id) this.runId = d.run_id;
+          this.stopSeqPoll();
+          d = await this._awaitRunResult();
         }
         this.fileResult = d;
         this.runStep = d.count || this.runTotal;
@@ -1512,6 +1547,36 @@ export const useExecStore = defineStore("exec", {
     },
 
     /** 执行中轮询进度（画进度条 + 当前步高亮 + 暂停态）。 */
+    /**
+     * ★★ 2026-10-10（B1 异步化）：等后台执行跑完。
+     *
+     * 后端 `/control/run-file` 已改成"立即返回 + 后台线程执行"，POST 只回
+     * `{started, run_id, kind}`；**最终结果**在 `/control/run-state` 的 `state.result` 里
+     * （字段与老的 HTTP 响应体**完全一致**：ok/count/passed/steps/cancelled/...）。
+     * 这里边等边把进度喂给界面（替代 startSeqPoll，避免两个轮询打架）。
+     * ⚠ 纯前端 await，不占后端 worker；超时如实回报，**不假装成功**。
+     */
+    async _awaitRunResult(timeoutMs = 30 * 60 * 1000) {
+      const t0 = Date.now();
+      while (Date.now() - t0 < timeoutMs) {
+        await new Promise((res) => setTimeout(res, 400));
+        try {
+          const r = await apiControl("/control/run-state");
+          if (!r.ok) continue;
+          const d = await r.json();
+          const s = d && d.state;
+          if (!s) continue;
+          this.runState = s;
+          if (s.index) this.runStep = s.index;
+          if (s.total) this.runTotal = s.total;
+          this.runPaused = !!s.paused;
+          if (s.result) return s.result;
+        } catch (e) { /* 轮询失败不影响执行本身 */ }
+      }
+      return { ok: false,
+               error: "等待执行结果超时（执行可能仍在后台进行，请稍后刷新查看运行日志）" };
+    },
+
     startSeqPoll() {
       this.stopSeqPoll();
       if (typeof setInterval !== "function") return;

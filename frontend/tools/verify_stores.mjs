@@ -110,5 +110,16 @@ ok("C2. 已移除「声明远程」按钮（无 claimMode('REMOTE')）", !card.i
 ok("C3. 仍保留绿/红就绪切换按钮", card.includes("ready-toggle") && card.includes("一键就绪")
   && card.includes("取消就绪"));
 
+// ---- D. 程序执行：`/run-file` 已**异步化**（B1），结果必须从 run-state 取 ----
+//   后端 POST /control/run-file 现在只回 {started, run_id, kind}（不再带逐步结果）；
+//   前端若还去读响应体的 steps/count，会整块变成 undefined（"undefined/undefined 步"）。
+const execStore = read("src/stores/exec.js");
+ok("D1. 收到 started 后改走 _awaitRunResult（不再当响应体是结果）",
+  /d\.started/.test(execStore) && /_awaitRunResult/.test(execStore));
+ok("D2. 结果从 /control/run-state 的 state.result 取",
+  /\/control\/run-state/.test(execStore) && /if \(s\.result\) return s\.result/.test(execStore));
+ok("D3. 等结果有超时且如实回报（不假装成功）",
+  /等待执行结果超时/.test(execStore));
+
 console.log(`\n== store 回归: ${pass} passed, ${fail} failed ==`);
 process.exit(fail ? 1 : 0);

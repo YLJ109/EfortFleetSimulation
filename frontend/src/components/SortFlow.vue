@@ -31,7 +31,7 @@ const props = defineProps({
   st: { type: Object, default: null },
   /** 本轮实际参数（用于把"等待xx毫秒"写成真实数字，而不是写死）。 */
   frames: { type: Number, default: 3 },
-  dwellMs: { type: Number, default: 1000 },
+  dwellMs: { type: Number, default: 500 },
   blowMs: { type: Number, default: 500 },
   suckHoldMs: { type: Number, default: 500 },
 });
@@ -74,7 +74,9 @@ function stepState(step) {
 
 // ---- 抓帧明细（判色步骤里显示） ----
 const frameList = computed(() => (Array.isArray(s.value.frame_detail) ? s.value.frame_detail : []));
-const COLOR_HEX = { "红": "#E02020", "绿": "#1FA74A", "蓝": "#1F4FD8" };
+// ★ 第 4 色「黑」= 无效颜色（识别到了但不分拣，原路放回原位）—— 也要有颜色映射，
+//   否则界面上它会掉成灰、看着像"没识别到"。
+const COLOR_HEX = { "红": "#E02020", "绿": "#1FA74A", "蓝": "#1F4FD8", "黑": "#1c1f24" };
 /** 置信度最高的那一帧下标（后端给了 best_frame 就用它；判色失败时自己找最像的）。 */
 const bestIdx = computed(() => {
   const bf = s.value.best_frame;

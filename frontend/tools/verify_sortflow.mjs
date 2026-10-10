@@ -211,5 +211,36 @@ console.log("== E. 接进分拣页 + 参数不写死 ==");
 }
 
 console.log("");
+console.log("== F. 分拣模式（正常 / 快速）→ 后端 dual_face ==");
+{
+  // ★ 为什么钉这三条：这个控件直接决定**真机动作**是"单面一趟一件"还是"双面一趟两件"。
+  //   一旦默认值被改成「快速」、或请求体把 dual_face 写死、或护栏被删掉，
+  //   编译/界面都看不出异常，但现场会拿错流程开跑（多一次 J6 翻转 / 跑到翻转找不到点）。
+  //   所以全部按**源码事实**断言，不允许"看起来像"。
+  //
+  // 1) 默认模式 = 正常分拣（且没有持久化 —— 每次进页面归零）。
+  ok("★ 默认模式 = 正常分拣（mode 初始 normal）",
+    /const mode = ref\("normal"\)/.test(view), "找不到 mode 默认值");
+  ok("正常分拣对应 dual_face=false（dualFace 仅 fast 时为真）",
+    /dualFace\s*=\s*computed\(\(\)\s*=>\s*mode\.value === "fast"\)/.test(view));
+
+  // 2) 请求体里 dual_face 由模式决定，不能写死。
+  ok("★ 请求体 dual_face 由模式决定（dual_face: dualFace.value）",
+    /dual_face:\s*dualFace\.value/.test(view));
+  ok("反证：把 dual_face 写死 true/false 会被判失败（当前没有写死）",
+    !/dual_face:\s*(true|false)\b/.test(view));
+
+  // 3) 缺 J6正面 / J6反面 时拦下启动（且沿用本页既有 isTaught，不另写查询）。
+  ok("★ 有拦截逻辑：canStart 含 dualFaceBlocked",
+    /canStart\b[\s\S]{0,240}dualFaceBlocked\.value/.test(view));
+  ok("★ 拦截用到两个点名 J6正面 / J6反面",
+    /DUAL_FACE_POINTS\s*=\s*\[\s*"J6正面"\s*,\s*"J6反面"\s*\]/.test(view));
+  ok("★ 拦截沿用既有 isTaught 判定点位是否已示教（不新造查询）",
+    /dualFaceMissing[\s\S]{0,120}isTaught\(/.test(view));
+  ok("选快速时给了「首次使用请先空跑」的如实提示",
+    /首次使用请先空跑/.test(view));
+}
+
+console.log("");
 console.log("结果: " + pass + " 通过 / " + fail + " 失败");
 process.exit(fail ? 1 : 0);

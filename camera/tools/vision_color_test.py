@@ -100,30 +100,35 @@ def main():
        abs(red[0] - 53.24) < 0.1 and abs(red[1] - 80.09) < 0.1 and abs(red[2] - 67.20) < 0.1,
        "实得 (%.2f, %.2f, %.2f)" % (red[0], red[1], red[2]))
 
-    print("== C. 三色模型可达：红/绿/蓝可判回自己，非目标不产生新类别 ==")
+    print("== C. 七色调色板可达：7 色各自判回自己；结果只出调色板名 ==")
     eng = vc.VisionEngine(background=BG_IMG, use_mog2=False)
-    reach_bad, leak_bad = [], []
-    for name, hx in vc.RGB_CARD.items():
-        img = render(hex_bgr(hx))
-        r = eng.detect(img)
+    # ★★ 2026-10-10 七色重构：可识别色 = 红/橙/黄/绿/青/蓝/紫（vc.PALETTE_NAMES）。
+    #   每张调色板色卡都必须能判回自己（防止某条色相带被阈值吞掉）。
+    _pal7 = {"红": "#E02020", "橙": "#FF7A18", "黄": "#FFD400", "绿": "#1FA74A",
+             "青": "#00BFC8", "蓝": "#1F4FD8", "紫": "#8A3FC0"}
+    reach_bad = []
+    for name, hx in _pal7.items():
+        r = eng.detect(render(hex_bgr(hx)))
         got = r["results"][0]["color"]["name"] if r["results"] else "<无目标>"
         if got != name:
             reach_bad.append("%s->%s" % (name, got))
+    ok("红/橙/黄/绿/青/蓝/紫 七色各自可判回自己", not reach_bad, "错判: " + ", ".join(reach_bad))
+    # 全 18 类色卡：低饱和（白/灰/米白…）"<无目标>" 是**预期**；其余必须落进**调色板**
+    #   （或 未知/黑），绝不许出现调色板之外的**新类别名**。
+    leak_bad = []
     for name, hx in vc.COLOR_CARD.items():
-        if name in vc.RGB_NAMES:
-            continue                       # 三色已在上面测过可达
+        if name in _pal7:
+            continue                       # 七色已在上面测过可达
         img = render(hex_bgr(hx))
         r = eng.detect(img)
         got = r["results"][0]["color"]["name"] if r["results"] else "<无目标>"
-        # ★ 2026-09-25：实时链路改为"只用颜色阈值"（对齐参考实现）后，白/黑/灰/银灰这类
-        #   **低饱和**物体在前景掩膜里根本不存在 → "<无目标>" 是**预期结果**，不是泄漏。
-        #   本断言真正要守的是"绝不给非三色输入**新造**出 橙/黄/青 等三色之外的类别名"。
+        # ★ 白/银灰/灰/米白这类**低饱和**物体在前景掩膜里根本不存在 → "<无目标>" 是预期。
+        # ★「黑」= **无彩色**（暗色兜底识别出来的），是**预期**类别名，不算泄漏。
         if got == "<无目标>":
             continue
-        if got not in vc.RGB_NAMES and got != "未知":
+        if got not in vc.PALETTE_NAMES and got not in ("未知", vc.DARK_NAME):
             leak_bad.append("%s->%s" % (name, got))
-    ok("红/绿/蓝可判回自己", not reach_bad, "错判: " + ", ".join(reach_bad))
-    ok("非目标不新造三色外类别（无目标/未知均视为正常）", not leak_bad,
+    ok("非七色输入不新造类别（只允许落进调色板 / 未知 / 黑）", not leak_bad,
        "泄漏: " + ", ".join(leak_bad[:8]))
 
     print("== D. 只认长方形（圆必须剔除） ==")
@@ -133,6 +138,95 @@ def main():
     eng3 = vc.VisionEngine(background=BG_IMG, use_mog2=False)
     rc = eng3.detect(render(hex_bgr("#1F4FD8"), shape="circle"))
     ok("圆形被剔除", len(rc["results"]) == 0, "找到 %d 个" % len(rc["results"]))
+
+    # ★★ 2026-10-10 用户口径："黑色是无效颜色，要能识别到并放回原位"（第 4 色「黑」）。
+    #   黑/深色物体在彩色掩膜里是**零像素**（旧行为直接报"检测不到"）——
+    #   现在有"暗色兜底"（只在没检到彩色时才启用）：必须给出候选，
+    #   且判色为**第 4 色「黑」**、原因写明"无效颜色"（上层据此原路放回原位）。
+    eng_black = vc.VisionEngine(use_mog2=False)           # 与相机服务同一条链路(color_only)
+    rb = eng_black.detect(render(hex_bgr("#14181C")))     # 近黑
+    ok("黑块能被检出（不再报「检测不到」）", len(rb["results"]) == 1,
+       "找到 %d 个" % len(rb["results"]))
+    if rb["results"]:
+        cb = rb["results"][0]["color"]
+        ok("黑块判为「无效颜色」（黑 + 原因写明）",
+           cb["name"] == vc.DARK_NAME and "无效颜色" in (cb.get("reason") or ""),
+           "name=%s reason=%s" % (cb["name"], cb.get("reason")))
+        # ★ 关键：conf 必须过上游门槛（camera_service.pick_best / 后端 vote_color），
+        #   否则刚检出的候选又被滤掉，现场又变回"检测不到"，本支路等于白加。
+        ok("暗色候选 conf 能过上游门槛（>=0.28）",
+           float(cb["conf"]) >= 0.28, "conf=%.2f" % float(cb["conf"]))
+        ok("pick_best 仍保留暗色候选（只会被当成「黑/无效」，不会是有效颜色）",
+           len(vc.pick_best(rb["results"], 0.28)) == 1)
+    # 反证：纯背景（无物体）不能靠暗色兜底凭空造出一个候选
+    eng_bg = vc.VisionEngine(use_mog2=False)
+    ok("纯背景不产生候选（暗色兜底不是无中生有）",
+       len(eng_bg.detect(BG_IMG.copy())["results"]) == 0)
+    # ★★ 2026-10-10 实测**黑块实物照**后的修正：哑光黑在光下 V≈58~105（不是 20 那种纯黑），
+    #   固定阈值 55 会把它切碎成碎块 → 检不出。所以判据改成**相对**："明显暗于画面背景"。
+    eng_matte = vc.VisionEngine(use_mog2=False)
+    r_matte = eng_matte.detect(render((72, 72, 72)))      # V≈72：实测的黑块面亮度
+    ok("哑光黑（V≈72，实测亮度）能被暗色兜底整块检出",
+       len(r_matte["results"]) == 1, "找到 %d 个" % len(r_matte["results"]))
+    if r_matte["results"]:
+        c = r_matte["results"][0]["color"]
+        ok("哑光黑也判为「无效颜色」", c["name"] == vc.DARK_NAME and "无效颜色" in (c.get("reason") or ""),
+           "%s / %s" % (c["name"], c.get("reason")))
+    # ★★ 2026-10-10 修正（用户："现在红色也没有检测到…把黑色识别成蓝色了"）：
+    #   ① **不再按面积用暗色候选顶掉彩色候选** —— 画面里有更大暗区（黑料/夹具/暗显示器）时，
+    #      彩色候选必须**还在**（C 位背景本就有大块暗矩形，按面积竞争会把真彩料吞掉 = 本次回归根因）；
+    #   ② 黑块**带蓝/青色偏**（会混进彩色掩膜、被 hue 投票判成"蓝"）时，因其"暗"（框内多数像素
+    #      落在暗色掩膜里）→ 必须**改判为「黑」**，不能报蓝。
+    mix = np.full((H, W, 3), BG, np.uint8)
+    cv2.rectangle(mix, (60, 120), (300, 340), (32, 32, 224), -1)      # 小红块（料）
+    cv2.rectangle(mix, (340, 60), (620, 420), (60, 60, 60), -1)       # 更大暗区块（背景/夹具）
+    names_c = [it["color"]["name"] for it in vc.VisionEngine(use_mog2=False).detect(mix)["results"]]
+    ok("★ 画面有更大暗区块时，彩色候选仍被保留（不被暗色吞掉）",
+       "红" in names_c, "实得: " + str(names_c))
+    # 反证：黑块**带蓝偏**（S/V 都够 → 会进彩色掩膜）→ 仍必须判「黑」，不能判「蓝」
+    bluish = np.full((H, W, 3), BG, np.uint8)
+    # ★★ 2026-10-10 七色重构后口径："黑" = **暗 且 不艳**。此合成块要代表
+    #   "哑光黑 + 轻微蓝偏"（真实现象），**不是**一块高饱和深蓝（那块本来就该判蓝）。
+    #   (50,42,38) BGR ≈ RGB(38,42,50)：S≈61（够进彩色掩膜）、Lab 色度≈5（消色）→ 必须判黑。
+    cv2.rectangle(bluish, (180, 120), (460, 380), (50, 42, 38), -1)
+    res_b = vc.VisionEngine(use_mog2=False).detect(bluish)["results"]
+    ok("★ 哑光黑带轻微蓝偏 → 仍判「黑」（不被 hue 投票判成蓝）",
+       len(res_b) == 1 and res_b[0]["color"]["name"] == vc.DARK_NAME,
+       str(res_b[0]["color"]["name"] if res_b else "<无目标>"))
+    # ★★ 2026-10-10 新增钉子（本次核心 bug：暗绿被判黑 → 现场"绿色检测不到"）：
+    #   亮背景（C 位那种，V=200）+ **暗绿**物体（V=120 低于 dark_val_max=130，但仍高饱和/高色度）
+    #   → 必须仍判「绿」。旧规则只看"暗"（_dark_self_frac≥0.5）会把它误判成黑。
+    bright_g = np.full((H, W, 3), 200, np.uint8)
+    cv2.rectangle(bright_g, (180, 120), (460, 380), (40, 120, 55), -1)   # 暗绿：V 低但"艳"
+    res_g = vc.VisionEngine(use_mog2=False).detect(bright_g)["results"]
+    ok("★ 亮背景下的暗绿块仍判「绿」（旧规则会误判成黑）",
+       len(res_g) == 1 and res_g[0]["color"]["name"] == "绿",
+       str(res_g[0]["color"]["name"] if res_g else "<无目标>"))
+    # 同场景对照：亮背景 + **哑光黑**（暗 且 不艳）→ 必须判「黑（无效色）」
+    bright_k = np.full((H, W, 3), 200, np.uint8)
+    cv2.rectangle(bright_k, (180, 120), (460, 380), (48, 44, 40), -1)    # 哑光黑 + 轻微蓝偏
+    res_k = vc.VisionEngine(use_mog2=False).detect(bright_k)["results"]
+    ok("★ 亮背景下的黑块仍判「黑（无效色）」（暗 且 不艳）",
+       len(res_k) == 1 and res_k[0]["color"]["name"] == vc.DARK_NAME,
+       str(res_k[0]["color"]["name"] if res_k else "<无目标>"))
+    # 反证：黑块**比彩料小** → 仍按彩料报（不能反过来把彩料判成无效颜色）
+    sd = np.full((H, W, 3), BG, np.uint8)
+    cv2.rectangle(sd, (60, 120), (400, 460), (32, 32, 224), -1)       # 大红块（料）
+    cv2.rectangle(sd, (440, 150), (540, 250), (60, 60, 60), -1)       # 小黑块（杂物）
+    res_s = vc.VisionEngine(use_mog2=False).detect(sd)["results"]
+    ok("反证：黑块比彩料小 → 仍按彩料报（不会把彩料误判成无效颜色）",
+       len(res_s) == 1 and res_s[0]["color"]["name"] == "红",
+       str(res_s[0]["color"]["name"] if res_s else "<无目标>"))
+    # 反证：**整幅都暗**（背景也暗）→ 不启用暗色兜底（宁可不猜，也不把整屏当成物体）
+    all_dark = np.full((H, W, 3), 40, np.uint8)
+    ok("整幅偏暗时不启用暗色兜底（不会把整屏当成物体）",
+       len(vc.VisionEngine(use_mog2=False).detect(all_dark)["results"]) == 0)
+    # 反证：三色一个都不能被暗色兜底改动（红块仍须判红）
+    eng_r = vc.VisionEngine(use_mog2=False)
+    rr2 = eng_r.detect(render(hex_bgr("#E02020")))
+    ok("红块仍判红（暗色兜底不介入三色路径）",
+       len(rr2["results"]) == 1 and rr2["results"][0]["color"]["name"] == "红",
+       str(rr2["results"][0]["color"]["name"] if rr2["results"] else "<无目标>"))
 
     print("== E. 稳定判定：静止持续触发；离开后复位 ==")
     eng4 = vc.VisionEngine(background=BG_IMG, use_mog2=False)
@@ -445,22 +539,40 @@ def main():
         ok("★★ 暗光下的红块仍给出「红」（不被形状门槛误杀）", False, "无候选")
 
     # ------------------------------------------------------------------
-    # K7. 色相带不得有"空隙"（绿 90~95 的 5° 漏洞）
-    #   实测：偏青的绿（OpenCV H≈91~94）原本同时落在绿带 [35,90) 与蓝带 [95,135) 之外
-    #   → 表现为"这块绿色怎么都认不出"。现在应为绿 [35,95) / 蓝 [95,135) 无缝隙。
-    src_hue = inspect.getsource(vc._hue_vote)
-    ok("★ 绿带上限已接到 95（与蓝带起点无缝，不再漏 90~95 的偏青绿）",
-       "(H >= 35) & (H < 95)" in src_hue)
-    ok("★ 蓝带起点仍为 95（没有把蓝色划给绿）", "(H >= 95)" in src_hue)
-    # 实测该色：H=92 的偏青绿在旧代码里"三条带都不占"→ 空结果
+    # K7. 七色色相带必须"纯划分"（无缝隙、无重叠）
+    #   ★★ 2026-10-10 七色重构：可识别色扩到 7 色后，色相环被 7 条带**完整切分**
+    #     （红<12或≥160 / 橙12~22 / 黄22~35 / 绿35~88 / 青88~100 / 蓝100~135 / 紫135~160）。
+    #     旧口径"绿带上限 95"作废；绿带上限由 75 再退到 **88**（现场"绿被判青"后修正）。
+    #     要守的不变的是：**任何色相都不得落在带外**（旧代码曾有 90~95 的 5° 空隙 → 判不出）。
+    src_vote = inspect.getsource(vc._palette_vote)
+    ok("★ 七色带全部来自 HUE_BANDS（纯划分，无手写空隙）", "HUE_BANDS" in src_vote)
+    # ★★ 2026-10-10 现场反馈"绿被判成青"后的修正：绿带上限 75 → **88**。
+    #   现场绿件 H≈69~70，离 75 只有 5 格 → 光照/白平衡一漂就翻到"青"。现绿留 ≥18 格余量，
+    #   青带收到 [88,100)（只留给真青），蓝仍从 100 起（护住现场蓝 H104~106）。
+    ok("★ 绿带上限 88（给现场绿 H69~70 留 ≥18 格余量）、青/蓝分界 100",
+       vc.HUE_BANDS[4] == ("绿", 35.0, 88.0) and vc.HUE_BANDS[5] == ("青", 88.0, 100.0))
+    cov = [False] * 180
+    for _nm, lo, hi in vc.HUE_BANDS:
+        for hh in range(int(lo), int(hi)):
+            cov[hh] = True
+    band_gap = [hh for hh in range(180) if not cov[hh]]
+    ok("★ 0~179 每个色相都被某条带覆盖（不存在判不出的色相）", not band_gap,
+       "空档: " + str(band_gap[:12]))
+    # 偏青的绿（BGR(140,190,40) → H≈80）：**必须归「绿」**（现场绿件就落这一带，不许再判青）
     teal = np.full((H, W, 3), BG, np.uint8)
-    # 构造 H≈92 的绿（BGR：G 高、B 中等、R 低）
     cv2.rectangle(teal, (W // 2 - 110, H // 2 - 110), (W // 2 + 110, H // 2 + 110),
                   (140, 190, 40), -1)
     r_teal = vc.VisionEngine().detect(teal)
     got_teal = r_teal["results"][0]["color"]["name"] if r_teal["results"] else ""
-    ok("★ 偏青绿（H≈92）现在能归到「绿」（旧代码落在 90~95 空隙里判不出）",
+    ok("★ 偏青的绿（H≈80）现归「绿」（现场绿件就落这一带）",
        got_teal == "绿", "实际 %r" % got_teal)
+    # 强青（BGR(200,190,0) → H≈91）：七色里的「青」要留得住
+    cyan = np.full((H, W, 3), BG, np.uint8)
+    cv2.rectangle(cyan, (W // 2 - 110, H // 2 - 110), (W // 2 + 110, H // 2 + 110),
+                  (200, 190, 0), -1)
+    r_cyan = vc.VisionEngine().detect(cyan)
+    got_cyan = r_cyan["results"][0]["color"]["name"] if r_cyan["results"] else ""
+    ok("★ 强青（H≈91）仍判「青」", got_cyan == "青", "实际 %r" % got_cyan)
 
     print("")
     print("结果: %d 通过 / %d 失败" % (pass_n, fail_n))

@@ -32,13 +32,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_control
-from app.api.control import new_run, request_cancel
+from app.api.control import new_run, register_scene_source, request_cancel
 from app.api.sorting import (_Stop, _air, _capture, _joints_of, _move,  # 复用同一套原语
                             _set as _set_state)
 from app.core.logger import get_logger
 from app.db.crud import list_points
 from app.db.database import SessionLocal
 from app.services import llm, nl_intent as NL
+from app.services import placement as PL
 from app.services import sorting as S
 from app.services.collector import collector
 from app.services.events import emit as emit_event
@@ -55,6 +56,28 @@ _PENDING_TTL = 120.0
 _plans: Dict[str, Dict] = {}
 _gate = threading.Lock()
 _job: Dict[str, object] = {"thread": None, "ctx": None, "state": None}
+
+
+# ★★ 2026-10-10：把**AI 执行状态**登记为 3D 的"场景状态源"（见 control.py 的
+#   `/control/scene-state`）。这就是"AI 执行没有变颜色"的直接修复 ——
+#   AI 与分拣的 state 由同一套 `_set_state()` 生成，字段同构，3D 可直接吃。
+def _scene_state() -> Optional[Dict]:
+    with _gate:
+        st = _job.get("state")
+    return dict(st) if isinstance(st, dict) else None
+
+
+register_scene_source("ai", _scene_state)
+
+# ★ 吸取后停留（ms）：吸上后先停一下再抬，等真空吸牢 —— 与分拣同口径
+#   （api/sorting.py 的 StartIn.suck_hold_ms，2026-10-10 起默认 **500**）。
+#   ★ 2026-10-10 用户口径："吸住要一直吸住，到放料时才停止吸住" ——
+#     本链路以前抄的是**分拣的旧写法**（抬起来就「停止吸」+ 没有吸牢停留），
+#     件只靠杯内残余负压吊着飞一路；这里与分拣引擎对齐。
+SUCK_HOLD_MS = 500
+# ★ C 检测位停留（秒）—— 与分拣的 StartIn.dwell_ms 默认（500ms）同口径；
+#   其间抓 3 帧（帧间隔见 api/sorting.py 的 FRAME_GAP_S）。
+CAM_DWELL_S = 0.5
 
 # ★ 本页自己的占位表（A 区是否有料 / B 区各格颜色）—— 见模块头"如实说明"。
 #   只在本页会话内有效，重启后端即清空（不假装知道真实格内容）。
@@ -73,14 +96,36 @@ def batch_max() -> int:
     return max(1, min(9, _env_int("EFORT_AI_BATCH_MAX", 3)))
 
 
+# ★★ 2026-10-10 现场 bug（"「蓝」的摆法里已没有可用格"）：执行阶段要把"整区/颜色列"
+#   落成**具体格**，于是重建了一份执行计划 —— 但重建时**只写了动作相关字段**，
+#   把解析阶段的附加键全丢了。丢的每一件都会出事故：
+#     · placement        → 解析阶段解出来的摆法没了 → 现场报"摆法里已没有可用格"
+#                          （其实摆法就在计划里，只是没带下来）
+#     · ban              → 禁放格失效（"B5、B9 禁止摆放"被忽略）
+#     · on_invalid       → "无效色放回原位**继续**"退回成"停"
+#     · pattern          → 日志/回显里看不出按什么约束摆的
+#   所以：**重建必须以原计划为底**，只覆盖动作相关字段（唯一入口 exec_plan）。
+_EXEC_KEEP = ("ban", "pattern", "on_invalid", "placement", "placement_note",
+              "placement_alts", "quotas", "prefer_color")
+
+
+def exec_plan(plan: Dict, over: Dict) -> Dict:
+    """重建**执行计划**：以原计划为底，只覆盖动作相关字段（见 _EXEC_KEEP 的注释）。"""
+    out = {k: plan.get(k) for k in _EXEC_KEEP if k in plan}
+    out.update(over)
+    return out
+
+
 def _ban_of(plan: Dict) -> Dict:
     """取计划里的**逐格约束**（2026-10-10 用户口径："某格不能拿 / 某格不能放"）。
 
     缺省 = 没有任何约束（返回空表）→ 分拣/井字棋/普通搬运行为完全不变。
+    ★ `have` = 用户说"这些格**已有料**"的那些格（与"不能放"同样不可落料，
+      但回显要分开写 —— 现场处置方式不同）。
     """
     b = plan.get("ban") or {}
     up = lambda xs: [str(x).strip().upper() for x in (xs or [])]  # noqa: E731
-    return {"from": up(b.get("from")), "to": up(b.get("to"))}
+    return {"from": up(b.get("from")), "to": up(b.get("to")), "have": up(b.get("have"))}
 
 
 # ---------------------------------------------------------------- 盘点记录（只读查询的数据源）
@@ -201,6 +246,20 @@ def _resolve_src(loc: Dict) -> Dict:
     return {"ok": False, "error": "地点类型不认识（%s）" % kind}
 
 
+def _solve_quota_placement(plan: Dict) -> Dict:
+    """把"各色几件 + 摆放方式 + 已有料/禁放"解成**具体格位**（services/placement.solve）。
+
+    ★ 占用的三个来源合一：
+      ① 本条指令里明说"已有料"的格（`ban.have`）；
+      ② 本条指令里明说"不能放"的格（`ban.to`）；
+      ③ **本页这一轮已经放过的格**（`_occ["B"]`，我方确知的事实）。
+    """
+    ban = _ban_of(plan)
+    placed = [s for s, v in (_occ["B"] or {}).items() if v]
+    return PL.solve(plan.get("quotas") or {}, plan.get("pattern") or "any",
+                    occupied=list(ban["have"]) + placed, banned=ban["to"])
+
+
 # ---------------------------------------------------------------- 解析
 class ParseIn(BaseModel):
     text: str = Field(..., min_length=1, max_length=300)
@@ -248,6 +307,38 @@ def _echo(intent: str, plan: Dict) -> Dict:
         return {"title": "看颜色",
                 "detail": "取 %s 的件送到 C 区判色，判完放回原格" % _loc_zh(plan.get("from"), "from"),
                 "note": "这是运动：要真取真放"}
+    if a == "query_state":
+        # ★ 2026-10-10：只读查询本来走 /chat 直接作答（不弹计划卡）；这里补一条回显，
+        #   防它走 /parse 时又掉进 "?" 兜底。
+        return {"title": "查询（只读）",
+                "detail": "查我记录过的 A 区颜色 / 数量 —— 不动机器人",
+                "note": "A 区颜色只能靠逐件拍照；没盘过就只会说「不知道」，不编数量"}
+    if a == "move_quota":
+        # ★ 2026-10-10 补上：以前 _echo 没有这个分支 → 回显直接掉进末尾兜底，
+        #   计划卡只显示一个 "?"（现场截图那条）。这里按"配额搬运"如实描述，
+        #   并把**摆法**（同色成行/成列，约束求解出来的）写进回显。
+        q = plan.get("quotas") or {}
+        zh = "、".join("%s×%d" % (c, int(n)) for c, n in q.items()) or "?"
+        place = str(plan.get("placement_note") or "")
+        detail = ("从 A 区按颜色取：%s → 逐件判色 → 放到 %s"
+                  % (zh, _loc_zh(plan.get("to"), "to")))
+        if place:
+            detail += "；摆法：%s" % place
+        notes = ["A 区颜色事先未知；不需要的件放回原位；合计 %d 件" % sum(q.values())]
+        ptn = plan.get("pattern") or "any"
+        if ptn != "any":
+            notes.append("摆放方式：%s（同色落在同一条线上）" % PL.PATTERN_ZH.get(ptn, ptn))
+        ban = _ban_of(plan)
+        if ban["have"]:
+            notes.append("已有料（不会往上放）：" + "、".join(ban["have"]))
+        if ban["to"]:
+            notes.append("不能放：" + "、".join(ban["to"]))
+        notes.append("判不出色/黑色 → 放回原格后%s"
+                     % ("继续" if plan.get("on_invalid") == "continue" else "停"))
+        alts = plan.get("placement_alts") or []
+        if alts:
+            notes.append("其它可行摆法：" + " ／ ".join(alts))
+        return {"title": "按颜色配额搬运", "detail": detail, "note": "；".join(notes)}
     if a in ("move_one", "move_all"):
         n = "全部（受件数上限约束）" if a == "move_all" else "1 件"
         return {"title": "搬运" if a == "move_one" else "批量搬运",
@@ -268,72 +359,131 @@ def api_parse(body: ParseIn, tok: str = Depends(require_control)):
     return _parse_to_plan(body.text)
 
 
-def _parse_to_plan(text: str) -> Dict:
-    """规则优先 → 大模型兜底的**纯解析**（不执行）。
+def _free_b_tips(bad_slot: str) -> List[str]:
+    """目标格被占/禁放时给的**可操作建议**（B 区当前认为空的格）。"""
+    free = [s for s in ["B%d" % i for i in range(1, 10)] if not _occ["B"].get(s)]
+    return ["B 区当前认为空的格：%s" % "、".join(free)] if free else []
 
-    ★ 2026-10-10 从 api_parse 抽出：/parse 与 /chat（对话模式）共用同一套
-      解析 + 计划缓存逻辑 —— "确认的就是解析出来的那一份"口径不变。
+
+def _feasibility(plan: Dict) -> Dict:
+    """解析阶段的**可行性闸门**（2026-10-10 用户口径：先查已有/禁放，绝不叠放）。
+
+    ★ 只管"目标格是被占/被禁"的单件搬运；配额搬运的可行性由 `_solve_quota_placement` 解。
+    不可行 → {ok:False, reason, suggestions}（调用方**不执行**并把建议给用户）。
     """
-    text = (text or "").strip()
-    res = NL.parse(text)
-    source = "rule"
-    # ★ 调用方明确要求"要依赖大模型"：规则失败时尝试大模型，仍失败则原样返回规则报错。
-    if not res.get("ok") and llm.enabled():
-        lr = llm.parse(text)
-        if lr.get("ok"):
-            # 大模型只给"动作 + 地点"，槽位/空位仍由本模块解析（不让它碰具体格）
-            p = dict(lr["plan"])
-            if p.get("action") in ("move_one", "move_all"):
-                src = _resolve_src(p.get("from") or {})
-                dst = _resolve_loc(p.get("to") or {})
-                if not src.get("ok"):
-                    res = {"ok": False, "raw": text, "error": "大模型解析的起点不可用：" + src["error"]}
-                elif not dst.get("ok"):
-                    res = {"ok": False, "raw": text, "error": "大模型解析的目标不可用：" + dst["error"]}
-                else:
-                    p["from"] = {"kind": "slot", "zone": src["slot"][:1], "slot": src["slot"],
-                                 "zh": src.get("zh")}
-                    p["to"] = {"kind": "slot", "zone": dst["slot"][:1], "slot": dst["slot"],
-                               "zh": dst.get("zh")}
-                    res = {"ok": True, "intent": p["action"], "plan": p, "warnings": [],
-                           "raw": text, "error": ""}
-                    source = "llm"
-            elif p.get("action") == "look_color":
-                src = _resolve_src(p.get("from") or {})
-                if src.get("ok"):
-                    p["from"] = {"kind": "slot", "zone": src["slot"][:1], "slot": src["slot"],
-                                 "zh": src.get("zh")}
-                    res = {"ok": True, "intent": "look_color", "plan": p, "warnings": [],
-                           "raw": text, "error": ""}
-                    source = "llm"
-            elif p.get("action") in ("sorting", "estop"):
-                res = {"ok": True, "intent": p["action"], "plan": p, "warnings": [],
-                       "raw": text, "error": ""}
-                source = "llm"
-        else:
-            res = dict(res)
-            res["llm_error"] = lr.get("error") or ""
+    ban = _ban_of(plan)
+    if plan.get("action") == "move_one":
+        src = plan.get("from") or {}
+        dst = plan.get("to") or {}
+        if (src.get("kind") or "") == "slot" and (src.get("slot") or "") in ban["from"]:
+            return {"ok": False, "suggestions": [],
+                    "reason": "「%s」是禁取格，不能从它拿件" % src["slot"]}
+        if (dst.get("kind") or "") == "slot":
+            s = dst.get("slot") or ""
+            if s in ban["to"] or s in ban["have"]:
+                return {"ok": False, "suggestions": _free_b_tips(s),
+                        "reason": "「%s」是禁放/已有料格，不能往上放" % s}
+            if _occ["B"].get(s):
+                return {"ok": False, "suggestions": _free_b_tips(s),
+                        "reason": "「%s」本页记录已有料，不能往上放" % s}
+    return {"ok": True}
 
+
+def _finalize(text: str, res: Dict, source: str) -> Dict:
+    """解析结果**收口**：可行性闸门 → 配额求解 → 缓存 plan_id → 回显。
+
+    ★ 单一出口：不管 plan 来自大模型还是规则，都走同一套校验/回显 ——
+      "确认的就是执行的那一份"（plan_id 绑定）。
+    """
     out = {"ok": bool(res.get("ok")), "raw": text, "source": source,
            "intent": res.get("intent") or "", "plan": res.get("plan") or {},
            "warnings": list(res.get("warnings") or []),
            "error": res.get("error") or "",
            "llm_enabled": llm.enabled(),
            "llm_error": res.get("llm_error", ""),
-           "batch_max": batch_max()}
-    if out["ok"]:
-        pid = uuid.uuid4().hex
-        with _gate:
-            _plans[pid] = {"plan": out["plan"], "at": time.time(), "raw": text}
-        out["plan_id"] = pid
-        out["echo"] = _echo(out["intent"], out["plan"])
-        # 批量件数：先算清"这一轮会动多少件"，让人看到再确认
-        if out["plan"].get("action") == "move_all":
-            cands = _occupied(["A%d" % i for i in range(1, 10)]) \
-                if (out["plan"].get("from") or {}).get("zone", "A") == "A" else []
-            out["batch_count"] = min(len(cands), batch_max())
-            out["over_limit"] = len(cands) > batch_max()
+           "batch_max": batch_max(),
+           # ★ "理解了"（有明确动作意图）—— 即使做不到也**不要**掉进闲聊，要摊开原因+建议。
+           "understood": bool(res.get("intent"))}
+    if not out["ok"]:
+        return out
+    # ---- ① 可行性闸门（占用/禁放）----
+    gate = _feasibility(out["plan"])
+    if not gate.get("ok"):
+        out.update(ok=False, plan={}, error=gate.get("reason") or "这个目标格不能放",
+                   suggestions=gate.get("suggestions") or [])
+        return out
+    # ---- ② 配额搬运：解析阶段就把"摆法"解出来（解不出 → 给建议，不执行）----
+    if (out["plan"] or {}).get("action") == "move_quota":
+        sp = _solve_quota_placement(out["plan"])
+        if not sp.get("ok"):
+            ban = _ban_of(out["plan"])
+            placed = [s for s, v in (_occ["B"] or {}).items() if v]
+            tips = PL.suggest(out["plan"].get("quotas") or {},
+                              out["plan"].get("pattern") or "any",
+                              occupied=list(ban["have"]) + placed, banned=ban["to"])
+            out.update(ok=False, plan={},
+                       error=sp.get("reason") or "在给定约束下摆不下", suggestions=tips)
+            return out
+        out["plan"] = {**out["plan"], "placement": sp["plan"],
+                       "placement_note": sp["note"],
+                       "placement_alts": sp.get("alts") or []}
+    # ---- ③ 缓存 + 回显 ----
+    pid = uuid.uuid4().hex
+    with _gate:
+        _plans[pid] = {"plan": out["plan"], "at": time.time(), "raw": text}
+    out["plan_id"] = pid
+    out["echo"] = _echo(out["intent"], out["plan"])
+    if out["plan"].get("action") == "move_all":
+        cands = _occupied(["A%d" % i for i in range(1, 10)]) \
+            if (out["plan"].get("from") or {}).get("zone", "A") == "A" else []
+        out["batch_count"] = min(len(cands), batch_max())
+        out["over_limit"] = len(cands) > batch_max()
     return out
+
+
+def _parse_to_plan(text: str) -> Dict:
+    """**大模型优先**的纯解析（2026-10-10 用户口径："每句话必须大模型推理"）。
+
+    顺序：
+      0) **安全直达**（唯一例外）：明确说「急停」→ 立刻走规则 —— **急停不能等网络**；
+      1) **大模型解析**（`llm.parse` → 白名单 `sanitize`，产出与规则同构的 plan）；
+      2) 大模型不可用/解析不出 → **降级到规则**（`source="rule-degraded"`，
+         界面必须标注"系统规则，**不是**云端大模型"）；
+      3) 收口过 **可行性闸门**（占用/禁放/摆放约束）—— 不可行 → 不执行 + 给建议。
+
+    ★ 只解析、不执行；执行侧另走 /exec 的安全闸。
+    """
+    text = (text or "").strip()
+    # ---- 0) 安全直达：急停不绕大模型 ----
+    if NL.is_estop(text):
+        r = NL.parse(text)
+        if r.get("ok"):
+            return _finalize(text, r, "safety")
+    res: Optional[Dict] = None
+    source = ""
+    llm_err = ""
+    if llm.enabled():
+        lr = llm.parse(text)
+        if lr.get("ok"):
+            p = dict(lr["plan"])
+            res = {"ok": True, "intent": p.get("action") or "", "plan": p,
+                   "warnings": [], "raw": text, "error": ""}
+            source = "llm"
+        else:
+            llm_err = lr.get("error") or ""
+    if res is None:
+        # 降级：规则解析（**必须**让用户知道这不是大模型）
+        res = dict(NL.parse(text))
+        if llm.enabled():
+            source = "rule-degraded"
+            if res.get("ok"):
+                res.setdefault("warnings", []).append(
+                    "⚠ 这是**系统解析规则**的结果，**不是**云端大模型（大模型没解析成功）。")
+        else:
+            source = "rule"
+        if llm_err:
+            res["llm_error"] = llm_err
+    return _finalize(text, res, source)
 
 
 # ---------------------------------------------------------------- 对话（2026-10-10）
@@ -381,6 +531,11 @@ def api_chat(body: ChatIn, tok: str = Depends(require_control)):
                              "要说准就先说「盘点A区」：逐件拍照判色后**放回原处**（属运动，需要确认）。"}
         return {"ok": True, "mode": "plan", "parsed": parsed,
                 "source": parsed.get("source") or "rule"}
+    # ★★ 2026-10-10 用户口径（Q1②）：**理解了但做不到**（占用/禁放/摆不下）→
+    #   绝不掉进闲聊 —— 要把"无法实现 + 建议"摊给用户看（且不给执行按钮）。
+    if parsed.get("understood"):
+        return {"ok": True, "mode": "plan", "parsed": parsed,
+                "source": parsed.get("source") or ""}
     # 不是指令 → 闲聊/问答（history 只留 user/assistant 文本，最多 10 条）
     if llm.enabled():
         hist = [{"role": str(h.get("role") or ""), "content": str(h.get("content") or "")}
@@ -478,9 +633,9 @@ def api_exec(body: ExecIn, tok: str = Depends(require_control)):
         s = _resolve_src(plan.get("from") or {})
         if not s.get("ok"):
             raise HTTPException(400, detail=s["error"])
-        rp = {"action": "look_color",
-              "from": {"kind": "slot", "scope": s["slot"],
-                       "slot": s["slot"], "zh": s.get("zh")}}
+        rp = exec_plan(plan, {"action": "look_color",
+                              "from": {"kind": "slot", "scope": s["slot"],
+                                       "slot": s["slot"], "zh": s.get("zh")}})
     elif act == "move_one":
         s = _resolve_src(plan.get("from") or {})
         if not s.get("ok"):
@@ -488,9 +643,15 @@ def api_exec(body: ExecIn, tok: str = Depends(require_control)):
         d = _resolve_loc(plan.get("to") or {})
         if not d.get("ok"):
             raise HTTPException(400, detail="目标不可用：" + d["error"])
-        rp = {"action": "move_one",
-              "from": {"kind": "slot", "slot": s["slot"], "zh": s.get("zh")},
-              "to": {"kind": "slot", "slot": d["slot"], "zh": d.get("zh")}}
+        # ★ 2026-10-10 审计补漏：**禁取/禁放格对单件搬运同样有效**（以前只在批量里筛）
+        _ban = _ban_of(plan)
+        if s["slot"] in _ban["from"]:
+            raise HTTPException(400, detail="「%s」是禁取格，不能从它拿件" % s["slot"])
+        if d["slot"] in _ban["to"]:
+            raise HTTPException(400, detail="「%s」是禁放格，不能放到它" % d["slot"])
+        rp = exec_plan(plan, {"action": "move_one",
+                              "from": {"kind": "slot", "slot": s["slot"], "zh": s.get("zh")},
+                              "to": {"kind": "slot", "slot": d["slot"], "zh": d.get("zh")}})
     elif act == "move_quota":
         # ★★ 2026-10-09 新增：按颜色配额搬运（"3个红色，2个蓝色，1个绿色"）。
         #   校验放在**启动线程之前**（与其它动作同口径）：配额为空/目标写成具体格
@@ -501,11 +662,13 @@ def api_exec(body: ExecIn, tok: str = Depends(require_control)):
         dstq = plan.get("to") or {}
         if (dstq.get("kind") or "color_col") == "slot":
             raise HTTPException(400, detail="按颜色配额搬运要放到**颜色列**，不能指定某一个具体格")
-        rp = {"action": "move_quota",
-              "from": {"kind": "all", "zone": "A"},
-              "to": {"kind": "color_col", "zone": dstq.get("zone") or "B",
-                     "color": dstq.get("color")},
-              "quotas": quotas}
+        # ★★ 2026-10-10：**必须用 exec_plan 重建**（否则 placement/ban/on_invalid 会被丢掉，
+        #   现场报"「蓝」的摆法里已没有可用格"）。
+        rp = exec_plan(plan, {"action": "move_quota",
+                              "from": {"kind": "all", "zone": "A"},
+                              "to": {"kind": "color_col", "zone": dstq.get("zone") or "B",
+                                     "color": dstq.get("color")},
+                              "quotas": quotas})
         # 配额模式的候选是"运行时按占位表筛"的，这里只做点位齐备性校验
         cands = ["A%d" % i for i in range(1, 10)]
     elif act == "move_all":
@@ -531,11 +694,11 @@ def api_exec(body: ExecIn, tok: str = Depends(require_control)):
             fixed = dst.get("slot")
         else:
             fixed = None
-        rp = {"action": "move_all",
-              "from": {"kind": "zone", "zone": zsrc},
-              "to": {"kind": dk or "color_col", "zone": dst.get("zone") or "B",
-                     "color": dst.get("color"), "slot": fixed},
-              "shuffle": bool(plan.get("shuffle"))}
+        rp = exec_plan(plan, {"action": "move_all",
+                              "from": {"kind": "zone", "zone": zsrc},
+                              "to": {"kind": dk or "color_col", "zone": dst.get("zone") or "B",
+                                     "color": dst.get("color"), "slot": fixed},
+                              "shuffle": bool(plan.get("shuffle"))})
 
     pmap = _load_pmap()
     need = [x for x in (rp.get("from", {}).get("slot"),
@@ -679,10 +842,14 @@ def _start_job(rp: Dict, pmap: Dict[str, object], st: Dict, dry: bool, speed: in
     with _gate:
         _job["state"] = st
         _job["ctx"] = ctx
+        # ★ 两路气的"还在开"标记（异常/取消时兜底收掉，见 _run 的 finally）
+        _job["suck_on"] = False
+        _job["blow_on"] = False
         th = threading.Thread(target=_run, args=(ctx, rp, pmap, st, dry, speed),
                               name="ai", daemon=True)
         _job["thread"] = th
     th.start()
+    ctx.set_thread(th)      # ★ 绑定执行线程：让"卡死登记"能被 is_alive() 精确识别
     return ctx
 
 
@@ -731,7 +898,6 @@ def _run(ctx, plan: Dict, pmap: Dict[str, object], st: Dict, dry: bool,
     min_conf = 0.3
     stop_reason = ""
     phase = "done"
-    blow_on = False
     start = S.START_POINT
     # ★★ 逐格约束（2026-10-10 用户口径："某格不能拿 / 某格不能放"）—— 说到做到：
     #   ① 单件：源/目标命中禁格 → **直接拒绝**（不静默改成别的格）；
@@ -807,13 +973,20 @@ def _run(ctx, plan: Dict, pmap: Dict[str, object], st: Dict, dry: bool,
             if not quotas:
                 raise _Stop("配额为空：要说清每种颜色几件，例如「3个红色2个蓝色」", "规划")
             want_total = sum(quotas.values())
-            srcs = _occupied(["A%d" % i for i in range(1, 10)])
+            # ★ 2026-10-10 审计补漏：**禁取格在配额模式也要剔除**（以前只有批量筛了）
+            srcs = [s for s in _occupied(["A%d" % i for i in range(1, 10)])
+                    if s not in ban["from"]]
             if not srcs:
                 raise _Stop("A 区没有可取的件（按本页占位表判断）", "取料")
             _set_state(st, total=want_total)
+            # ★★ 2026-10-10：**解析阶段**解出来的摆法（同色成行/成列，跳过已有料与禁放格）——
+            #   执行就用这一份，"回显的摆法"与"真正执行的摆法"是同一份（plan_id 绑定）。
+            slots_by_color = {c: list(v) for c, v in (plan.get("placement") or {}).items()}
+            continue_inv = (plan.get("on_invalid") == "continue")
             done = 0
             # ★ 上限 = A 区当前可取的件数：某颜色不够时**最多试完全部**，
-            #   不会无限试下去（避免"永远等下去"）。
+            #   不会无限试下去（避免"永远等下去"）；也不是"固定的 counts 之和"次数
+            #   —— 遇到无效色（黑）放回后会继续试下一件。
             for s in srcs:
                 if sum(quotas.values()) <= 0:
                     break
@@ -823,7 +996,8 @@ def _run(ctx, plan: Dict, pmap: Dict[str, object], st: Dict, dry: bool,
                 _set_state(st, piece=done + 1, src=s)
                 before = dict(quotas)
                 _piece(ctx, pmap, st, dry, s, None, False, speed, min_conf,
-                       quotas=quotas, skip_to=ban["to"])   # ★ 跳过禁放格（2026-10-10）
+                       quotas=quotas, skip_to=ban["to"],
+                       plan_slots=slots_by_color, continue_on_invalid=continue_inv)
                 if sum(quotas.values()) < sum(before.values()):
                     done += 1
             _set_state(st, piece=done)
@@ -851,38 +1025,66 @@ def _run(ctx, plan: Dict, pmap: Dict[str, object], st: Dict, dry: bool,
         log.exception("AI 执行异常")
         stop_reason, phase = "内部异常：%s" % str(e)[:150], "error"
     finally:
-        if blow_on and not dry:
-            try:
-                _air(ctx, "unblow", False, "异常·停止放气", st)
-            except Exception:  # noqa: BLE001
-                pass
-        _set_state(st, stage="结束", error=stop_reason, finished=True,
-                   ok=(phase == "done"), phase=phase)
-        # ★★ 2026-10-09 接管接力：本任务已收尾（含"取消 → 回起点"），
-        #   把排队的新指令接上。放在 finally 的最后一行：
-        #   此刻"回起点"已经走完，是启动新任务唯一可靠的时刻。
-        _relay_pending()
+        # ★★ 2026-10-10 现场死机修复（用户："程序正在执行中、但没跑代码；就绪和取消都成功，
+        #   却无法下达指令"）—— **注销运行登记必须最先做，且不可被跳过**。
+        #   根因：原来把「接管接力」（会 new_run + 起线程 + 校验 pending）排在 `ctx.finish()`
+        #   **前面**。它一旦抛异常，`ctx.finish()` 永远执行不到 →
+        #   `_RUN_ACTIVE` 与本 run 的 `running=True` 双双残留 →
+        #   `_reject_if_run_active()` **永久**拒绝所有手动下发；而 `/ready`、`/ready/cancel`
+        #   根本不看 `_RUN_ACTIVE`，所以"就绪和取消都成功"。三条现象**全部对上**。
+        #   现在：先 finish（释放登记），其余收尾统一兜在 try 里 —— 任一步失败都不影响
+        #   "锁已释放"这个事实（否则就是把人锁死）。
         ctx.finish(phase)
-        emit_event("ai", "info" if phase == "done" else "warn", "ai.stop",
-                   "AI 执行%s%s" % ("完成" if phase == "done" else "结束",
-                                   "" if phase == "done" else "：" + stop_reason),
-                   {"phase": phase, "reason": stop_reason}, actor="control")
+        try:
+            # ★★ 2026-10-10：异常/取消时**收掉两路气**（与分拣同口径："不许带着负压停在半路"）。
+            if not dry:
+                if _job.get("blow_on"):
+                    try:
+                        _air(ctx, "unblow", False, "异常·停止放气", st)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _job["blow_on"] = False
+                if _job.get("suck_on"):
+                    try:
+                        _air(ctx, "release", False, "异常·停止吸", st)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _job["suck_on"] = False
+            _set_state(st, stage="结束", error=stop_reason, finished=True,
+                       ok=(phase == "done"), phase=phase)
+            # ★★ 2026-10-09 接管接力：本任务已收尾（含"取消 → 回起点"），
+            #   把排队的新指令接上。此刻"回起点"已经走完，是启动新任务唯一可靠的时刻。
+            _relay_pending()
+            emit_event("ai", "info" if phase == "done" else "warn", "ai.stop",
+                       "AI 执行%s%s" % ("完成" if phase == "done" else "结束",
+                                       "" if phase == "done" else "：" + stop_reason),
+                       {"phase": phase, "reason": stop_reason}, actor="control")
+        except Exception:  # noqa: BLE001
+            log.exception("AI 执行收尾异常（运行登记已注销，不影响后续指令）")
 
 
 def _piece(ctx, pmap, st, dry, src: str, dst: Optional[str], look_only: bool,
            speed: int, min_conf: float,
            prefer_color: Optional[str] = None, zone: str = "B",
            quotas: Optional[Dict[str, int]] = None,
-           skip_to: Optional[List[str]] = None) -> None:
+           skip_to: Optional[List[str]] = None,
+           plan_slots: Optional[Dict[str, List[str]]] = None,
+           continue_on_invalid: bool = False) -> None:
     """取一件 → 判色 → 放到目标（或放回原格 / 按颜色列选位 / **按配额决定放还是放回**）。
 
     ★ 与分拣引擎**同一套原语**（`_move/_air/_capture` 来自 api/sorting.py），
       所以"写目标 + 触发位""吸/停止吸/放/停止放""抓帧投票"只有一处实现。
     ★ `quotas`（用户口径 2026-10-09："全部要学会解析，**如果没有检测到放回原位**"）：
       传了它就是**按颜色配额**模式 —— 判色后看该颜色还缺不缺：
-        · 还缺 → 放该颜色列，配额减一
+        · 还缺 → 放该颜色对应的格，配额减一
         · 不缺 / **没判出颜色** → **放回原位**（不占 B 区、不消耗配额）
       配额是**原地修改**的（调用方持有同一份 dict，据此判断是否收工）。
+    ★ `plan_slots`（2026-10-10 用户口径："按同颜色一行或者一列摆放"）：
+      **解析阶段**由 `services/placement.solve()` 解出来的"颜色→格位队列"（同色成行/成列、
+      跳过已有料与禁放格）。传了它就**按解落位**，不再走写死的颜色列 ——
+      每放一件从该色的队首取一格（原地 pop，调用方持有的同一份）。
+    ★ `continue_on_invalid`（用户口径："**如果出现无效颜色放回原位继续**"）：
+      True = 判不出色/黑色时**放回原格后继续**（不消耗配额、不整轮停）；False = 旧口径（放回后停）。
     """
     cam = S.CAMERA_POINT
     judge = (not dry) and real_write_enabled()
@@ -892,22 +1094,40 @@ def _piece(ctx, pmap, st, dry, src: str, dst: Optional[str], look_only: bool,
     _move(ctx, pmap, src + "上", speed, dry, "取料·上方", st)
     _move(ctx, pmap, src, speed, dry, "取料·下落", st)
     _air(ctx, "suck", dry, "取料·吸", st)
+    _job["suck_on"] = True
     _set_state(st, holding=True)
+    # ★★ 2026-10-10 用户口径："吸住要一直吸住，到放料时才停止吸住"。
+    #   两处修正（与分拣引擎同口径 —— 分拣早已这样，本链路漏了）：
+    #     ① 吸上后**先停 SUCK_HOLD_MS** 等真空吸牢再抬（以前没有这一步）；
+    #     ② **抬起 / 送检 / 停顿判色 全程保持吸气** —— 以前"抬起后立刻停止吸"，
+    #        件只靠杯内残余负压吊着飞一路，现场表现就是"一吸住就松了"。
+    if SUCK_HOLD_MS > 0:
+        ctx.sleep(SUCK_HOLD_MS / 1000.0)
     _move(ctx, pmap, src + "上", speed, dry, "抬起", st)
-    _air(ctx, "release", dry, "停止吸", st)
     _move(ctx, pmap, cam, speed, dry, "送检", st)
     _set_state(st, stage="停顿")
-    if ctx.sleep(1.0):                      # C 区停顿 1 秒（与分拣同口径）
+    if ctx.sleep(CAM_DWELL_S):              # C 区停留（与分拣 dwell_ms 默认同口径）
         raise _Stop("已被停止", "判色")
+    invalid = False
+    invalid_reason = ""
     if not judge:
         # 空跑 / 双闸未开：不判色（方块不会到 C 区）—— 与分拣同一条修正口径
         _set_state(st, stage="空跑·未判色", color="", conf=0.0, sim_color=True)
     else:
         _set_state(st, stage="判色")
-        v = _capture(ctx, 3, min_conf, "判色", st)
+        # ★★ 2026-10-10 用户口径："只要用户说的颜色是有效颜色，用户没提到的颜色是无效颜色"。
+        #   这里传**全部 7 个可识别色**给投票器 → 检测器**如实报出真实颜色**（含橙/黄/青/紫）；
+        #   "放走 / 放回"交给下面的配额与摆法决定（用户没提到的颜色 → 配额为 0 → **放回原位**），
+        #   且报的是**真实色名**（不是"无法识别"）—— 现场才分得清"是没识别到"还是"没要这个色"。
+        v = _capture(ctx, 3, min_conf, "判色", st, valid_colors=S.RECOGNIZED_COLORS)
         _set_state(st, color=v["color"], conf=v["conf"])
         if not v["ok"]:
-            raise _Stop("检测不到（%s）" % v["reason"], "判色")
+            # ★★ 2026-10-10 用户口径："如果出现无效颜色放回原位继续"。
+            #   不再**就地抛停**（那样件会掉在 C 区/半路，现场满地找件）——
+            #   统一走"**先放回原格**"，再由 continue_on_invalid 决定接着干还是收工。
+            invalid = True
+            invalid_reason = str(v.get("reason") or "")
+            _set_state(st, stage="无法识别·放回原位", suspect_pick=False)
     color = st.get("color") or ""
 
     # ---- 目标解析 ----
@@ -915,13 +1135,30 @@ def _piece(ctx, pmap, st, dry, src: str, dst: Optional[str], look_only: bool,
     #   列内**自动选槽**时一律跳过；用户口径里"禁止摆放"也含"这格已经有物体了"的意思 ——
     #   那一半由 `_occ["B"]` 占位表覆盖（已放过的格本就不会再被选中）。
     _skip = set(skip_to or ())
-    if quotas is not None:
+    if invalid:
+        # ★ 无效色（黑/判不出）：**放回原格**（下面统一走落料流程），**不消耗配额**。
+        tgt_slot, mode = src, "back"
+    elif quotas is not None:
         # ★★ 按颜色配额（"3个红色，2个蓝色，1个绿色"）：
         #   判色结果说了算 —— 该颜色还缺就放走，不缺或**没判出颜色**就放回原位。
         #   ⚠ 放到 B 区还是放回 A 区，走的是**同一条**已有路径（place / back），
         #     没有新增任何运动原语。
         want = int(quotas.get(color) or 0) if color else 0
-        if want > 0:
+        if want > 0 and plan_slots is not None:
+            # ★★ 2026-10-10：按**解析阶段解出来的摆法**落位（同色成行/成列），
+            #   不再走写死的"颜色→列"；并且**按队列原地消耗**（放一件少一格）。
+            #   ⚠ 以前写的是 `list(plan_slots.get(color))` —— 复制一份再 pop，
+            #     pop 不留痕 ⇒ 同一色多件会**全落在同一格**（现场就是"叠在一起"）。
+            cands = plan_slots.get(color)
+            if cands is None:
+                cands = []
+            while cands and _occ["B"].get(cands[0]):   # 该格已被占（已有料等）→ 顺延
+                cands.pop(0)
+            if not cands:
+                raise _Stop("「%s」的摆法里已没有可用格（可能被已有料/禁放占掉）" % color, "选槽")
+            quotas[color] = want - 1          # 真放才扣配额
+            tgt_slot, mode = cands.pop(0), "place"
+        elif want > 0:
             quotas[color] = want - 1
             cands = [s for s in NL.color_column_slots(color, zone)
                      if not _occ["B"].get(s) and s not in _skip]
@@ -951,11 +1188,17 @@ def _piece(ctx, pmap, st, dry, src: str, dst: Optional[str], look_only: bool,
 
     _set_state(st, target=tgt_slot, stage="放料·正上方")
     _move(ctx, pmap, tgt_slot + "上", speed, dry, "放料·正上方", st)
+    # ★ 工艺顺序（与分拣同）：到放料位 → ① 停止吸 ② 放气 ③ 回起点后停止放气。
+    #   吸气一路保持到**这里**才断（用户口径："到放料时才停止吸住"）。
+    _air(ctx, "release", dry, "放料·停止吸", st)
+    _job["suck_on"] = False
     _air(ctx, "blow", dry, "放料·放气", st)
+    _job["blow_on"] = True
     _set_state(st, holding=False)
     # 回起点后再停吹（与分拣用户口径一致）
     _move(ctx, pmap, S.START_POINT, speed, dry, "回起点", st)
     _air(ctx, "unblow", dry, "停止放气", st)
+    _job["blow_on"] = False
 
     # ---- 占位表更新（**按本页口径**，见模块头）----
     if mode == "place" and not dry:
@@ -967,3 +1210,17 @@ def _piece(ctx, pmap, st, dry, src: str, dst: Optional[str], look_only: bool,
                                     ("颜色 %s" % color) if color else "未判色"),
                {"src": src, "dst": tgt_slot, "color": color, "mode": mode,
                 "dry_run": dry}, actor="control")
+
+    # ---- 无效色（黑/判不出）：已放回原格，这里决定"继续"还是"收工" ----
+    if invalid:
+        if continue_on_invalid:
+            # ★ 用户口径："如果出现无效颜色放回原位继续" —— 不消耗配额，去试下一件。
+            #   循环上限是"A 区当前可取的件数"（不是固定次数），所以 1/2/3 个黑都只是多试几次。
+            emit_event("ai", "warn", "ai.piece_invalid",
+                       "无效颜色（%s）→ 已放回原格 %s，继续下一件" % (invalid_reason, src),
+                       {"src": src, "reason": invalid_reason}, actor="control")
+            _set_state(st, stage="无效色·已放回，继续", color="", conf=0.0,
+                       holding=False, target="")
+            return
+        # 旧口径：放回原格后**整轮停**（不再像以前那样就地抛 —— 件会掉在 C 区）
+        raise _Stop("颜色无法识别（%s），已放回原位 %s" % (invalid_reason, src), "判色")

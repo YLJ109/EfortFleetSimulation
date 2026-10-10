@@ -36,6 +36,16 @@ INTENTS = ("look_color", "move_one", "move_all", "move_quota", "sorting", "estop
 # 不支持/需要拒绝的模糊词（速度只认右上角那一份）
 VAGUE_SPEED = ("快一点", "快点", "慢一点", "慢点", "加速", "减速", "全速", "高速", "低速")
 
+# ★ 2026-10-10：急停的**安全直达**判据（见 ai._parse_to_plan 第 0 步）。
+#   用户要求"每句话必须大模型推理"，但**急停不能等网络** —— 这是唯一被允许绕过
+#   大模型的例外，且会在回显里**显式标注**"安全直达"，不冒名成"大模型解析"。
+_ESTOP_RE = re.compile(r"急停|紧急停止|紧急制动|立刻急停|马上急停")
+
+
+def is_estop(text: str) -> bool:
+    """用户是否**明确要求急停**（安全直达用；软停「停下/停止」不算）。"""
+    return bool(_ESTOP_RE.search(text or ""))
+
 
 def _cn2int(s: str) -> Optional[int]:
     """'1' / '一' / '两' → int；解析不出返回 None。"""
@@ -109,7 +119,10 @@ _QUOTA_RE = re.compile(
 #     A4不能拿 · A5不能放 · B6不能放 · B5、B9禁止摆放物体 · B5和B9不能放 · 不要拿A4
 _SLOT_RE = re.compile(r"([ABab])\s*-?\s*([1-9])(?![0-9])")
 _SLOT_BAD_RE = re.compile(r"([A-Za-z])\s*[-]?\s*([0-9]{1,2})")
-_BAN_WORD_RE = re.compile(r"不能|不可以|不要|不许|不准|禁止|别")
+_BAN_WORD_RE = re.compile(r"不能|不可以|不要|不许|不准|禁止|别|已有|已经有")
+# ★ "已有(料/物体)" = 这一格**已经放着东西** → 与"禁放"同效，但语义不同：
+#   回显要说"按已有料处理"（用户口径 2026-10-10："B5,B9已有摆放物体"）。
+_HAVE_WORD_RE = re.compile(r"已有|已经有")
 _BAN_PUT_KW = re.compile(r"放|摆")
 _BAN_TAKE_KW = re.compile(r"拿|取|动|碰")
 _CHUNK_RE = re.compile(r"[。；;！!\n]+")
@@ -119,31 +132,67 @@ _PART_RE = re.compile(r"[，,、和与及]+")
 #   把正常的落料格 B1 误判成"禁止放"。
 _BARE_SLOT_RE = re.compile(r"[\sABab0-9\-、,，和与及]*")
 
+# ---------------------------------------------------------------- 摆放方式 & 无效色处置
+# ★ 2026-10-10 用户口径："按同颜色一行或者一列摆放" / "如果出现无效颜色放回原位继续"。
+#   这两件事以前**规则层根本没有概念** → 现在解析成结构化字段（约束），
+#   具体摆哪几格由 services/placement.py 的求解器算（**不写死颜色→列**）。
+_PAT_ROW_OR_COL = re.compile(r"一行或者一列|一行或一列|一行一列|同行同列|同色.*(一行|一列)"
+                             r"|成行成列|成行或者成列|横竖|一行.{0,4}一列")
+_PAT_ROW = re.compile(r"同一行|排成一行|摆成一行|放成一行|按行摆|一行摆放|一行摆")
+_PAT_COL = re.compile(r"同一列|排成一列|摆成一列|放成一列|按列摆|一列摆放|一列摆")
+# 无效色（判不出色/黑色）之后：接着干还是停
+_ON_INVALID_CONT = re.compile(r"继续|接着|不要停|别停|放回.{0,6}继续")
+
+# 摆放方式的中文人话（回显用；与 services/placement.py 的 PATTERN_ZH 同口径）
+_PATTERN_ZH = {"row_or_col": "同行或同列", "row": "同一行", "col": "同一列",
+               "any": "按颜色列（默认）"}
+
+
+def _scan_pattern(text: str) -> str:
+    """摆放方式：row_or_col / row / col / any（any = 不干预，沿用既定颜色列）。"""
+    if _PAT_ROW_OR_COL.search(text or ""):
+        return "row_or_col"
+    if _PAT_ROW.search(text or ""):
+        return "row"
+    if _PAT_COL.search(text or ""):
+        return "col"
+    return "any"
+
 
 def _scan_bans(text: str):
-    """扫出逐格约束 → ({"from":[...],"to":[...]}, 剥掉约束后的原文, [报错]).
+    """扫出逐格约束 → ({"from":[...],"to":[...]}, 剥掉约束后的原文, [报错], [已有料的格]).
 
     方向判定：段里有「放/摆」→ 禁放(to)；有「拿/取/动」→ 禁取(from)；
-    只有"禁止/不能"没有动词 → **默认禁放**（最常见，且禁放比禁取更安全）。
+    只有"禁止/不能/已有"没有动词 → **默认禁放**（最常见，且禁放比禁取更安全）。
     "先枚举后动词"（B5、B9禁止摆放物体）靠**裸格小段继承后面最近的方向**实现。
+
+    ★ 第 4 个返回值 `have`：说"**已有**(料/物体)"的那些格 —— 与"禁止放"同样不可落料，
+      但回显要写成"按已有料处理"（两种原因的现场处置完全不同）。
     """
     bans: Dict[str, list] = {"from": [], "to": []}
     bad: list = []
+    have: list = []
     keep_chunks = []
     for chunk in _CHUNK_RE.split(text or ""):
         parts = [p for p in _PART_RE.split(chunk) if p.strip()]
         if not parts:
             continue
         dirs = []
+        haves = []
         for p in parts:
-            if not _BAN_WORD_RE.search(p):
-                dirs.append("")
-            elif _BAN_PUT_KW.search(p):
-                dirs.append("to")
-            elif _BAN_TAKE_KW.search(p):
-                dirs.append("from")
-            else:
-                dirs.append("to")            # 只说"禁止"→按禁放
+            d = ""
+            if _BAN_WORD_RE.search(p):
+                if _BAN_PUT_KW.search(p):
+                    d = "to"
+                elif _BAN_TAKE_KW.search(p):
+                    d = "from"
+                else:
+                    # 只说"禁止/不能/已有"、没有动词 → 默认禁放（禁放比禁取更安全）。
+                    # ★ 但**必须这一小段真的提到某个格**才认 —— 否则像
+                    #   "A区已有几个盒子"这种查询会被当成约束整段吃掉（连带槽位一起消失）。
+                    d = "to" if _SLOT_RE.search(p) else ""
+            dirs.append(d)
+            haves.append(bool(d == "to" and _HAVE_WORD_RE.search(p)))
         # 裸格小段继承**后面**最近一个有方向的小段（先枚举、后动词）
         for i, p in enumerate(parts):
             if dirs[i]:
@@ -153,8 +202,9 @@ def _scan_bans(text: str):
             for j in range(i + 1, len(parts)):
                 if dirs[j]:
                     dirs[i] = dirs[j]
+                    haves[i] = haves[j]        # ★ 方向与"已有料"语义一起继承
                     break
-        for p, d in zip(parts, dirs):
+        for k, (p, d) in enumerate(zip(parts, dirs)):
             if not d:
                 keep_chunks.append(p)
                 continue
@@ -163,6 +213,8 @@ def _scan_bans(text: str):
                 s = m.group(1).upper() + m.group(2)
                 if s not in bans[d]:
                     bans[d].append(s)
+                if d == "to" and haves[k] and s not in have:
+                    have.append(s)
                 hit += 1
             # ★ 说了"不能放 B0"这种非法格号 → 明说，不静默忽略
             if not hit:
@@ -170,7 +222,7 @@ def _scan_bans(text: str):
                 if bm:
                     bad.append("禁放/禁取的格号看不懂：「%s%s」——只支持 A1–A9、B1–B9"
                                % (bm.group(1).upper(), bm.group(2)))
-    return bans, "，".join(keep_chunks), bad
+    return bans, "，".join(keep_chunks), bad, have
 
 
 def _parse_quotas(text: str) -> Dict[str, int]:
@@ -275,12 +327,15 @@ def parse(text: str) -> Dict:
     # ---- ★ 逐格约束（禁取/禁放）**最先扫**，并从原文剥掉 ----
     #   为什么最先：约束短语里的格号（"B6不能放"）会被后面的"放到哪里"解析抢走，
     #   把目标解析歪（把 B6 当成了落料格）。先剥掉，下游就干净了。
-    bans, cleaned, ban_bad = _scan_bans(raw)
+    bans, cleaned, ban_bad, have = _scan_bans(raw)
     if ban_bad:
         out["error"] = ban_bad[0]
         return out
     if bans["from"] or bans["to"]:
         raw = cleaned or raw
+    if have:
+        # ★ "已有(料/物体)" 与"禁止放"同效，但要分开记 —— 回显/处置方式不同。
+        bans["have"] = list(have)
     bk = {"ban": bans} if (bans["from"] or bans["to"]) else {}
     if bk:
         # ★ 约束必须出现在回显里 —— 用户要能一眼看到"系统真听懂了哪个格不能动/不能放"
@@ -291,6 +346,9 @@ def parse(text: str) -> Dict:
             _bits.append("不能放料：" + "、".join(bans["to"]))
         out["warnings"].append("已记下逐格约束 —— " + "；".join(_bits) +
                                "（仅在**本次指令内**有效）")
+    if have:
+        out["warnings"].append("这些格**已有料**，不会再往上放（按已有料处理）："
+                               + "、".join(have))
 
     # ---- 模糊速度词：明确拒绝，而不是"帮忙猜一个速度" ----
     for w in VAGUE_SPEED:
@@ -304,7 +362,7 @@ def parse(text: str) -> Dict:
     #   "停下/停止/别动" 一律走**软停**（停止执行：当前动作结束后停 + 回起点），
     #   因为急停会断伺服、手臂可能因重力下沉 —— 把客气的"停下"当急停是危险的。
     #   回显时必须把"我将【停止执行】（不是急停）"写清楚，让操作员自己再决定。
-    if re.search(r"急停|紧急停止|紧急制动|立刻急停|马上急停", raw):
+    if is_estop(raw):
         out.update(ok=True, intent="estop", plan={"action": "estop"})
         return out
 
@@ -343,17 +401,24 @@ def parse(text: str) -> Dict:
         return out
 
     # ---- 分拣流程控制 ----
-    if re.search(r"停止|停下|停住|别动|中断|取消", raw) and not re.search(r"放到|搬到|放在|摆放", raw):
-        out.update(ok=True, intent="sorting", plan={"action": "stop"})
+    # ★ 2026-10-10 两处修复：
+    #   ① **形状统一**：plan 一律 {"action":"sorting","op":<start|stop|pause|resume>}
+    #      —— 与 llm.sanitize / ai._echo / ai._run 同口径。以前写成 {"action":"resume"}，
+    #      于是 AI 页回显变 "?"、点执行还会报"未知的流程操作"（现场截图的那条）。
+    #   ② **不再抢搬运句里的"继续"**：像"…不需要的放回原位继续！"是**搬运指令的从句**，
+    #      不是"继续分拣"。所以控制词必须整句里没有搬运语（放到/搬到/放在/摆放）。
+    _has_move_phrase = re.search(r"放到|搬到|放在|摆放", raw)
+    if not _has_move_phrase and re.search(r"停止|停下|停住|别动|中断|取消", raw):
+        out.update(ok=True, intent="sorting", plan={"action": "sorting", "op": "stop"})
         return out
-    if re.search(r"暂停|先停一下", raw):
-        out.update(ok=True, intent="sorting", plan={"action": "pause"})
+    if not _has_move_phrase and re.search(r"暂停|先停一下", raw):
+        out.update(ok=True, intent="sorting", plan={"action": "sorting", "op": "pause"})
         return out
-    if re.search(r"继续|接着|恢复", raw):
-        out.update(ok=True, intent="sorting", plan={"action": "resume"})
+    if not _has_move_phrase and re.search(r"继续|接着|恢复", raw):
+        out.update(ok=True, intent="sorting", plan={"action": "sorting", "op": "resume"})
         return out
-    if re.search(r"开始分拣|执行分拣|分拣一下|开始拣|跑分拣", raw):
-        out.update(ok=True, intent="sorting", plan={"action": "start"})
+    if not _has_move_phrase and re.search(r"开始分拣|执行分拣|分拣一下|开始拣|跑分拣", raw):
+        out.update(ok=True, intent="sorting", plan={"action": "sorting", "op": "start"})
         return out
 
     # ---- 看颜色 ----
@@ -392,10 +457,19 @@ def parse(text: str) -> Dict:
                 out["error"] = ("按颜色配额搬运要放到**颜色列**（例如「搬到B区」或「搬到B区红列」）——"
                                 "件是什么颜色要判色后才知道，没法指定某一个具体格")
                 return out
+            pat = _scan_pattern(raw)
+            on_invalid = "continue" if _ON_INVALID_CONT.search(raw) else "stop"
             out.update(ok=True, intent="move_quota",
                        plan={"action": "move_quota",
                              "from": {"kind": "all", "zone": "A"},
-                             "to": dst_q, "quotas": quotas, **bk})
+                             "to": dst_q, "quotas": quotas,
+                             "pattern": pat, "on_invalid": on_invalid, **bk})
+            if pat != "any":
+                out["warnings"].append("摆放方式：%s（同色的件都落在同一条线上；"
+                                       "具体摆哪几格由约束求解器算，不写死颜色列）"
+                                       % _PATTERN_ZH.get(pat, pat))
+            if on_invalid == "continue":
+                out["warnings"].append("判不出色/黑色 → 放回原格后继续（不再整轮停）")
             out["warnings"].append(
                 "按颜色配额取件：A 区颜色**事先未知**，会逐件送到 C 区判色；"
                 "不需要的件**放回原位**。若 A 区该颜色不够，会试到没有可取件为止。")
@@ -416,7 +490,9 @@ def parse(text: str) -> Dict:
         if src["kind"] == "all":
             out.update(ok=True, intent="move_all",
                        plan={"action": "move_all", "from": src, "to": dst,
-                             "shuffle": shuffle, **bk})
+                             "shuffle": shuffle,
+                             "on_invalid": ("continue" if _ON_INVALID_CONT.search(raw)
+                                            else "stop"), **bk})
             out["warnings"].append("批量搬运：会逐件执行，超过安全件数上限需再确认一次")
             return out
         if src["kind"] in ("slot", "color_col"):

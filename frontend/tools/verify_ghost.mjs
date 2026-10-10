@@ -86,7 +86,12 @@ if (ee) {
     ghost.root.updateMatrixWorld(true);
     const inv = new THREE.Matrix4().copy(flange.matrixWorld).invert();
     const lb = new THREE.Box3().setFromObject(ee).applyMatrix4(inv);
-    ok("末端工具整体在法兰前方（z >= -0.005 m，未被埋进腕部）", lb.min.z >= -0.005,
+    // ★ 2026-10-10 更新（过期断言）：该断言写于"工具只往前伸"的旧吸盘版本。
+    //   现在的末端工具按用户口径改成**左右立板 + 6 个吸盘**（外侧后上/后下/前中，
+    //   开口朝 ±x）——立板本身跨在法兰平面两侧，**按设计会略微伸到法兰后方**（约 -0.033m）。
+    //   所以判据改成"别深埋进腕部筒身"（-0.06m 以内），而不是"完全在法兰前方"。
+    ok("末端工具未被埋进腕部（z >= -0.06 m；侧板吸盘按设计可到约 -0.033）",
+       lb.min.z >= -0.06,
       "min.z=" + lb.min.z.toFixed(4));
     // ★★ 2026-10-08 现场三改的钉子（用户："J6工具有点太大 / 吸盘要向前一点 /
     //    J6工具没有连接在J6上，还有个什么间隙"）

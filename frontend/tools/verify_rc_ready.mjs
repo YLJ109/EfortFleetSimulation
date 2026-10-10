@@ -6,7 +6,8 @@
 //     一键就绪只走 apiControl("/ready")（写寄存器必须带控制令牌）。
 //     ★ 坑27 守卫：apiUrl/apiControl 会自动补 /api 前缀，路径绝不能再带 /api。
 //  B. 档位声明不另开通道：claimMode 必须委托 link.claimMode()。
-//  C. 卡片挂载：点位执行页挂载、程序执行页改用就绪盒读 rc.ready；状态行七项齐全；
+//  C. 卡片挂载：就绪卡统一在底部「真机链路」浮层（LinkPanel 内嵌 RcReadyCard，App 挂 LinkPanel），
+//     点位页不再各自挂载；程序执行页改用就绪盒读 rc.ready；状态行七项齐全；
 //     就绪按钮为"绿(一键就绪)/红(取消就绪)"单按钮；禁用门控在 readyDisabled 计算属性里，
 //     必须覆盖「无令牌或机器人未连接（canControl）/ 双闸未开(realEnabled) / 触发位占用(jogTrig) / 执行中(busy)」。
 //  D. 图标名必须真实存在于 Icon.vue（动态 name 拼错只会静默空白）。
@@ -34,6 +35,8 @@ const store = read("src/stores/rcReady.js");
 const card = read("src/components/RcReadyCard.vue");
 const pointView = read("src/components/PointExecView.vue");
 const progView = read("src/components/ProgramExecView.vue");
+const linkPanel = read("src/components/LinkPanel.vue");
+const app = read("src/App.vue");
 const icons = read("src/components/Icon.vue");
 const robotApi = read("../backend/app/api/robot.py");
 const rcReady = read("../backend/app/services/rc_ready.py");
@@ -63,8 +66,15 @@ ok("claimMode 委托 link.claimMode（档位声明绝不另写一份）",
   && /link\.claimMode\(mode\)/.test(store));
 
 // ---------- C. 卡片挂载与门控 ----------
-ok("点位执行页挂载 RcReadyCard", pointView.includes("<RcReadyCard />"));
-ok("点位执行页 import RcReadyCard", pointView.includes("import RcReadyCard from"));
+// ★ 架构变更（2026-10-10）：就绪卡不再由各页各自挂载。原先只有「点位执行」「分拣」两页的
+//   可折叠右栏里有它 → 现场反映"别的页面也没有一键就绪"。现统一收进底部「真机链路」浮层：
+//   LinkPanel 内嵌 RcReadyCard，App 提供切换按钮 + #bottom-zone —— 任何页面都能点。
+ok("就绪卡由底部「真机链路」浮层统一挂载（LinkPanel 内嵌 RcReadyCard）",
+  linkPanel.includes("import RcReadyCard from") && linkPanel.includes("<RcReadyCard />"));
+ok("App 底栏提供「真机链路」切换按钮并挂载 LinkPanel",
+  app.includes("import LinkPanel from") && app.includes("<LinkPanel") && app.includes("bottom-zone"));
+ok("点位执行页不再各自挂载 RcReadyCard（已收进底栏浮层，避免出现第二份）",
+  !pointView.includes("<RcReadyCard />") && !pointView.includes("import RcReadyCard from"));
 // ★ 程序执行页已按现场要求把「真机链路卡 + 控制权限卡」合成一个就绪提示盒：
 //   不再挂 RcReadyCard，只读 useRcReadyStore().ready 给出一句结论（见 ProgramExecView）。
 ok("程序执行页不再挂 RcReadyCard（改用就绪提示盒）", !progView.includes("<RcReadyCard />"));
@@ -102,12 +112,22 @@ ok("取消就绪会一并伺服下电（cancelReady(true)）",
 //   「取消就绪」曾有两个入口而行为不同 —— 就绪卡下电、底栏只停机 → 同名不同义，
 //   用户按下底栏那条后看到"伺服还是上电"。现统一为"停机 + 下电"，两条路径都必须下电，
 //   且不许再出现 cancelReady(false)（那会把伺服留在上电态）。
-const app = read("src/App.vue");
-ok("底栏「取消就绪」也走伺服下电（cancelReady(true)）", app.includes("rc.cancelReady(true)"));
+// ★ 2026-10-10：底栏那条「取消就绪/下电」按钮已收进就绪卡（bottom-zone 只留真机链路切换），
+//   于是**就绪卡成为唯一的取消/下电入口**。断言随之改为核对卡片内的下电与安全确认。
+ok("唯一的取消/下电入口就在就绪卡（底栏不再另放一条，避免同名不同义）",
+  card.includes("rc.cancelReady(true)") && !/cancelReady/.test(app));
 ok("全局不再存在 cancelReady(false)（避免同名不同义回归）",
   !/cancelReady\(\s*false\s*\)/.test(app) && !/cancelReady\(\s*false\s*\)/.test(card));
-ok("底栏下电前有安全确认（手臂可能因重力下沉）",
-  /onCancelReady[\s\S]{0,400}window\.confirm/.test(app));
+// ★★ 2026-10-10 用户口径：**一键就绪 / 取消就绪 合并为一颗按钮**，点击时先读实时伺服态。
+//   下电**不再弹确认框**（用户："不需要提示"）—— 断言随之从"必须有 confirm"反转为"必须没有"。
+ok("★★ 就绪/取消已合并为**单颗**按钮（只有一颗 ready-toggle + onReadyToggle）",
+  (card.match(/class="ready-toggle"/g) || []).length === 1
+  && /onReadyToggle/.test(card));
+ok("★★ 点击时**先读一次实时伺服状态**再决定（rc.load() → 看 servoOn）",
+  /async function onReadyToggle[\s\S]{0,400}?await rc\.load\(\)/.test(card)
+  && /async function onReadyToggle[\s\S]{0,700}?rc\.servoOn/.test(card));
+ok("★★ 下电**不再弹确认框**（2026-10-10 用户口径：不需要提示）",
+  !/window\.confirm/.test(card));
 // ── 清除报错（清控制器报警）：三页入口 + 只清报警不替就绪做上电/加载 ──
 const sortView = read("src/components/SortingView.vue");
 const execStore = read("src/stores/exec.js");

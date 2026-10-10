@@ -16,6 +16,12 @@ from __future__ import annotations
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------- 常量
+# ★★ 2026-10-10 七色重构（用户口径："只要用户说的颜色是有效颜色，用户没提到的颜色是无效颜色"）：
+#   · RECOGNIZED_COLORS = **检测器能报出的全部颜色名**（与 camera/vision_color.PALETTE_NAMES 对齐）；
+#   · COLORS            = **默认有效色集**（向后兼容：不分拣 7 色时仍是红/绿/蓝）；
+#   · `vote_color(..., valid_colors=...)` 可把"有效色"换成**用户这句话提到的颜色** ——
+#     调色板内但不在 valid_colors 的颜色 → 与黑一样按**无效色**处理（原路放回原位）。
+RECOGNIZED_COLORS: Tuple[str, ...] = ("红", "橙", "黄", "绿", "青", "蓝", "紫")
 COLORS: Tuple[str, str, str] = ("红", "绿", "蓝")
 COLOR_UNKNOWN = "未知"
 
@@ -36,6 +42,28 @@ COLUMN_CAPACITY = 3
 
 START_POINT = "开始/结束点"     # 一个点：开头去、结尾回、异常也回这里
 CAMERA_POINT = "C检测"
+
+# ---------------------------------------------------------------- 可选附加点（J6 双面示教）
+# ★★ 2026-10-10 用户口径：分拣页「点位示教」里要能**录入** J6 工装的「正面 / 反面」两个姿态，
+#   用于 J6 双面分拣 —— 用同一位置覆盖左右两侧，靠在这两个姿态之间切换实现。
+#   用户："两个都是一个参数，只是 J6 的" = 两姿态**只有 J6 不同**，其余 5 轴一样。
+# ★ 为什么单列成"可选附加点"而**不并入** expected_points()：
+#   expected_points() 是"开跑**必备**的 38 个点位"，
+#   `tests/test_sorting.py::test_expected_points_is_38` 把数量与清单钉死；
+#   这两个点**不是开跑必备**（体检允许缺失、不影响启动），只需**允许**被存点/到点/删除。
+#   所以示教白名单 = "38 必备 ∪ 这 2 个"，而 38 的清单与数量**一个字不动**。
+# ★ 名字必须与界面 `frontend/src/components/SortingView.vue` 的 extraSlots、
+#   以及 `api/sorting.py` 的 DUAL_FACE_FLIP_POINT 完全一致（回归钉）。
+OPTIONAL_EXTRA_POINTS: Tuple[str, ...] = ("J6正面", "J6反面")
+
+
+def allowed_teach_points() -> set:
+    """示教白名单集合 = 38 个必备点 ∪ 可选附加点（J6 正/反面）。
+
+    ★ 为什么要有这个并集：存点/到点/删除都按名字校验（见 api/sorting.py 的 _WHITELIST）。
+      J6 双面分拣要能录入这两个点，但又**不能**去动"38"这个数字（见 OPTIONAL_EXTRA_POINTS）。
+    """
+    return {p["name"] for p in expected_points()} | set(OPTIONAL_EXTRA_POINTS)
 
 
 def expected_points() -> List[Dict[str, str]]:
@@ -182,10 +210,17 @@ def fresh_run_state(dry_run: bool, max_pieces: int, judge: bool) -> Dict:
         "sim_color": False,
         # 3D 可视化用（按流程推断，非真空传感器实测）
         "holding": False, "suspect_pick": False,
+        # ★★ 2026-10-10 双面（一趟两件）新增：两个吸盘槽（下板 lower / 上板 upper），
+        #   各为 None 或 {"piece": 来源A格, "color": str, "ok": bool, "conf": float}。
+        #   ★ **现场没有真空传感器 → 槽里有什么全是"流程推断"**，界面/3D 必须如实标注。
+        #   ★ 初始两槽都是 None；`holding`（旧字段）仍为 False，**既有前端/3D 零回归**。
+        #     两槽内容由下面的 `face_slot_put/take` 与 `held_slots` 维护。
+        "hold_lower": None, "hold_upper": None,
     }
 
 
-def frame_color(f: Dict, min_conf: float = 0.0) -> Dict:
+def frame_color(f: Dict, min_conf: float = 0.0,
+                names: Sequence[str] = COLORS) -> Dict:
     """从**一帧** `/vision/detect` 的返回里取出"这一帧看到什么颜色"（归一化）。
 
     ★★ 2026-10-08 P0 修复（现场报"已停止：检测不到（无有效判定（全部未知或置信度低于 0.28））"）：
@@ -223,7 +258,7 @@ def frame_color(f: Dict, min_conf: float = 0.0) -> Dict:
                 cf = float(c.get("conf") or 0.0)
             except (TypeError, ValueError):
                 cf = 0.0
-            ok = 1 if (n in COLORS and cf >= float(min_conf)) else 0
+            ok = 1 if (n in names and cf >= float(min_conf)) else 0
             try:
                 ar = float((r or {}).get("area") or 0.0)
             except (TypeError, ValueError):
@@ -257,19 +292,26 @@ def frame_color(f: Dict, min_conf: float = 0.0) -> Dict:
 
 
 def vote_color(frames: Sequence[Dict], min_conf: float = 0.3,
-               accept_ratio: float = 0.5) -> Dict:
+               accept_ratio: float = 0.5,
+               valid_colors: Optional[Sequence[str]] = None) -> Dict:
     """多帧判定 → 采信结论。
 
     frames: 每次 `GET /vision/detect` 的**原始返回**（颜色在 results[i].color 里；
             也兼容 {"name","conf"} 扁平结构 —— 见 `frame_color`）。
     规则（现场口径："检测不到就直接停"，所以宁可判不出也不硬猜）：
-      1) 逐帧过滤：name 属于 红/绿/蓝 且 conf ≥ min_conf 才算"有效帧"；
+      1) 逐帧过滤：name 属于**有效色集**（默认 红/绿/蓝；可由 `valid_colors` 覆盖为
+         "用户这句话提到的颜色"）且 conf ≥ min_conf 才算"有效帧"；
       2) 取有效帧里出现次数最多的颜色为结论；
       3) 命中帧数须 ≥ ceil(帧数 × accept_ratio)（默认 3 帧取 2 帧多数）；
       4) 无有效帧 / 票数不够 / 票数并列 → 判"未知"（→ 由上层停止并回原点）。
 
     返回 {"ok", "color", "conf", "votes", "valid", "frames", "reason"}
     """
+    # ★★ 2026-10-10：**有效色集**（默认红/绿/蓝 → 向后兼容）。传"用户这句话提到的颜色"
+    #   即实现"没提到的颜色 = 无效色"：调色板内但不在此集合的颜色 → 与黑一样按无效处理。
+    #   ★ 去重但保序（重复项会让 winners 出现两条同色 → 误判"结论不一致"）。
+    valid_set: Tuple[str, ...] = (tuple(dict.fromkeys(valid_colors))
+                                  if valid_colors else COLORS)
     names: List[str] = []
     confs: List[float] = []
     # ★ 逐帧的"未判定原因"（服务端给什么就记什么：非矩形 / 太小 / 非红绿蓝三色 / 低置信…）
@@ -287,9 +329,9 @@ def vote_color(frames: Sequence[Dict], min_conf: float = 0.3,
             detail_frames.append({"color": "", "conf": 0.0, "ok": False,
                                   "reason": "无返回（相机服务未响应/未开启）"})
             continue
-        got = frame_color(f, min_conf)
-        valid = got["name"] in COLORS and got["conf"] >= float(min_conf)
-        detail_frames.append({"color": got["name"] if got["name"] in COLORS else "",
+        got = frame_color(f, min_conf, valid_set)
+        valid = got["name"] in valid_set and got["conf"] >= float(min_conf)
+        detail_frames.append({"color": got["name"] if got["name"] in valid_set else "",
                               "conf": round(float(got["conf"]), 3),
                               "ok": bool(valid),
                               "reason": "" if valid else (got["reason"] or "")})
@@ -301,7 +343,7 @@ def vote_color(frames: Sequence[Dict], min_conf: float = 0.3,
                                          % (got["conf"], float(min_conf))))
 
     total = len(frames or [])
-    votes = {c: names.count(c) for c in COLORS}
+    votes = {c: names.count(c) for c in valid_set}
     if not names:
         detail = "；".join(dict.fromkeys(why)) if why else "全部未知或置信度低于 %.2f" % min_conf
         return {"ok": False, "color": COLOR_UNKNOWN, "conf": 0.0, "votes": votes,
@@ -309,13 +351,13 @@ def vote_color(frames: Sequence[Dict], min_conf: float = 0.3,
                 "reason": "无有效判定（%s）" % detail}
 
     top = max(votes.values())
-    winners = [c for c in COLORS if votes[c] == top]
+    winners = [c for c in valid_set if votes[c] == top]
     need = max(1, int(round(total * float(accept_ratio) + 1e-9)))
     if len(winners) > 1:
         return {"ok": False, "color": COLOR_UNKNOWN, "conf": 0.0, "votes": votes,
                 "valid": len(names), "frames": total, "frame_detail": detail_frames,
                 "reason": "多帧结论不一致（%s）" % " / ".join(
-                    "%s %d 票" % (c, votes[c]) for c in COLORS)}
+                    "%s %d 票" % (c, votes[c]) for c in valid_set)}
     if top < need:
         return {"ok": False, "color": COLOR_UNKNOWN, "conf": 0.0, "votes": votes,
                 "valid": len(names), "frames": total, "frame_detail": detail_frames,
@@ -331,7 +373,146 @@ def vote_color(frames: Sequence[Dict], min_conf: float = 0.3,
             "best_frame": int(best), "frame_detail": detail_frames}
 
 
+# ---------------------------------------------------------------- 双面（一趟两件）
+# ★★ 2026-10-10 用户口径：J6 工装是**两块板**（下板 −x / 上板 +x），共用**同一路真空**，
+#   靠 **J6 翻转**用上另一面 → **一趟两面各吸一件**。
+#   送检时：**正面 2 帧 + 反面 2 帧 = 4 帧**，两面**各自投票**、给出**两个独立结论**
+#   （可以是不同颜色，也可以有一件是"无效色/判不出"）。
+#
+#   ⚠ 为什么不能用现在的 `vote_color(4帧)` 一把投：那样会把两件的颜色**混成一份结论**
+#     （多数票会把另一件吃掉），两件就分不清谁是谁了。
+#
+#   面序（固定，与"先吸哪件"一致）：
+#     slot 0 = "lower"  → **下板**（-x，先吸的那件；也是 3D 里挂在下方那件）
+#     slot 1 = "upper"  → **上板**（+x，J6 翻转后才吸的那件）
+#   详见 docs/方案-J6双面吸盘（一趟两件·靠J6翻转用另一面）.md
+FACE_SLOTS: Tuple[str, str] = ("lower", "upper")
+
+
+def vote_color_per_face(groups: Sequence[Sequence[Dict]], min_conf: float = 0.3,
+                        valid_colors: Optional[Sequence[str]] = None) -> List[Dict]:
+    """**按面**投票：每个面各传一组帧（各 2 帧），返回**逐面**的结论（顺序=传入顺序）。
+
+    ★ 语义：**只做"分组"，判据仍完全复用 `vote_color`** —— 不新增第二套投票逻辑，
+      避免出现"两套判色口径"（那正是本项目最忌讳的分叉）。
+
+    返回长度与 `groups` 相同；每项 = `vote_color` 的原样结果 + 一个 `"slot"` 字段
+    （`"lower"` = 下板/先吸的那件，`"upper"` = 上板/翻转后吸的那件）。
+    """
+    out: List[Dict] = []
+    for i, frames in enumerate(groups or []):
+        slot = FACE_SLOTS[i] if i < len(FACE_SLOTS) else ("face%d" % i)
+        v = vote_color(list(frames or []), min_conf, valid_colors=valid_colors)
+        v = dict(v)
+        v["slot"] = slot
+        out.append(v)
+    return out
+
+
+def both_faces_ok(verdicts: Sequence[Dict]) -> bool:
+    """两个面**都判出了有效色**才算 True（任一面无效 → False，供上层决定"先放有效的那件"）。"""
+    vs = list(verdicts or [])
+    return bool(vs) and all(bool(v.get("ok")) for v in vs)
+
+
+# ---------------------------------------------------------------- 双槽夹持（一趟两件）
+# ★★ 2026-10-10 用户口径："J6 工具上下两面都能吸" → 一趟两件时**同时**有两件在手上。
+#   但**现场没有真空传感器**，所以"哪面有件"只能是**流程推断**（界面/3D 必须如实标注）。
+#   · 槽位名沿用 FACE_SLOTS："lower"（下板，先吸）/ "upper"（上板，J6 翻转后吸）；
+#   · 每槽记 `{piece(来源A格), color, ok, conf}`；
+#   · `holding`（旧字段）**由两槽推导** —— 默认路径与既有前端/3D 零回归。
+_FACE_SLOT_KEYS: Dict[str, str] = {"lower": "hold_lower", "upper": "hold_upper"}
+
+
+def _face_key(slot) -> Optional[str]:
+    """把槽位标识（"lower"/"upper"，或 0/1 下标）归一成 state 里的键名；非法 → None。"""
+    if isinstance(slot, int) and not isinstance(slot, bool):
+        slot = FACE_SLOTS[slot] if 0 <= slot < len(FACE_SLOTS) else None
+    if slot is None:
+        return None
+    return _FACE_SLOT_KEYS.get(str(slot))
+
+
+def held_slots(state: Dict) -> List[str]:
+    """当前**有件的面**（按 FACE_SLOTS 顺序）：[] / ["lower"] / ["upper"] / ["lower","upper"]。"""
+    if not isinstance(state, dict):
+        return []
+    return [s for s in FACE_SLOTS if state.get(_FACE_SLOT_KEYS[s]) is not None]
+
+
+def face_slot_put(state: Dict, slot, **kw) -> Optional[Dict]:
+    """把一个工件登记到某一面的槽位（**纯逻辑**，不碰硬件）。
+
+    kw：`piece`（来源 A 格）/ `color` / `ok` / `conf`（缺省 None / "" / False / 0.0）。
+    ★ 重复 put 同一槽 = **覆盖**（同一面不可能同时挂两件）。
+    ★ **就地**刷新 `holding`（旧字段）= 任一面有件 → True，兼容既有前端/3D。
+    ★ slot 非法 / state 不是 dict → 返回 None 且**不改状态**（不静默写到错的地方）。
+    """
+    key = _face_key(slot)
+    if key is None or not isinstance(state, dict):
+        return None
+    info = {
+        "piece": kw.get("piece"),
+        "color": str(kw.get("color") or ""),
+        "ok": bool(kw.get("ok", False)),
+        "conf": float(kw.get("conf") or 0.0),
+    }
+    state[key] = info
+    state["holding"] = bool(held_slots(state))
+    return info
+
+
+def face_slot_take(state: Dict, slot) -> Optional[Dict]:
+    """取走某一面的件（放开/落料后调用），返回被取走的登记；**空槽 → None（不报错）**。
+
+    ★ 与 put 对称：无论槽空不空，都**就地**按剩余槽刷新 `holding`。
+    """
+    key = _face_key(slot)
+    if key is None or not isinstance(state, dict):
+        return None
+    info = state.get(key)
+    state[key] = None
+    state["holding"] = bool(held_slots(state))
+    return info
+
+
+# ---------------------------------------------------------------- 旋转白名单（安全护栏）
+# ★★ 方案 §6-1 / 用户口径："只允许在 正上位、摄像头点位、起点 旋转，**严禁原料位旋转**"。
+#   这是**回归钉**：凡"带 J6 翻转的下发"落到原料位（A 区格位）→ 后端直接拒绝并写明原因。
+# ★ 命名依据（对齐**项目既有点位**，不自己发明）：摄像头点位 = CAMERA_POINT（"C检测"）、
+#   起点 = START_POINT（"开始/结束点"）；"正上位"是用户对"取料前抬高避让位"的口语叫法。
+# ★ 用**子串白名单**（兼容 "C检测位"/"摄像头点位"/"正上位" 等叫法）；A 区原料格位
+#   （A1..A9、A1上..）不含任一关键字 → **天然被拒**，不需要另写黑名单。
+ROTATION_ALLOWED_TOKENS: Tuple[str, ...] = (
+    "正上位", "摄像头", "C", "起点", "home", "开始",
+)
+
+
+def rotation_point_allowed(name: str) -> bool:
+    """★ 方案 §6-1：该点位是否**允许**出现"带 J6 翻转的下发"。
+
+    允许：正上位 / 摄像头点位 / 起点（见 ROTATION_ALLOWED_TOKENS 的命名依据）；
+    原料位（A 区格位）→ False（**严禁原料位旋转**）。
+    """
+    n = str(name or "").strip()
+    if not n:
+        return False
+    low = n.lower()
+    return any((tok in n) or (tok.lower() in low) for tok in ROTATION_ALLOWED_TOKENS)
+
+
 # ---------------------------------------------------------------- 流程编排（纯函数）
+def plan_trips(slots: Sequence[str], per_trip: int = 2) -> List[List[str]]:
+    """把待取的 A 区格位按"一趟两件"分趟（方案 §2：9 件 = **4 趟×2 + 最后 1 趟×1**）。
+
+    ★ 为什么单独成函数：这是纯可测的**节拍**；放在流程里就只能靠整跑真机验证。
+    ★ per_trip <= 0 → 按 1 处理（避免死循环）。
+    """
+    seq = [str(s) for s in (slots or [])]
+    n = int(per_trip) if int(per_trip) > 0 else 1
+    return [seq[i:i + n] for i in range(0, len(seq), n)]
+
+
 def build_piece_plan(placement: Dict, color: str,
                      column_slots: Optional[Dict[str, Sequence[str]]] = None,
                      skip_slots: Optional[Sequence[str]] = None

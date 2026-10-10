@@ -31,6 +31,12 @@ call :ENSURE_FRONTEND
 echo   Cleaning old services (if any) ...
 call :KILL_PORT 8000
 call :KILL_PORT 8100
+REM 2026-10-10: the two KILL_PORT calls above only kill the process that OWNS the port.
+REM On Windows SO_REUSEADDR allows two processes to bind the same port, so the one
+REM that never gets a connection becomes an IDLE ORPHAN (CPU 0s) and piles up
+REM (seen on site: 2x vision + 2x backend, one of each idle). Kill by command line too.
+call :KILL_ORPHANS camera_service.py
+call :KILL_ORPHANS uvicorn
 call :START_VISION_ONLY
 call :START_BACKEND_ONLY
 timeout /t 3 >nul
@@ -65,6 +71,8 @@ exit /b 0
 echo   Stopping services ...
 call :KILL_PORT 8000
 call :KILL_PORT 8100
+call :KILL_ORPHANS camera_service.py
+call :KILL_ORPHANS uvicorn
 echo   Done.
 exit /b 0
 
@@ -103,4 +111,16 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%~1" ^| findstr LISTENING')
     echo     stopping pid %%p on port %~1
     taskkill /PID %%p /F >nul 2>&1
 )
+exit /b 0
+
+REM Kill our own service processes by COMMAND LINE (covers KILL_PORT's blind spot:
+REM the idle orphan that does not own the port). Only matches python.exe + keyword.
+REM Call: call :KILL_ORPHANS camera_service.py
+REM WARNING about quoting: cmd does NOT understand single quotes, so
+REM   -Command '... | ...'  makes cmd split on the pipe
+REM   (seen: "'Where-Object' is not recognized as an internal or external command").
+REM So: outer double quotes protect the pipe; all PowerShell strings use single
+REM quotes ('' escapes one single quote).
+:KILL_ORPHANS
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter ('Name=''python.exe''') | Where-Object { $_.CommandLine -like ('*' + '%~1' + '*') } | ForEach-Object { Write-Host ('    stopping orphan pid ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force }" 2>nul
 exit /b 0

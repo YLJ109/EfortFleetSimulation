@@ -129,7 +129,9 @@ export function createAiChat() {
   const pendingPlan = computed(() => {
     for (let i = messages.value.length - 1; i >= 0; i--) {
       const m = messages.value[i];
-      if (m.type === MSG.PLAN) return m;
+      // ★ 2026-10-10：只有"**能执行**"（ok=true，带 plan_id）的计划才算待确认；
+      //   "做不到"那种计划卡（ok=false）不算 —— 否则说「执行」会白点一次。
+      if (m.type === MSG.PLAN) return (m.parsed && m.parsed.ok) ? m : null;
       // 遇到"已开跑/已作废"就更早的计划都不算待确认了
       if (m.type === MSG.RUN || m.type === MSG.RESULT) return null;
     }

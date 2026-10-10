@@ -315,11 +315,23 @@ ok(!!nameM, "L3 能在 brand.py 里定位 SERVICE_NAME");
 eq(nameM ? nameM[1] : null, BRAND.name, "L4 ★ 前后端项目名完全一致");
 ok(!/FIT 机器人远程监控与操控平台/.test(htmlSrc + brandPy),
   "L5 已弃用的旧名不再出现在静态标题与后端");
-ok(BRAND.name.includes("埃夫特"), "L6 全名里带厂商名（现场要能一眼看出管的是埃夫特机器人）");
-// ★ 阶段 7 定名调整：应用户要求全名**去掉 AI**（「FIT 埃夫特智能机器人远程控制与监控系统」）。
-//   钉两件事：中英文名都不再含 AI（改名要两边同步，防止单边残留），且禁用名不回流。
-ok(!/AI/.test(BRAND.name), "L6b 中文全名不含 AI（应用户要求的定名）");
+// ★ 2026-10-10 定名改版：顶栏改成**品牌名（主标题）+ 描述性全名（副标题）**两行 ——
+//   主标题 = BRAND.name「擎云制造」；副标题 = BRAND.subtitle「工业机器人远程智控与数字孪生系统」。
+//   厂商归属由 device（EFORT ER8-700H）承担，这里钉"厂商身份没有彻底丢"
+//   （品牌名 / 机型 / 英文名里至少一处带 EFORT 或 埃夫特）。
+ok(/埃夫特|EFORT/i.test(BRAND.name + BRAND.device + BRAND.en),
+  "L6 厂商身份仍可见（品牌名 / 机型 / 英文名里至少一处带 EFORT/埃夫特）");
+// ★ 品牌名不含 AI（改名要两边同步，防止单边残留）。
+ok(!/AI/.test(BRAND.name), "L6b 品牌名不含 AI");
 ok(!/\bAI\b/.test(BRAND.en), "L6c 英文全名不含 AI");
+// ★ 副标题 = 描述性全名（显示在品牌名下方、小一号）。必须非空且真的被顶栏渲染出来。
+ok(typeof BRAND.subtitle === "string" && BRAND.subtitle.trim().length > 0,
+  "L6d 副标题 BRAND.subtitle 已定义（描述性全名，不再硬编码在模板里）");
+{
+  const appSrc = fs.readFileSync(path.join(ROOT, "src", "App.vue"), "utf8");
+  ok(appSrc.includes("BRAND.subtitle"),
+    "L6e 顶栏（App.vue）在品牌名下方渲染 BRAND.subtitle 副标题");
+}
 ok(BRAND.abbr === BRAND.exportPrefix, "L7 缩写与导出前缀同源（避免导出文件名用另一套缩写）");
 // 缩写刻意不含 AI：它是导出文件名前缀，现场已有带该前缀的导出文件，改了会让新旧对不上。
 eq(BRAND.abbr, "FIT-RCMS", "L8 缩写保持 FIT-RCMS 不变（导出文件名兼容性）");

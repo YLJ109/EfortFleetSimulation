@@ -45,19 +45,39 @@ export const EE_META = {
 };
 
 // ★★ 吸盘口（工件被吸住的位置）在**法兰坐标系**里的局部坐标（真实 mm）。
-//   四个吸盘：左右立板外侧各2个（上下排列），开口朝外（±x）
-//   返回 +x 侧（右侧）吸盘口位置，工件中心 = 吸盘口 + 半个料厚
-export function suckerLocalMm(pieceThickMm = 0) {
+//   工具两块立板分列 ±x，零位/前伸姿态下 **+x 朝上、−x 朝下**
+//   （实测见 tools 里的核对：零位 工具+x世界 = (0,1,0)）。
+//   ★ 2026-10-10 用户口径（附截图）：工件要吸在**下面那只吸盘**上、挂在工具下方，
+//     不是吸在上面的吸盘。所以这里取 **−x 侧**（下板）吸盘口。
+//   返回值 = −x 侧吸盘口；工件中心 = 吸盘口再沿 −x 外移半个料厚。
+// ★ 吸盘口坐标的计算**两面共用**：两块立板沿 ±x 关于法兰轴对称，
+//   「下板(−x)」与「上板(+x)」只差一个符号 —— 抽成 side 参数，避免两处各写一份而漂移。
+function suckerLocalMmSide(side, pieceThickMm) {
   const outer = PLATE_W + PLATE_GAP / 2;           // 立板外表面 x（设计单位）
-  const cupX = outer + TRI_CUP_H + 3;              // 吸盘口平面（+x 侧）
+  const cupX = outer + TRI_CUP_H + 3;              // 吸盘口平面（离法兰轴的距离）
   const plateZ = EE_BACK + PLATE_D / 2;
   const cupZ = plateZ + CUP_FWD;                   // 吸盘z位置
   const halfThickDesign = (Number(pieceThickMm) || 0) / 2 / EE_SCALE;
+  const s = side < 0 ? -1 : 1;
   return [
-    (cupX + halfThickDesign) * EE_SCALE,           // 真实 mm，法兰系
+    s * (cupX + halfThickDesign) * EE_SCALE,       // 真实 mm，法兰系（−x=下板 / +x=上板）
     0,                                              // y=0（中间高度）
     cupZ * EE_SCALE,                                // 真实 mm，法兰系
   ];
+}
+
+export function suckerLocalMm(pieceThickMm = 0) {
+  return suckerLocalMmSide(-1, pieceThickMm);       // 兼容旧口径：−x 侧（下板）
+}
+
+/**
+ * ★ 指定**哪一面**的吸盘口局部坐标（真实 mm，法兰系）。
+ *   side = −1 → 下板（−x 开口，现有那块料）· side = +1 → 上板（+x 开口，双面新增）。
+ *   双面 3D 用「上/下两口间距」= suckerLocalMmForSide(+1) − suckerLocalMmForSide(−1)
+ *   来从**唯一的下板世界锚点**镜像出上板位置 —— 尺寸仍与建模几何同源，不手算硬编码。
+ */
+export function suckerLocalMmForSide(side, pieceThickMm = 0) {
+  return suckerLocalMmSide(side, pieceThickMm);
 }
 
 /**

@@ -90,7 +90,10 @@ if "%GLBSZ%"=="0" (
     call :ok "GLB size ok"
 )
 call :need_file "camera\camera_service.py"             "vision service"
-call :need_chk  "camera\models\yolo26n.pt"             "YOLO model (vision detection)"
+call :need_file "camera\vision_color.py"               "color recognition (OpenCV)"
+REM YOLO is DISABLED by default (color sorting uses OpenCV only), so the model file is
+REM OPTIONAL - keep it a WARN, do not report FAIL. (Old text implied it was required.)
+call :need_chk  "camera\models\yolo26n.pt"             "YOLO model (OPTIONAL - disabled by default)"
 call :need_chk  "docs"                                 "docs folder"
 echo.
 
@@ -126,6 +129,11 @@ call :need_dir "data"                                  "data dir"
 call :need_dir "logs"                                  "logs dir"
 call :port_state 8000 "backend"
 call :port_state 8100 "vision"
+REM ★ 2026-10-10: also count "how many service instances" - Windows allows two processes to
+REM bind the SAME port (SO_REUSEADDR); the one that never gets a connection becomes an idle
+REM orphan and piles up. Quoting note: cmd does NOT understand single quotes, so the outer
+REM quotes MUST be double (otherwise the | is treated as a cmd pipe). See run.bat KILL_ORPHANS.
+powershell -NoProfile -Command "$p=@(Get-CimInstance Win32_Process -Filter ('Name=''python.exe''') | Where-Object { $_.CommandLine -match 'camera_service\.py|uvicorn' }); Write-Host ('  INFO  service python processes: ' + $p.Count); if ($p.Count -gt 2) { Write-Host '  WARN  more than 2 instances (stale orphan?) - run: run.bat stop' }" 2>nul
 echo.
 
 echo ============================================================

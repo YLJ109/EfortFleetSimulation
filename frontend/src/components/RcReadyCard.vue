@@ -108,11 +108,34 @@ const readyDisabled = computed(() => {
   return false;
 });
 /**
- * 「取消就绪」的禁用条件：**只要拿着令牌就永远可点**。
- *   它是逃生通道 —— 机器人离线、遥测冻结、点动卡住……这些状态恰恰
- *   就是需要取消就绪来复位的场景，不能反过来把它们当禁用理由。
+ * ★★ 2026-10-10 用户口径：**「一键就绪」/「取消就绪」合并为**同一颗**按钮**，
+ *   点击时**先读一次实时的伺服状态**再决定做什么（"提前检测是不是上电或者下电状态，然后再进行"）。
+ *   · 伺服**已上电** → 走「取消就绪」（停程序 + 撤触发 + 伺服下电）
+ *   · 伺服**未上电** → 走「一键就绪」（撤触发 → 清报警 → 伺服上电 → 加载 200 → 运行挂起）
+ *
+ *   ⚠ 历史事故的防线不能丢：当初正是因为"合并后卡住时只剩一键就绪、没有取消就绪这把
+ *     复位钥匙"才拆成两颗的。现在按钮**按 servoOn 变脸** —— 伺服上电时它就是「取消就绪」，
+ *     复位钥匙始终在（且永远可点）。
+ *   ⚠ 下电**不再弹确认框**（2026-10-10 用户口径："不需要提示"）。
  */
-const cancelDisabled = computed(() => !auth.controlActive);
+async function onReadyToggle() {
+  if (rc.busy) return;
+  // ① "提前检测"：先拉一次**新鲜**的伺服状态（不用 4s 轮询里的旧值）
+  await rc.load();
+  const act = (typeof rc.servoOn === "boolean")
+    ? (rc.servoOn ? "cancel" : "ready")
+    : (rc.ready ? "cancel" : "ready");
+  if (act === "cancel") { doCancel(); return; }
+  // ② 发起就绪有前置条件（令牌 + 在线 + 双闸）；不满足就如实说，不硬发
+  if (readyDisabled.value) {
+    exec.logLine("err", "一键就绪未执行："
+      + (!auth.controlActive ? "需要控制权限"
+        : (!rc.realEnabled ? "真实下发（双闸）未开启"
+          : "机器人未连接或遥测过期")));
+    return;
+  }
+  doReady();
+}
 function doReady() {
   // ★ 一键就绪：撤触发 → 清报警 → 伺服上电 → 加载程序 200 → 运行挂起。
   //   结果写入运行日志（每一步成败都能看到，不用猜）。
@@ -126,7 +149,7 @@ function doReady() {
 function doCancel() {
   // ★ 取消就绪 = 停点动服务程序 + 撤触发 + 伺服下电，恢复到"未上电/未就绪"。
   //   ★ 它是**逃生通道**：一键就绪失败、点动卡住、半截状态……都靠它复位。
-  //   结果写入运行日志。
+  //   ★ 2026-10-10：本卡是**唯一**的下电入口；且按用户口径**不再弹确认框**。
   rc.cancelReady(true).then((ok) => {
     const bad = _failedSteps();
     exec.logLine(ok ? "info" : "err",
@@ -134,14 +157,6 @@ function doCancel() {
          : "取消就绪失败" + (bad ? "：" + bad : ""));
   });
 }
-
-/**
- * 「该点哪个」的**视觉提示**（不是靠隐藏另一个按钮）：
- *   伺服没上电 → 提示「一键就绪」；伺服上电 → 提示「取消就绪」。
- *   ⚠ 两个按钮**永远都可点**（取消就绪是逃生通道；就绪失败后也要能重试）。
- */
-const hintReady = computed(() => !(readyAction.value === "ready"));
-const hintCancel = computed(() => (readyAction.value === "ready"));
 
 /** 汇总后端返回里失败的步骤（用于日志/结果区给出可读原因）。 */
 function _failedSteps() {
@@ -170,31 +185,34 @@ function _failedSteps() {
         真实下发未开启：后端处于模拟模式，点动只走仿真。开双闸见系统自检 real_write 项。
       </div>
 
-      <!-- ★★ 2026-10-09 拆成**两个独立按钮**（用户口径：
-           "再写一个取消就绪按钮吧，现在又死机了，又开始一键就绪失败了"）。
-           为什么必须拆：合并成一个按钮时，它按状态**只能显示其中一个** ——
-           一旦卡在"一键就绪失败/点动占锁"这种半截状态，按钮上写的是「一键就绪」，
-           操作员**没有「取消就绪」可点**（而取消就绪正是复位那个状态的钥匙）→ 死循环。
-           现在：
-             · 「一键就绪」= 有条件（令牌 + 在线 + 双闸 + 非忙碌），条件不满足就灰
-             · 「取消就绪」= **逃生通道**，只要拿着令牌就永远可点（它是安全方向动作）
-             · 该点哪个由 `hintReady` / `hintCancel` 做**视觉提示**，而不是靠"隐藏另一个" -->
+      <!-- ★★ 2026-10-10 用户口径：**一键就绪 / 取消就绪 合并为同一颗按钮**。
+           点击时**先读一次实时伺服状态**：已上电 → 取消就绪（红）；未上电 → 一键就绪（绿）。
+           ⚠ 不靠"隐藏另一颗"来提示该点哪个 —— 那正是当初拆成两颗的原因（半截状态下
+             没有复位钥匙）。现在按 servoOn **变脸**，取消就绪这把钥匙始终在。 -->
       <div class="btns">
-        <button class="ready-toggle go" :class="{ hot: hintReady }"
-                :disabled="readyDisabled" @click="doReady">
-          <Icon :name="rc.busy && rc.lastAction === 'ready' ? 'refresh' : 'power'" :size="14" />
-          {{ rc.busy && rc.lastAction === "ready" ? "处理中…" : "一键就绪" }}
-        </button>
-        <button class="ready-toggle cancel" :class="{ hot: hintCancel }"
-                :disabled="cancelDisabled" @click="doCancel"
-                title="停程序 + 撤销触发 + 伺服下电（安全方向动作）。被点动/下发占用时会等它收尾后自动执行">
-          <Icon :name="rc.busy && rc.lastAction === 'cancel' ? 'refresh' : 'close'" :size="14" />
-          {{ rc.busy && rc.lastAction === "cancel" ? "处理中…" : "取消就绪" }}
+        <button class="ready-toggle" :class="readyAction === 'cancel' ? 'cancel' : 'go'"
+                :disabled="readyDisabled" @click="onReadyToggle"
+                :title="readyAction === 'cancel'
+                  ? '停程序 + 撤销触发 + 伺服下电（安全方向动作）'
+                  : '清报警 → 伺服上电 → 加载点动服务程序 200 → 运行挂起（不产生运动）'">
+          <Icon :name="rc.busy ? 'refresh' : (readyAction === 'cancel' ? 'close' : 'power')" :size="14" />
+          {{ rc.busy ? "处理中…" : (readyAction === "cancel" ? "取消就绪" : "一键就绪") }}
         </button>
         <!-- ★ 清除示教器（控制器）报错：只清报警，不替「一键就绪」做上电/加载 -->
         <button class="clear-err" :disabled="!canControl || rc.busy" @click="exec.clearError()"
                 title="清掉示教器（控制器）报警；不含伺服上电/加载，清完需重新一键就绪">
           <Icon name="eraser" :size="14" /> 清除报错
+        </button>
+      </div>
+
+      <!-- ★★ 2026-10-10 兜底：**复位卡死的执行登记**（用户口径："程序正在执行中，
+           但是没跑代码，就绪和取消都成功，无法下达指令"）。后端只清**已经死掉**的登记；
+           只要还有活着的执行就一律拒绝，**绝不把正在跑的机器人交给手动指令**；
+           也不写任何寄存器、不产生任何运动。 -->
+      <div class="fix-row">
+        <button class="link-btn" :disabled="!auth.controlActive" @click="exec.forceReleaseRuns()"
+                title="清掉卡死的执行登记（只清『已死』的，不写寄存器、不动机器人）">
+          <Icon name="refresh" :size="12" /> 指令下不去？复位执行登记
         </button>
       </div>
 
@@ -216,14 +234,12 @@ function _failedSteps() {
 </template>
 
 <style scoped>
-/* ★ 绿(就绪)/红(取消) 切换按钮：整行宽、语义色随状态变化，一眼分清当前该按什么 */
+/* ★ 就绪按钮（**单颗**，2026-10-10 合并）：绿=一键就绪 / 红=取消就绪，语义色随伺服态变 */
 .ready-toggle {
   flex: 1;
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   font-weight: 700; letter-spacing: .3px;
 }
-/* 「该点哪个」的视觉提示：加一圈亮边框（**不是隐藏另一个** —— 两个都永远可点） */
-.ready-toggle.hot { box-shadow: 0 0 0 1.5px var(--accent); }
 .ready-toggle.go {
   background: var(--ok, #1fa74a); border-color: var(--ok, #1fa74a); color: #fff;
 }
@@ -242,4 +258,14 @@ function _failedSteps() {
 }
 .clear-err:hover:not(:disabled) { filter: brightness(1.08); }
 .clear-err:disabled { opacity: .5; cursor: not-allowed; }
+/* ★ 兜底入口（复位卡死的执行登记）：低调的文字按钮，不抢"一键就绪"的视线 */
+.fix-row { margin-top: 6px; display: flex; }
+.link-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: transparent; border: 1px solid var(--line, #2a3442);
+  color: var(--muted); font-size: 11.5px; padding: 3px 8px; border-radius: 6px;
+  cursor: pointer;
+}
+.link-btn:hover:not(:disabled) { color: var(--fg, #e6edf3); border-color: var(--accent); }
+.link-btn:disabled { opacity: .5; cursor: not-allowed; }
 </style>

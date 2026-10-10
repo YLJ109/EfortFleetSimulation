@@ -297,8 +297,12 @@ const PAYLOAD = {
   });
   ok("B1 显示为红色实心块", bColr.B1 === "红", "实际: " + bColr.B1);
   ok("B4 显示为绿色实心块", bColr.B4 === "绿", "实际: " + bColr.B4);
-  ok("三色映射齐全且互不相同",
-    new Set(Object.values(SORT_COLOR_HEX)).size === 3 && !!SORT_COLOR_HEX["红"]);
+  // ★ 2026-10-10：现场口径 = **四色**，其中 红/绿/蓝 为**有效色**、黑为**无效色**。
+  //   四色必须齐全且互不相同（否则"3D 里的红"会和识别出的"红"不是一回事）。
+  const colorNames = Object.keys(SORT_COLOR_HEX);
+  ok("四色映射齐全（红/绿/蓝 有效 + 黑 无效）且互不相同",
+    colorNames.length === 4 && ["红", "绿", "蓝", "黑"].every((n) => !!SORT_COLOR_HEX[n])
+    && new Set(Object.values(SORT_COLOR_HEX)).size === 4);
 
   // C7 空跑：占位色不冒充真实判色
   sb.update({ placement: [], holding: true, color: "红", sim_color: true, dry_run: true });
@@ -331,7 +335,8 @@ const PAYLOAD = {
     const anchor = { x: 1000, y: 2000, z: 3000, q: [q.x, q.y, q.z, q.w] };
     sbF.step(0.016, { x: 999, y: 1999, z: 2999 }, anchor);
 
-    const out = new THREE.Vector3(1, 0, 0).applyQuaternion(q);      // 锚点 +x 世界方向
+    // ★ 2026-10-10：工件吸在**下面那只吸盘**（−x 侧开口），料心沿 −x 外移半个料厚。
+    const out = new THREE.Vector3(-1, 0, 0).applyQuaternion(q);     // 锚点 −x 世界方向（下方开口）
     const halfThickMm = (70 * 0 + 0.014) * 1000 / 2;                // 料厚 14mm → 半厚 7mm
     const want = new THREE.Vector3(
       (anchor.x + out.x * halfThickMm) / 1000,
@@ -341,7 +346,7 @@ const PAYLOAD = {
     const d = hg.position.distanceTo(want) * 1000;                  // mm
     ok(`★ 料心落在吸盘口外侧（沿开口方向偏半个料厚，实测偏差 ${d.toFixed(3)}mm）`, d < 0.01);
 
-    // ② 厚度方向对齐：料的局部 y 轴（厚 14mm）在世界里应平行于锚点 +x
+    // ② 厚度方向对齐：料的局部 y 轴（厚 14mm）在世界里应平行于锚点 x 轴（开口方向，±x 均可）
     const q2 = hg.quaternion.clone();
     const handY = new THREE.Vector3(0, 1, 0).applyQuaternion(q2);
     ok("★ 料的厚度方向对齐吸盘开口（不是竖着插进吸盘）",
@@ -356,6 +361,72 @@ const PAYLOAD = {
       `fallback=(${fallbackMm.x.toFixed(1)}, ${fallbackMm.y.toFixed(1)})`);
 
     sbF.dispose();
+  }
+
+  // ★★ 2026-10-10 用户口径：J6 是**两块板**（下板 −x / 上板 +x），一趟两面各吸一件
+  //    （方案 docs/方案-J6双面吸盘（一趟两件·靠J6翻转用另一面）.md §3/§4）。
+  //    这里钉死三件事：① 双面同时给料 → **两块**都可见、face 分 lower/upper；
+  //    ② 只给旧 `holding` → 仍只有一块（不回归）；③ 两块位置**沿工具局部 x 分居两侧**。
+  console.log("");
+  console.log("== G. 双面两块料（一趟两件：下板 + 上板） ==");
+  {
+    const sbG = createSortingBlocks(LIFT);
+    sbG.setSlots(PAYLOAD);
+    // 两块同时给（不同色，且上板那件是**无效色**「黑」）—— 两件各取各色
+    sbG.update({ piece: 2, holding: true, sim_color: false,
+                 hold_lower: { color: "红", ok: true },
+                 hold_upper: { color: "黑", ok: false },
+                 hold_inferred: true });
+
+    const hands = sbG.root.children.filter((c) => c.userData && c.userData.sortHand);
+    const lower = hands.find((c) => c.userData.face === "lower");
+    const upper = hands.find((c) => c.userData.face === "upper");
+    ok("双面给料 → 手上出现**两块**", hands.length === 2, "实际: " + hands.length);
+    ok("两块 userData.face 分别为 lower / upper", !!lower && !!upper);
+    ok("两块都可见（同时显示）", !!(lower && lower.visible && upper && upper.visible));
+    ok("★ 「哪面在吸」如实标注为流程推断（userData.inferred === true）",
+      !!(lower && lower.userData.inferred === true && upper && upper.userData.inferred === true));
+    ok("两块各取各色：下板=红、上板=无效色黑",
+      !!(lower && lower.children[0].material.color.getHex() === SORT_COLOR_HEX["红"]
+         && upper && upper.children[0].material.color.getHex() === SORT_COLOR_HEX["黑"]),
+      `下=${lower && lower.children[0].material.color.getHex().toString(16)}`
+      + ` 上=${upper && upper.children[0].material.color.getHex().toString(16)}`);
+
+    // 摆到吸盘口：两块必须**沿工具局部 x 分居两侧**，且下板那块仍在原有位置
+    const qG = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.2, 0.9, -0.4));
+    const anchor = { x: 500, y: 800, z: 1200, q: [qG.x, qG.y, qG.z, qG.w] };
+    sbG.step(0.016, { x: 500, y: 800, z: 1200 }, anchor);
+    const pL = lower.position.clone(), pU = upper.position.clone();
+    const outG = new THREE.Vector3(-1, 0, 0).applyQuaternion(qG);   // 下板开口方向（−x）
+    const dLU = new THREE.Vector3().subVectors(pL, pU);
+    ok("★ 两块位置确实不同（沿工具局部 x 分居两侧）",
+      dLU.length() > 0.001 && Math.abs(dLU.clone().normalize().dot(outG)) > 0.999,
+      "间距(mm)=" + (dLU.length() * 1000).toFixed(2));
+    const halfG = (70 * 0 + 0.014) * 1000 / 2;                      // 料厚 14 → 半厚 7mm
+    const wantL = new THREE.Vector3((anchor.x + outG.x * halfG) / 1000,
+                                    (anchor.y + outG.y * halfG) / 1000,
+                                    (anchor.z + outG.z * halfG) / 1000);
+    ok("下板那块仍在原有位置（贴下板吸盘口外半厚，未回归）",
+      pL.distanceTo(wantL) * 1000 < 0.01);
+    // 上板那块在**另一半**（下板开口方向的相反侧），且更靠外多出「两口间距」
+    const relU = new THREE.Vector3().subVectors(pU, pL).normalize();
+    ok("上板那块在下板的**另一侧**（−x 开口的相反方向 = +x）",
+      relU.dot(outG) < -0.999);
+    sbG.dispose();
+
+    // ★ 兼容回归：state 里只有旧的 `holding`（单件）→ 只有一块、且是下板、上板不显示
+    const sbH = createSortingBlocks(LIFT);
+    sbH.setSlots(PAYLOAD);
+    sbH.update({ piece: 1, holding: true, color: "蓝", placement: [] });
+    const visH = sbH.root.children.filter((c) => c.userData && c.userData.sortHand && c.visible);
+    ok("只给旧 holding → 仍只有**一块**可见（不回归）",
+      visH.length === 1 && visH[0].userData.face === "lower",
+      "可见块数=" + visH.length);
+    // 双面字段为 null（后端未给料）→ 两块都不显示（不会凭空多出一块）
+    sbH.update({ piece: 0, holding: false, hold_lower: null, hold_upper: null });
+    const visH2 = sbH.root.children.filter((c) => c.userData && c.userData.sortHand && c.visible);
+    ok("hold_lower/hold_upper 都为 null → 手上一块都不显示", visH2.length === 0);
+    sbH.dispose();
   }
 
   console.log("");
@@ -423,6 +494,15 @@ console.log("== E. 「每次运行必须从头开始」的界面契约（源码�
     !/showSortingBlocks\(false\)/.test(strip(view)) && !/showSortingBlocks\(false\)/.test(strip(s3ds)));
   ok("★ 非分拣页由 store 轮询喂状态；分拣页自己不重复打",
     /robot\.activeView === "sort"/.test(s3ds) && /updateSortingState/.test(s3ds));
+  // ★★ 2026-10-10 用户口径："AI 执行没有变颜色…**所有的执行都要联动**"。
+  //   3D 原来只喂 `/sorting/state` —— AI 执行时那个口是空的，于是 3D 一动不动。
+  //   现在改喂后端**统一场景状态** `/control/scene-state`（返回"当前在跑的那一个执行"）。
+  ok("★★ 3D 喂的是**统一场景状态**（任何执行在跑都能联动，不再只认分拣口）",
+    /\/control\/scene-state/.test(s3ds) && !/apiControl\("\/sorting\/state"\)/.test(s3ds));
+  ok("★★ 后端提供 /control/scene-state，并登记分拣 / AI 两个场景源",
+    /def api_scene_state/.test(read("../backend/app/api/control.py"))
+    && /register_scene_source\("sorting"/.test(read("../backend/app/api/sorting.py"))
+    && /register_scene_source\("ai"/.test(read("../backend/app/api/ai.py")));
   ok("★ 隐藏标签页/无令牌时停轮询（与渲染帧同一个闸门）",
     /s3d\.stop\(\)/.test(app) && /s3d\.start\(\)/.test(app));
   ok("★ 示教/清空点位后重算摆位（否则盒子与料还停在旧位置）",

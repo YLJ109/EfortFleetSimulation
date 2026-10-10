@@ -26,6 +26,13 @@ os.environ["EFORT_SIMULATE"] = "always"
 # 测试绝不允许动机器人。这里在导入任何 app 模块之前强制置 0。
 os.environ["EFORT_REAL_MOTION"] = "0"
 
+# ★★ 大模型在测试里**必须关闭**（2026-10-10）★★
+#   解析入口已改为"**大模型优先**"（用户口径：每句话都过大模型）。若测试进程继承了本机
+#   .env 里的 EFORT_LLM_API_KEY，任何 `_parse_to_plan()` 都会**真的去打 DeepSeek** ——
+#   测试变慢、不确定、还依赖网络。这里在任何 app 模块 import 之前强制清空 key。
+#   要专门验证大模型行为（sanitize/prompt/思维链），直接用 monkeypatch 打开即可。
+os.environ["EFORT_LLM_API_KEY"] = ""
+
 # ★★ 日志必须与生产隔离（2026-10-09 事故）：
 #   app 被真实构造时日志 handler 指向生产 `logs/app.log`，于是测试里**注入的异常**
 #   traceback 写进了生产日志 —— 现场查日志时会看到"凭空出现的报错"，

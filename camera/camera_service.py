@@ -40,6 +40,7 @@ EFORT 视觉检测服务 — 海康机器人 GigE 工业相机 + YOLO 目标检�
 from __future__ import annotations
 
 import gc
+import hmac
 import io
 import json
 import os
@@ -59,13 +60,28 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
 os.environ.setdefault("OMP_NUM_THREADS", "2")
 
+# =====================================================================
+# ★★ 2026-10-10 用户口径："**不要启动工业相机（海康 MVS）那套，用 USB 的就行了**"。
+#
+#   EFORT_CAMERA_KIND： usb(默认) | mvs | auto
+#     · usb  → **完全不碰海康 SDK**：不往 PATH 塞 MVS 运行时、不 import 封装、不枚举 MVS；
+#              启动日志里也就不再出现"发现 0 个设备"那种看着像报错的噪音。
+#     · auto → 老行为（有网口优先网口，没有再退 USB）。
+#     · mvs  → 只用海康网口（工业）相机。
+#   改这一条就等于"选相机后端"，不用去动下面的路径。
+# =====================================================================
+CAMERA_KIND = (os.environ.get("EFORT_CAMERA_KIND", "usb").strip().lower() or "usb")
+if CAMERA_KIND not in ("usb", "mvs", "auto"):
+    CAMERA_KIND = "usb"
+_MVS_ENABLED = CAMERA_KIND in ("mvs", "auto")
+
 # ---- MVS 运行时 DLL (海康机器人相机 SDK) ----
 # 默认路径是 MVS 客户端标准安装位置; 装到别处时用 EFORT_MVS_RUNTIME_DIR 覆盖。
 MVS_DLL_DIR = os.environ.get(
     "EFORT_MVS_RUNTIME_DIR",
     r"C:\Program Files (x86)\Common Files\MVS\Runtime\Win64_x64",
 )
-if os.path.isdir(MVS_DLL_DIR):
+if _MVS_ENABLED and os.path.isdir(MVS_DLL_DIR):
     os.environ["PATH"] = MVS_DLL_DIR + os.pathsep + os.environ.get("PATH", "")
 
 # ---- 复用参考项目的 MVS Python 封装 ----
@@ -75,13 +91,16 @@ REF_SDK = os.environ.get(
     "EFORT_MVS_SDK_DIR",
     r"D:\EFORT_Projects\EFORT_Camera_Python_OpenCv\src\sdk\MvImport",
 )
-if os.path.isdir(REF_SDK):
+if _MVS_ENABLED and os.path.isdir(REF_SDK):
     sys.path.append(REF_SDK)
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 try:
+    if not _MVS_ENABLED:
+        # ★ EFORT_CAMERA_KIND=usb：按配置**不启用**海康工业相机，连封装都不 import。
+        raise RuntimeError("EFORT_CAMERA_KIND=%s：按配置不启用海康工业相机(MVS)" % CAMERA_KIND)
     from MvCameraControl_class import (
         MvCamera, MV_CC_DEVICE_INFO_LIST, MV_CC_DEVICE_INFO, MV_FRAME_OUT,
         MV_CC_PIXEL_CONVERT_PARAM, MVCC_ENUMENTRY,
@@ -96,6 +115,21 @@ except Exception as e:
     _SDK_ERR = str(e)
 
 PORT = int(os.environ.get("CAMERA_PORT", "8100"))
+
+# ★★ 2026-10-10 安全加固（静态评审 A1/A2）—— 本服务**原本没有任何鉴权**：
+#   · HOST：绑定地址**默认 127.0.0.1**（原来硬写 0.0.0.0）。本服务能"开/关相机、
+#     改判色阈值、清标定记录"，绑 0.0.0.0 等于把这些直接摊给整个局域网
+#     （正在分拣时会被中断，阈值被改会导致**错分拣**）。
+#     现场确实需要从别的电脑看画面时，显式设 EFORT_CAMERA_HOST=0.0.0.0，
+#     并**强烈建议同时设 EFORT_CAMERA_TOKEN**。
+#   · CAMERA_TOKEN：可选共享令牌。设了 → **写接口**必须带 X-Camera-Token；
+#     不设 → 不加门槛（此时仅靠"只绑本机"保护）。
+HOST = os.environ.get("EFORT_CAMERA_HOST", "127.0.0.1").strip() or "127.0.0.1"
+CAMERA_TOKEN = os.environ.get("EFORT_CAMERA_TOKEN", "").strip()
+#   · MAX_STREAM_CLIENTS：MJPEG 并发上限。原来**无任何限制**，而每客户端占一个线程
+#     （ThreadingHTTPServer 线程还不封顶）→ 几十个 /stream 就能把线程与带宽吃光，
+#     连带把真机分拣的取流挤掉。超限**直接拒绝**（不排队）。
+MAX_STREAM_CLIENTS = int(os.environ.get("EFORT_CAMERA_MAX_STREAM", "6"))
 MODELS_DIR = os.path.join(HERE, "models")
 CAPTURE_DIR = os.path.join(HERE, "captures")
 VISION_DIR = os.path.join(CAPTURE_DIR, "vision")     # 颜色分拣存档
@@ -231,7 +265,11 @@ def _enum_devices():
     ret = MvCamera.MV_CC_EnumDevices(tlayer, device_list)
     if ret != 0:
         raise RuntimeError("EnumDevices failed 0x%x" % ret)
-    print(f"[相机枚举] 发现 {device_list.nDeviceNum} 个设备")
+    # ★★ 2026-10-10：改掉**误导性提示**。原文案 `[相机枚举] 发现 0 个设备` 看着像"没找到相机"，
+    #   现场据此以为相机坏了 —— 其实这**只是海康 MVS（工业相机）那一支**的枚举；
+    #   本项目现场用**普通 USB 摄像头**，这里为 0 完全正常。
+    print(f"[海康工业相机(MVS)] 发现 {device_list.nDeviceNum} 个设备"
+          f"（现场用普通 USB 摄像头时这里为 0 属正常，USB 相机见下面 OpenCV 探测）")
     found = []
     for i in range(device_list.nDeviceNum):
         info = cast(device_list.pDeviceInfo[i], POINTER(MV_CC_DEVICE_INFO)).contents
@@ -431,6 +469,10 @@ class CameraService:
                 "black_streak": self._black_streak,
                 "models": self.list_models(),
                 "port": PORT,
+                # ★★ 2026-10-10：把**绑定地址**也报出来 —— 一眼看出是"只绑本机（对外没开端口）"
+                #   还是"对局域网开放"。运维/前端据此判断，不用去猜（配合 EFORT_CAMERA_HOST）。
+                "bind_host": HOST,
+                "lan_exposed": HOST not in ("127.0.0.1", "localhost"),
                 "vision": self.vision_status_locked(),
             }
 
@@ -460,7 +502,9 @@ class CameraService:
             # ★ 审计修复 P0-cam-3: 阈值回显，前端/运维可据此核对现场生效值
             "thr": dict(self.vision_thr),
             "color_capable": self.color_capable,
-            "targets": list(vc.RGB_NAMES) if _VC_OK else [],
+            # ★ 2026-10-10 用户口径：目标色 = **四色**（红/绿/蓝 = 有效；黑 = 无效），
+            #   界面按这个列表显示色片；"有效/无效"的判定在后端 vote_color（只认三色）。
+            "targets": list(vc.TARGET_NAMES) if _VC_OK else [],
             "save": self.save_on_detect,
             "card": dict(vc.COLOR_CARD),
             "achromatic": list(vc.ACHROMATIC),
@@ -506,30 +550,48 @@ class CameraService:
                 with self.lock:
                     held_idx = self.opencv_idx
                     held_info = dict(self.info) if held_idx is not None else None
-                for i in range(5):  # 检测前 5 个可能的摄像头索引
-                    if held_idx is not None and i == held_idx:
-                        # 自己正持有(或正在打开)这台: 直接上报信息, 不重新打开
-                        model = (held_info or {}).get("model", f"Web Camera {i}")
-                        devices.append({"idx": i, "type": "USB", "model": model,
-                                        "serial": f"opencv-{i}", "ip": "-",
-                                        "label": model + " (使用中)",
-                                        "cam_type": "opencv"})
-                        continue
-                    cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-                    if cap.isOpened():
-                        # 获取摄像头名称（如果支持）
-                        name = f"USB Camera {i}"
+                # ★★ 2026-10-10：**静音 OpenCV 的探测噪音**。
+                #   DShow 后端探测"不存在的索引"时必然打
+                #   `VIDEOIO(DSHOW): backend is generally available but can't be used to capture by index`
+                #   —— 那是**正常**的（我们就是在挨个试索引），可现场会据此以为"相机坏了"。
+                #   这里临时把 cv2 日志压到 SILENT，探测完**恢复原级别**（不掩盖真正的报错）。
+                _lvl = None
+                try:
+                    _lvl = cv2.utils.logging.getLogLevel()
+                    cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+                except Exception:          # 老版本 cv2 没有 utils.logging → 跳过，不影响功能
+                    _lvl = None
+                try:
+                    for i in range(5):  # 检测前 5 个可能的摄像头索引
+                        if held_idx is not None and i == held_idx:
+                            # 自己正持有(或正在打开)这台: 直接上报信息, 不重新打开
+                            model = (held_info or {}).get("model", f"Web Camera {i}")
+                            devices.append({"idx": i, "type": "USB", "model": model,
+                                            "serial": f"opencv-{i}", "ip": "-",
+                                            "label": model + " (使用中)",
+                                            "cam_type": "opencv"})
+                            continue
+                        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                        if cap.isOpened():
+                            # 获取摄像头名称（如果支持）
+                            name = f"USB Camera {i}"
+                            try:
+                                # 某些摄像头支持获取后端名称
+                                backend = cap.getBackendName()
+                                name = f"Web Camera {i} ({backend})"
+                            except Exception:
+                                pass
+                            cap.release()
+                            devices.append({"idx": i, "type": "USB", "model": name,
+                                            "serial": f"opencv-{i}", "ip": "-",
+                                            "label": name,
+                                            "cam_type": "opencv"})
+                finally:
+                    if _lvl is not None:
                         try:
-                            # 某些摄像头支持获取后端名称
-                            backend = cap.getBackendName()
-                            name = f"Web Camera {i} ({backend})"
+                            cv2.utils.logging.setLogLevel(_lvl)
                         except Exception:
                             pass
-                        cap.release()
-                        devices.append({"idx": i, "type": "USB", "model": name,
-                                        "serial": f"opencv-{i}", "ip": "-",
-                                        "label": name,
-                                        "cam_type": "opencv"})
         except Exception:
             pass
         return devices
@@ -575,7 +637,9 @@ class CameraService:
             devs = self.list_devices()
         except Exception:
             devs = []
-        for want in ("mvs", "opencv"):          # 有网口优先用网口，没有再退 USB
+        # ★ EFORT_CAMERA_KIND=usb 时**只看 USB**（不碰工业相机那条路）
+        order = ("opencv",) if CAMERA_KIND == "usb" else ("mvs", "opencv")
+        for want in order:                      # auto/mvs：有网口优先网口，没有再退 USB
             hit = [d for d in devs if d.get("cam_type") == want]
             if hit:
                 return hit[0].get("idx"), want
@@ -1576,10 +1640,36 @@ class Handler(BaseHTTPRequestHandler):
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, OSError):
             pass
 
+    def _camera_token_ok(self) -> bool:
+        """★ 写接口的共享令牌校验（评审 A1）。**未配置令牌时一律放行** ——
+        此时只靠"服务默认只绑 127.0.0.1"这道门槛保护。"""
+        if not CAMERA_TOKEN:
+            return True
+        tok = (self.headers.get("X-Camera-Token")
+               or self.headers.get("X-Control-Token") or "").strip()
+        return hmac.compare_digest(tok, CAMERA_TOKEN)
+
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # ★★ 2026-10-10 安全加固（评审 A1 附带）：原来一律 `Allow-Origin: *`。
+        #   问题：**任意网站**都能在操作员浏览器里悄悄 fetch 本服务（CSRF 类）——
+        #   一行 `fetch('http://127.0.0.1:8100/close')` 就能把正在跑的分拣打断
+        #   （只绑 127.0.0.1 挡不住这条：请求是从操作员自己的浏览器发出的）。
+        #   现在只对**同主机来源**回 CORS 头：页面来源主机名 == 本服务 Host 主机名
+        #   （localhost 或现场那台机器的名字都算），外部站点一律不回头。
+        #   ⚠ 不影响 MJPEG：`<img src>` 跨源加载**本来就不走 CORS**，画面照常显示。
+        origin = (self.headers.get("Origin") or "").strip()
+        host = (self.headers.get("Host") or "").strip()
+        if origin and host:
+            try:
+                from urllib.parse import urlparse as _up
+                if (_up(origin).hostname or "").lower() == (_up("//" + host).hostname or "").lower():
+                    self.send_header("Access-Control-Allow-Origin", origin)
+                    self.send_header("Vary", "Origin")
+            except Exception:
+                pass
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers",
+                         "Content-Type, X-Camera-Token, X-Control-Token")
 
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False, default=_json_default).encode("utf-8")
@@ -1683,8 +1773,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             from urllib.parse import unquote
             rel = unquote(rel).replace("\\", "/")
-            base = os.path.abspath(VISION_DIR)
-            full = os.path.abspath(os.path.join(base, rel))
+            base = os.path.realpath(VISION_DIR)          # ★ realpath：连**软链**一起解析（评审 A5）
+            full = os.path.realpath(os.path.join(base, rel))
             if not full.startswith(base + os.sep) or not os.path.isfile(full):
                 return self._json({"ok": False, "error": "图片不存在"}, 404)
             with open(full, "rb") as f:
@@ -1702,6 +1792,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        # ★★ 2026-10-10 安全加固（评审 A1）：写接口（开/关相机、改配置、改阈值、清记录…）
+        #   在配置了 EFORT_CAMERA_TOKEN 时必须带 X-Camera-Token。放在读 body 之前，省掉无用解析。
+        if not self._camera_token_ok():
+            return self._json({"ok": False,
+                               "error": "需要相机服务令牌（X-Camera-Token）—— 本服务写接口不对外开放"}, 401)
         body = self._read_json()
         if path == "/open":
             ok, msg = SERVICE.open_async()
@@ -1766,14 +1861,28 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": False, "error": "未知路径"}, 404)
 
     def _stream(self):
-        """MJPEG: 只发送编码线程产出的 latest_jpeg, 不在此处编码。"""
+        """MJPEG: 只发送编码线程产出的 latest_jpeg, 不在此处编码。
+
+        ★★ 2026-10-10 安全加固（评审 A2）：加**并发上限**。原来无上限 ——
+          每个客户端占一个线程（ThreadingHTTPServer 线程不封顶），几十个 /stream
+          就能把线程与带宽吃光，连带把真机分拣的取流挤掉。超限**直接拒绝**（不排队）。
+        """
+        with SERVICE.lock:
+            if SERVICE.stream_clients >= MAX_STREAM_CLIENTS:
+                too_many = True
+            else:
+                too_many = False
+                SERVICE.stream_clients += 1
+        if too_many:
+            return self._json(
+                {"ok": False,
+                 "error": "MJPEG 客户端已达上限 %d（EFORT_CAMERA_MAX_STREAM 可调）"
+                          % MAX_STREAM_CLIENTS}, 503)
         self.send_response(200)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.send_header("Cache-Control", "no-store")
         self._cors()
         self.end_headers()
-        with SERVICE.lock:
-            SERVICE.stream_clients += 1
         last = None
         try:
             while SERVICE.running:
@@ -1796,13 +1905,17 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     print("=" * 56)
-    print("  EFORT 视觉检测服务  (海康 GigE + YOLO)")
-    print("  http://127.0.0.1:%d/stream" % PORT)
-    print("  SDK: %s" % ("OK" if _SDK_OK else _SDK_ERR))
-    print("  模型目录: %s" % MODELS_DIR)
-    print("  MVS 封装: %s%s" % (REF_SDK, "" if os.path.isdir(REF_SDK) else "  (目录不存在!)"))
+    print("  EFORT 视觉检测服务  (USB 相机 + OpenCV 判色)")
+    print("  http://%s:%d/stream" % (HOST, PORT))
+    print("  相机后端(EFORT_CAMERA_KIND): %s" % CAMERA_KIND)
+    print("  MVS 工业相机 SDK: %s"
+          % ("可用" if _SDK_OK else
+             ("未启用（usb 模式，正常）" if not _MVS_ENABLED else _SDK_ERR)))
+    if _MVS_ENABLED:
+        print("  模型目录: %s" % MODELS_DIR)
+        print("  MVS 封装: %s%s" % (REF_SDK, "" if os.path.isdir(REF_SDK) else "  (目录不存在!)"))
     print("=" * 56)
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    srv = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

@@ -172,6 +172,8 @@ watch(() => auth.controlActive, (v) => {
       <CameraPanel :views="['point', 'live']" />
     </template>
 
+    <!-- ★ 右栏顶部：与「程序执行」共用的页内 tab 条（由 App.vue 传入 —— 两页合并成一个入口） -->
+    <slot name="sidebarTop" />
     <ExecControlCard />
 
     <!-- 关节点动（合并：滑块示教 + 点动 J1~J6） -->

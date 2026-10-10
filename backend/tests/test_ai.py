@@ -97,6 +97,45 @@ def test_llm_lenient_json_parsing():
     assert llm._loads_lenient("完全不是 JSON") is None
 
 
+def test_llm_thinking_off_for_deepseek(monkeypatch):
+    """★ 2026-10-10 接 DeepSeek 实测踩到的坑，钉死它。
+
+    DeepSeek-V4 **默认开思考模式**：思维链走 `reasoning_content`，正文 `content`
+    可能是**空串**（实测 max_tokens 小时直接是 ""），而且思考模式下 `temperature` 不生效。
+    本服务 parse/chat 读的都是 `content` → 不关思考就等于"模型没回话"。
+    """
+    monkeypatch.setenv("EFORT_LLM_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.delenv("EFORT_LLM_THINKING", raising=False)
+    assert llm.thinking_param() == {"type": "disabled"}      # 默认关
+    monkeypatch.setenv("EFORT_LLM_THINKING", "1")
+    assert llm.thinking_param() == {"type": "enabled"}       # 想开也留了口子
+    # 非 deepseek 端点：**不带**这个参数（别的端点不认它，可能直接 400）
+    monkeypatch.setenv("EFORT_LLM_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.delenv("EFORT_LLM_THINKING", raising=False)
+    assert llm.thinking_param() is None
+
+
+def test_llm_only_reasoning_content_must_be_reported():
+    """只回思维链（content 空）→ 必须**明确报出来**，不能静默变成"空回复"。"""
+    got = llm._pick_content({"choices": [{"message": {"content": "",
+                                                     "reasoning_content": "思考…"}}]})
+    assert got["ok"] is False and "思维链" in got["error"]
+    assert llm._pick_content({"choices": [{"message": {"content": " 你好 "}}]}) == {
+        "ok": True, "content": "你好"}
+
+
+def test_llm_prompt_lists_every_allowed_action():
+    """★ 白名单里的动作必须在 SYSTEM_PROMPT 里说明 —— 否则模型根本不知道能输出它。
+
+    2026-10-10 实测：提示词里漏了 `goto_start`，DeepSeek 对「回到起点」直接回
+    {"action":"none"} → 功能等于不存在（规则解析认得，但大模型兜底那条路断了）。
+    """
+    for act in llm.ALLOWED_ACTIONS:
+        if act == "estop":
+            continue                     # 急停由系统关键词处理，提示词里写明了"不必输出"
+        assert act in llm.SYSTEM_PROMPT, "SYSTEM_PROMPT 漏了动作：" + act
+
+
 # ---------------------------------------------------------------- B. 解析闸门
 from app.api import ai as AI  # noqa: E402
 
@@ -154,6 +193,213 @@ def test_echo_explains_color_column_target():
                               "to": {"kind": "color_col", "color": "红", "zone": "B"}})
     assert "A区第1行第1列" in e["detail"] and "红列" in e["detail"]
     assert "None" not in e["detail"]
+
+
+def test_echo_move_quota_is_described():
+    """★ 2026-10-10 现场事故：按颜色配额搬运时 `_echo` 漏了这条分支 → 计划卡只显示一个 "?"，
+    操作员看不到"AI 要做什么"、也像"没回复"。回显必须有真实标题 + 说清配额与去向。"""
+    e = AI._echo("move_quota", {"action": "move_quota",
+                                "from": {"kind": "all", "zone": "A"},
+                                "to": {"kind": "zone", "zone": "B"},
+                                "quotas": {"蓝": 3, "绿": 2, "红": 1}})
+    assert e["title"] not in ("", "?")
+    assert "蓝×3" in e["detail"] and "绿×2" in e["detail"] and "红×1" in e["detail"]
+    assert "B区" in e["detail"]
+
+
+def test_echo_never_placeholder_for_supported_actions():
+    """★ 兜底守卫：每个**白名单动作**都必须有真实回显，不许掉进末尾的 "?" 兜底。
+    （这正是这次现场事故的根因 —— 加了新动作却忘了加回显分支。）"""
+    for act in ("estop", "goto_start", "inventory", "move_one", "move_all",
+                "move_quota", "look_color", "sorting", "query_state"):
+        plan = {"action": act, "op": "resume"} if act == "sorting" else {"action": act}
+        title = AI._echo(act, plan)["title"]
+        assert title not in ("", "?"), "动作 %s 没有回显文案" % act
+
+
+def test_ai_pick_keeps_suction_until_place():
+    """★ 2026-10-10 现场事故：AI 这条链路"抬起来就立刻停止吸"，件只靠杯内残余负压吊着
+    飞一路（现场表现："一吸住直接停止掉了"）。正确工艺（与分拣引擎同口径）：
+
+        取料·吸 → 等 SUCK_HOLD_MS 吸牢 → 抬起 → 送检（**全程保持吸气**）
+        → 放料·正上方 → ① 停止吸 ② 放气 ③ 回起点后停止放气
+
+    引擎要真机才能整跑，这里用源码位置把**顺序**钉死。
+    """
+    import inspect
+
+    src = inspect.getsource(AI._piece)
+    # ★ 锚"真实调用/真实语句"，不锚普通词 —— 上面那段注释里也有这些词，
+    #   按词 index 会指到注释上，得出假位置（分拣那边的回归钉踩过同一个坑）。
+    i_suck = src.index('_air(ctx, "suck"')
+    i_hold = src.index("if SUCK_HOLD_MS > 0")
+    i_lift = src.index('"抬起"')
+    i_at = src.index("放料·正上方")
+    i_rel = src.index('_air(ctx, "release"')
+    i_blow = src.index('_air(ctx, "blow"')
+    assert i_suck < i_hold < i_lift, "吸牢后再抬的停留丢了"
+    assert i_lift < i_at < i_rel < i_blow, (
+        "吸气必须保持到放料位才断（顺序：抬起 < 放料 < 停止吸 < 放气）"
+        "，实际 %s" % [i_suck, i_hold, i_lift, i_at, i_rel, i_blow])
+
+
+def test_ai_run_releases_air_on_error():
+    """★ 异常/取消时必须收掉两路气（不许带着负压停在半路）—— 与分拣同口径。"""
+    import inspect
+
+    src = inspect.getsource(AI._run)
+    assert 'if _job.get("suck_on")' in src and "异常·停止吸" in src
+    assert 'if _job.get("blow_on")' in src and "异常·停止放气" in src
+
+
+def test_ai_suck_hold_matches_sorting_default():
+    """吸取后停留与**分拣+C 位停留**同口径（2026-10-10 用户口径：各 0.5 秒）。"""
+    from app.api.sorting import StartIn
+
+    assert AI.SUCK_HOLD_MS == StartIn().suck_hold_ms == 500
+    assert AI.CAM_DWELL_S == StartIn().dwell_ms / 1000.0 == 0.5
+
+
+def test_echo_move_quota_shows_placement():
+    """★ 回显必须写出**摆法**（同色成行/成列，约束求解出来的）——
+    用户要能一眼看见"摆哪几格"，而不是只给一个执行按钮。"""
+    plan = {"action": "move_quota", "to": {"kind": "zone", "zone": "B"},
+            "quotas": {"蓝": 3, "红": 1}, "pattern": "row_or_col", "on_invalid": "continue",
+            "placement": {"蓝": ["B1", "B4", "B7"], "红": ["B2"]},
+            "placement_note": "蓝→B1·B4·B7（第1列）｜红→B2（第1行）",
+            "ban": {"from": [], "to": ["B5"], "have": ["B5"]}}
+    e = AI._echo("move_quota", plan)
+    assert "摆法" in e["detail"] and "B1" in e["detail"]
+    assert "已有料" in e["note"] and "B5" in e["note"]
+    assert "继续" in e["note"]          # on_invalid=continue 必须如实写出来
+
+
+def test_parse_solves_placement_and_rejects_unsat():
+    """★ 摆法在**解析阶段**解出来（与执行同一份）；解不出就**当场拒绝**。"""
+    AI._occ["A"].clear()
+    AI._occ["B"].clear()
+    r = AI._parse_to_plan("B5,B9已有摆放物体，从A区拿三个蓝，两个绿，一个红放到B区，"
+                          "按同颜色一行或者一列摆放")
+    assert r["ok"] is True, r
+    slots = sum((r["plan"]["placement"] or {}).values(), [])
+    assert "B5" not in slots and "B9" not in slots, slots
+    assert r["plan"]["placement"]["蓝"] == ["B1", "B4", "B7"], r["plan"]["placement"]
+    # 摆不下（4 件同色 > 一条线 3 格）→ 解析阶段就拒绝，并说清原因
+    bad = AI._parse_to_plan("从A区拿四个蓝放到B区，按同颜色一行或者一列摆放")
+    assert bad["ok"] is False and "摆不下" in bad["error"], bad
+
+
+def test_ai_quota_uses_solved_placement_and_continues():
+    """★ 源码钉：配额按**解出的摆法**落位（不再写死颜色列）；
+    无效色（黑/判不出）→ **放回原格 + 继续**（不消耗配额、不整轮停）。"""
+    import inspect
+
+    run_src = inspect.getsource(AI._run)
+    assert "plan_slots=slots_by_color" in run_src
+    assert "continue_on_invalid=continue_inv" in run_src
+    assert '"placement"' in run_src
+    piece_src = inspect.getsource(AI._piece)
+    assert "plan_slots" in piece_src and "无效色·已放回，继续" in piece_src
+    assert "已放回原位" in piece_src          # 旧口径也要先放回再停
+
+
+def test_llm_sanitize_accepts_placement_constraints():
+    """★ 大模型可以翻"摆放方式 / 无效色之后怎么办"这两条**约束**（不含数量）；
+    乱值只丢弃该字段，不因此拒绝整条指令。"""
+    r = llm.sanitize({"action": "move_all", "from": {"zone": "A"}, "to": {"zone": "B"},
+                      "pattern": "col", "on_invalid": "continue"})
+    assert r["ok"] is True
+    assert r["plan"]["pattern"] == "col" and r["plan"]["on_invalid"] == "continue"
+    # 乱值只丢弃该字段，不因此拒绝整条指令
+    r2 = llm.sanitize({"action": "move_all", "from": {"zone": "A"}, "to": {"zone": "B"},
+                       "pattern": "乱说", "on_invalid": "乱说"})
+    assert r2["ok"] is True and "pattern" not in r2["plan"] and "on_invalid" not in r2["plan"]
+
+
+# ---------------------------------------------------------------- 大模型优先（2026-10-10）
+def test_llm_can_parse_quota_and_adjacent():
+    """★ 用户口径（Q2/Q3）：白名单覆盖**全部 9 个意图**、允许给格号；配额/相邻都认。"""
+    r = llm.sanitize({"action": "move_quota", "to": {"zone": "B"},
+                      "quotas": {"蓝": 3, "绿": 2, "红": 1},
+                      "pattern": "adjacent", "on_invalid": "continue",
+                      "ban": {"to": ["B5"], "have": ["B5"]}})
+    assert r["ok"] is True, r
+    assert r["plan"]["quotas"] == {"蓝": 3, "绿": 2, "红": 1}
+    assert r["plan"]["pattern"] == "adjacent" and r["plan"]["on_invalid"] == "continue"
+    assert r["plan"]["ban"]["have"] == ["B5"]
+    # 非法配额（颜色三色之外 / 0 件）被逐个丢弃
+    bad = llm.sanitize({"action": "move_quota", "to": {"zone": "B"},
+                        "quotas": {"黑": 2, "红": 0, "蓝": 1}})
+    assert bad["ok"] is True and bad["plan"]["quotas"] == {"蓝": 1}, bad
+    for a in ("move_quota", "inventory", "query_state"):
+        assert a in llm.ALLOWED_ACTIONS
+    assert {"adjacent", "adjacent_row", "adjacent_col"} <= set(llm.ALLOWED_PATTERNS)
+
+
+def test_parse_llm_first_uses_llm_when_enabled(monkeypatch):
+    """★ 用户口径（Q2）：**每句话先走大模型**（规则不再优先）。"""
+    from app.api import ai as ai_api
+    monkeypatch.setattr(llm, "enabled", lambda: True)
+    monkeypatch.setattr(llm, "parse", lambda text, timeout=None: {
+        "ok": True, "plan": {"action": "goto_start"}, "error": ""})
+    ai_api._occ["A"].clear()
+    ai_api._occ["B"].clear()
+    r = ai_api._parse_to_plan("把东西收一收")
+    assert r["ok"] is True and r["source"] == "llm"
+    assert r["plan"]["action"] == "goto_start"
+
+
+def test_parse_falls_back_to_rules_with_visible_label(monkeypatch):
+    """★ 用户口径（Q7）：大模型不可用 → 降级到规则，但**必须标注**"这是系统规则"。"""
+    from app.api import ai as ai_api
+    monkeypatch.setattr(llm, "enabled", lambda: True)
+    monkeypatch.setattr(llm, "parse", lambda text, timeout=None: {
+        "ok": False, "error": "大模型返回 HTTP 422"})
+    ai_api._occ["A"].clear()
+    ai_api._occ["B"].clear()
+    r = ai_api._parse_to_plan("让机器人回到起点")
+    assert r["ok"] is True and r["source"] == "rule-degraded", r
+    assert any("系统解析规则" in w and "不是" in w for w in r["warnings"]), r["warnings"]
+
+
+def test_estop_is_safety_fast_path_never_waits_for_llm(monkeypatch):
+    """★ 唯一例外的"安全直达"：急停**绝不**绕大模型（网络慢/断不能拖住急停）。"""
+    from app.api import ai as ai_api
+    calls = {"n": 0}
+
+    def _boom(text, timeout=None):
+        calls["n"] += 1
+        return {"ok": True, "plan": {"action": "goto_start"}, "error": ""}
+
+    monkeypatch.setattr(llm, "enabled", lambda: True)
+    monkeypatch.setattr(llm, "parse", _boom)
+    r = ai_api._parse_to_plan("急停")
+    assert r["ok"] is True and r["plan"]["action"] == "estop"
+    assert r["source"] == "safety" and calls["n"] == 0, (r["source"], calls)
+
+
+def test_feasibility_gate_refuses_stacking_and_suggests(monkeypatch):
+    """★ Q1①：目标格**已有料/禁放** → 拒绝（不许叠放），并给建议。"""
+    from app.api import ai as ai_api
+    monkeypatch.delenv("EFORT_LLM_API_KEY", raising=False)      # 走规则
+    ai_api._occ["A"].clear()
+    ai_api._occ["B"].clear()
+    ai_api._occ["B"]["B1"] = "红"                               # B1 已有料
+    r = ai_api._parse_to_plan("把A区第1行第1列放到B1")
+    assert r["ok"] is False and "不能往上放" in r["error"], r
+    assert r["suggestions"], r
+    ai_api._occ["B"].clear()
+
+
+def test_unsat_quota_returns_suggestions(monkeypatch):
+    """★ Q1②：做不到 → 不执行 + **给建议**（换摆放方式/减件）。"""
+    from app.api import ai as ai_api
+    monkeypatch.delenv("EFORT_LLM_API_KEY", raising=False)
+    ai_api._occ["A"].clear()
+    ai_api._occ["B"].clear()
+    r = ai_api._parse_to_plan("从A区拿四个蓝放到B区，按同颜色一行或者一列摆放")
+    assert r["ok"] is False and "摆不下" in r["error"], r
+    assert r["suggestions"], r
 
 
 def test_plan_cache_ttl_binding():
@@ -245,10 +491,20 @@ def test_quota_carries_honest_warning():
     assert "放回原位" in w and "未知" in w
 
 
-def test_llm_does_not_own_quota_action():
-    """★ 大模型白名单**故意不含** move_quota（不让模型编数量）。"""
-    assert "move_quota" not in llm.ALLOWED_ACTIONS
+def test_llm_owns_quota_action_now():
+    """★ 口径变更（2026-10-10 用户拍板 Q2/Q3）：大模型**可以**给配额/格号（大模型优先）。
+
+    防线从"根本不让模型碰数量"改成"**白名单 + 可行性闸门 + 执行前件数确认**"：
+      · 配额颜色只能 红/绿/蓝、1..9 整数（越界/非法**逐个丢弃**）；
+      · 解析阶段就把摆法解出来，解不出 → **不执行 + 给建议**；
+      · 界面回显件数并要求确认后才执行（见前端 AiControlView）。
+    """
+    assert "move_quota" in llm.ALLOWED_ACTIONS
     assert "move_quota" in __import__("app.services.nl_intent", fromlist=["x"]).INTENTS
+    # 数量越界（99）/ 颜色非法（黑）→ 丢弃，绝不静默变成别的件数
+    r = llm.sanitize({"action": "move_quota", "to": {"zone": "B"},
+                      "quotas": {"红": 99, "黑": 2, "蓝": 2}})
+    assert r["ok"] is True and r["plan"]["quotas"] == {"蓝": 2}, r
 
 
 def test_piece_quota_puts_back_when_not_needed():
@@ -332,10 +588,20 @@ def test_quota_carries_honest_warning():
     assert "放回原位" in w and "未知" in w
 
 
-def test_llm_does_not_own_quota_action():
-    """★ 大模型白名单**故意不含** move_quota（不让模型编数量）。"""
-    assert "move_quota" not in llm.ALLOWED_ACTIONS
+def test_llm_owns_quota_action_now():
+    """★ 口径变更（2026-10-10 用户拍板 Q2/Q3）：大模型**可以**给配额/格号（大模型优先）。
+
+    防线从"根本不让模型碰数量"改成"**白名单 + 可行性闸门 + 执行前件数确认**"：
+      · 配额颜色只能 红/绿/蓝、1..9 整数（越界/非法**逐个丢弃**）；
+      · 解析阶段就把摆法解出来，解不出 → **不执行 + 给建议**；
+      · 界面回显件数并要求确认后才执行（见前端 AiControlView）。
+    """
+    assert "move_quota" in llm.ALLOWED_ACTIONS
     assert "move_quota" in __import__("app.services.nl_intent", fromlist=["x"]).INTENTS
+    # 数量越界（99）/ 颜色非法（黑）→ 丢弃，绝不静默变成别的件数
+    r = llm.sanitize({"action": "move_quota", "to": {"zone": "B"},
+                      "quotas": {"红": 99, "黑": 2, "蓝": 2}})
+    assert r["ok"] is True and r["plan"]["quotas"] == {"蓝": 2}, r
 
 
 def test_piece_quota_puts_back_when_not_needed():

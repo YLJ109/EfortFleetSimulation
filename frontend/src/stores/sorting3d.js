@@ -107,7 +107,12 @@ export const useSorting3dStore = defineStore("sorting3d", {
       // 分拣页自带的 800ms 轮询已经在喂 3D，这里不重复打
       if (robot.activeView === "sort") return;
       try {
-        const r = await apiControl("/sorting/state");
+        // ★★ 2026-10-10 用户口径："AI 执行没有变颜色…**所有的执行都要联动**"。
+        //   原来这里只认 `/sorting/state` —— AI 执行时那个口是空的，3D 一动不动。
+        //   现在改喂**统一场景状态**（`/control/scene-state`）：后端返回"当前在跑的那一个
+        //   执行"（分拣 / AI / …）的状态，结构与分拣同源，3D 直接吃。
+        //   ★ 没有任何执行在跑时，后端仍回分拣状态（保住"上一轮摆位"的显示）。
+        const r = await apiControl("/control/scene-state");
         if (!r.ok) return;
         const d = await r.json();
         updateSortingState(d.state || null);

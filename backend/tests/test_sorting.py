@@ -265,6 +265,48 @@ def test_vote_reason_is_human_readable():
     assert "票" in v["reason"]
 
 
+# ---------------------------------------------------------------- 有效色集（2026-10-10 七色重构）
+#   用户口径："只要用户说的颜色是有效颜色，用户没提到的颜色是无效颜色"。
+#   vote_color(..., valid_colors=...) 把"有效色"从写死的红/绿/蓝换成**用户这句话提到的颜色**。
+def test_vote_valid_colors_default_keeps_rgb_and_rejects_palette_extras():
+    """默认（不传 valid_colors）仍是红/绿/蓝：调色板新增的「青」按**无效色**处理（零回归）。"""
+    v = S.vote_color([_f("青", 0.95)] * 3, 0.3)
+    assert v["ok"] is False and v["color"] == S.COLOR_UNKNOWN
+    assert set(v["votes"].keys()) == {"红", "绿", "蓝"}
+    # 三色本身不受影响
+    assert S.vote_color([_f("红", 0.9)] * 3, 0.3)["ok"] is True
+
+
+def test_vote_valid_colors_makes_unmentioned_color_invalid():
+    """用户只说「红」→ 蓝是**无效色**（不是"未知"）：多帧全蓝也不采信。"""
+    v = S.vote_color([_f("蓝", 0.95)] * 3, 0.3, valid_colors=("红",))
+    assert v["ok"] is False and v["color"] == S.COLOR_UNKNOWN
+    assert set(v["votes"].keys()) == {"红"}
+    assert v["votes"] == {"红": 0}
+
+
+def test_vote_valid_colors_accepts_extra_palette_color():
+    """用户点名「青」→ 青变成有效色（同一批帧，默认会被拒、指名后被采信）。"""
+    frames = [_f("青", 0.95)] * 3
+    assert S.vote_color(frames, 0.3)["ok"] is False                    # 默认：青无效
+    v = S.vote_color(frames, 0.3, valid_colors=("红", "绿", "蓝", "青"))
+    assert v["ok"] is True and v["color"] == "青"
+
+
+def test_vote_valid_colors_independent_of_order_and_dupes():
+    """有效色集允许乱序/去重（内部按集合用）。"""
+    v = S.vote_color([_f("橙", 0.9)] * 3, 0.3, valid_colors=("橙", "橙", "红"))
+    assert v["ok"] is True and v["color"] == "橙"
+
+
+def test_frame_color_respects_names_argument():
+    """frame_color 的名字白名单也要跟着 valid 走（否则内层会把"局"提前判掉）。"""
+    f = {"ok": True, "results": [{"area": 900.0, "color": {"name": "紫", "conf": 0.9}}]}
+    assert S.frame_color(f, 0.3)["name"] == "紫"                       # 结构读法不变
+    assert S.frame_color(f, 0.3, ("红",))["name"] == "紫"              # 名字白名单不影响"读出什么"
+
+
+
 # ---------------------------------------------------------------- 接口层（不碰硬件）
 def test_api_points_endpoint(client):
     """（无令牌）点位体检接口应要求控制令牌 —— 它是运维信息但会暴露点位清单。"""
@@ -486,16 +528,36 @@ def test_start_blow_default_is_500ms(client):
 
 
 def test_start_suck_hold_default_is_500(client):
-    """★ 用户流程口径（2026-10-09）："吸取 → 等待0.5秒 → 抬起"。
+    """★ 用户流程口径："吸取 → 停一下 → 抬起"。
 
     吸上后**先停一下再抬**，等真空建立/吸牢 —— 立刻抬起容易在半空掉件，
-    而现场没有真空反馈，掉了只能等判色失败才发现。默认 500ms。
+    而现场没有真空反馈，掉了只能等判色失败才发现。
+    ★ 2026-10-10 用户口径：停顿时长 **0.5 秒**（默认 500ms）。
     """
     from app.api.sorting import StartIn
 
     m = StartIn()
     assert m.suck_hold_ms == 500
     assert "吸牢" in StartIn.model_fields["suck_hold_ms"].description
+
+
+def test_camera_point_dwell_and_three_frames_within_half_second():
+    """★ 2026-10-10 用户口径："摄像头点位 0.5 秒、0.5 秒内取三帧图片"。
+
+    · C 区停留默认 **500ms**；
+    · 帧间隔 FRAME_GAP_S 固定 → **3 帧跨度 = (3-1)×间隔 ≤ 0.5s**（在停留窗口内取完）。
+    """
+    from app.api import sorting as SA
+    from app.api.sorting import StartIn
+    import inspect
+
+    assert StartIn().dwell_ms == 500
+    assert StartIn().frames == 3
+    span = (3 - 1) * SA.FRAME_GAP_S
+    assert span <= 0.5, "3 帧跨度 %.2fs 超过 0.5s（帧间隔 FRAME_GAP_S=%.2f 太大）" % (
+        span, SA.FRAME_GAP_S)
+    # 反证：帧间隔真被用于取帧（不是写死别的数）
+    assert "FRAME_GAP_S" in inspect.getsource(SA._capture)
 
 
 def test_vote_color_returns_per_frame_detail_and_best():

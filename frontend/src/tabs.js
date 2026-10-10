@@ -18,8 +18,8 @@
 // ★ 这里只决定"显不显示入口"，绝不承担权限判定：每个写接口仍然由后端
 //   require_control(401) / require_admin(403) 把关。前端藏入口是体验，不是安全边界。
 //
-// ★ 数字键 1~8 对应「从左到右第 N 个**可见**模块」。授权齐全时 1~8 恰好就是上面
-//   8 个模块；没权限时后面的不显示、序号顺延（解析与断言见 src/shortcuts.js）。
+// ★ 数字键 1~8 对应「顶栏从左到右第 N 个**可见**模块」（hidden 的不占位）。
+//   没权限时后面的不显示、序号顺延（解析与断言见 src/shortcuts.js）。
 // =====================================================================
 
 /** 被收回权限时的回落页。必须排在 TABS 第一个，且永不需要令牌。 */
@@ -30,20 +30,33 @@ export const HOME_VIEW = "live";
  *   icon      —— 必须存在于 components/Icon.vue 的 ICONS（不存在会静默渲染空 SVG）
  *   needAuth  —— 需要有效控制令牌（admin 或 operator 均可）
  *   needAdmin —— 需要 **管理员** 令牌（隐含 needAuth）
+ *   side      —— 顶栏摆哪边："left" 在标题左侧、"right" 在标题右侧（2026-10-10 用户布局）
+ *   hidden    —— **不在顶栏出现**，但仍是合法页面（刷新能恢复、权限照旧、可被别的入口带过去）
+ *   alias     —— 顶栏高亮的"别名 key"（例：「点位执行」合并了「程序执行」→ 选 program 时
+ *                顶栏也应高亮 point 那个 tab）
  */
 export const TABS = [
-  { key: "live", icon: "camera", label: "真实监控" },
-  { key: "point", icon: "target", label: "点位执行", needAuth: true },
-  { key: "sort", icon: "layers", label: "分拣", needAuth: true },
-  { key: "ai", icon: "megaphone", label: "AI 执行", needAuth: true },
-  { key: "sim", icon: "layers", label: "模拟仿真" },
-  { key: "settings", icon: "sliders", label: "系统设置", needAuth: true },
-  { key: "ops", icon: "activity", label: "运维审计", needAdmin: true },
-  { key: "about", icon: "info", label: "关于" },
+  // ---------- 顶栏左侧 ----------
+  { key: "live", icon: "camera", label: "真实监控", side: "left" },
+  // ★ 2026-10-10 用户口径：**「点位执行」与「程序执行」合并成一个入口** ——
+  //   顶栏只出这一个 tab，两者在**右栏顶部的 tab 条**里切换（见 ExecTabBar 用法）。
+  { key: "point", icon: "target", label: "点位执行", needAuth: true, side: "left",
+    alias: ["program"] },
+  // 与「点位执行」合并：**不在顶栏出现**，靠右栏 tab 条切换（紧跟 point 便于「关于」页成对说明）
+  { key: "program", icon: "play", label: "程序执行", needAuth: true,
+    hidden: true, side: "left" },
+  // ★ 用户 2026-10-10 二次口径：**智能分拣 / AI 执行 放在标题左侧**（模拟仿真留在右侧）。
+  { key: "sort", icon: "layers", label: "智能分拣", needAuth: true, side: "left" },
+  { key: "ai", icon: "megaphone", label: "AI 执行", needAuth: true, side: "left" },
+  // ---------- 顶栏右侧 ----------
+  { key: "sim", icon: "layers", label: "模拟仿真", side: "right" },
+  { key: "ops", icon: "activity", label: "运维审计", needAdmin: true, side: "right" },
+  { key: "settings", icon: "sliders", label: "系统设置", needAuth: true, side: "right" },
+  { key: "about", icon: "info", label: "关于", side: "right" },
 ];
 
-/** 数字键能直达的模块数（与 src/shortcuts.js 的 TAB_KEY_COUNT 必须一致）。 */
-export const TAB_KEY_COUNT = 8;
+/** 顶栏实际显示的 tab 数（数字键 1~N 直达）—— 与 src/shortcuts.js 的 TAB_KEY_COUNT 必须一致。 */
+export const TAB_KEY_COUNT = TABS.filter((t) => !t.hidden).length;     // = 8
 
 /**
  * 某个 tab 对当前权限是否开放。
@@ -60,6 +73,15 @@ export function tabAllowed(tab, auth) {
 /** 当前权限下可见的 tab 列表（保持 TABS 的原始顺序）。 */
 export function visibleTabs(auth) {
   return TABS.filter((t) => tabAllowed(t, auth));
+}
+
+/**
+ * **顶栏要显示的** tab（权限够 **且** 非 hidden）—— 顶栏渲染与数字键 1~N 都用它。
+ * ★ 与 visibleTabs 的区别只有一条：hidden（如「程序执行」）不占顶栏位置，
+ *   但它是**合法页面**（allowedKeys 里仍然有它，刷新能恢复、右栏 tab 能切过去）。
+ */
+export function navTabs(auth) {
+  return TABS.filter((t) => !t.hidden && tabAllowed(t, auth));
 }
 
 /** 当前权限下允许停留的 view key 集合。 */

@@ -43,6 +43,7 @@ import {
 import {
   HOME_VIEW, isKnownView, safeView,
   visibleTabs as visibleTabsOf, allowedKeys as allowedKeysOf,
+  navTabs as navTabsOf,
 } from "./tabs.js";
 import { wsEventsUrl } from "./config.js";
 import { apiControl } from "./net/control.js";   // ★ P0-3：围栏上报需带控制令牌
@@ -161,14 +162,14 @@ function onKeydown(ev) {
 
   // 切模块：按**可见**模块列表解序号（没权限的模块不显示，序号顺延）
   if (action.startsWith("tab:")) {
-    const key = tabKeyFor(action, visibleTabs.value.map((t) => t.key));
+    const key = tabKeyFor(action, nav.value.map((t) => t.key));
     if (!key) {
       flashKeyHint("该序号在当前权限下没有对应模块");
       return;
     }
     if (key === robot.activeView) return;
     setView(key);
-    const t = visibleTabs.value.find((x) => x.key === key);
+    const t = nav.value.find((x) => x.key === key);
     flashKeyHint(t ? `已切到「${t.label}」` : "");
     return;
   }
@@ -310,6 +311,17 @@ function setView(v) {
 const allowedKeys = computed(() => allowedKeysOf(auth));
 
 const visibleTabs = computed(() => visibleTabsOf(auth));
+
+// ★ 2026-10-10 用户口径：顶栏改成"左 2 / 右 6"的可读分组 ——
+//   · 数字键 1~8 走 **nav**（顶栏实际显示的那些，不含 hidden 的「程序执行」）；
+//   · 左右分组由 tabs.js 的 `side` 字段决定（不在这里写死 slice 下标）。
+const nav = computed(() => navTabsOf(auth));
+const tabsLeft = computed(() => nav.value.filter((t) => t.side !== "right"));
+const tabsRight = computed(() => nav.value.filter((t) => t.side === "right"));
+/** 顶栏高亮：把 alias 也算上（「点位执行」合并了「程序执行」）。 */
+function isTabActive(t) {
+  return [t.key, ...(t.alias || [])].includes(robot.activeView);
+}
 
 // 权限丢失（主动释放）/ 令牌到期 / 角色降级（admin→operator）时，把停留在无权限页面的
 // 用户送回真实监控，否则会看到一个"整页按钮全灰"的空壳页面。
@@ -503,37 +515,37 @@ onBeforeUnmount(() => {
 <template>
   <div id="app">
     <header id="topbar">
-      <!-- 左侧 4 个 tab -->
+      <!-- 左侧 tab（由 tabs.js 的 side:"left" 决定） -->
       <div class="tabs-left">
-        <button v-for="t in visibleTabs.slice(0, 4)" :key="t.key" class="tab"
-                :class="{ active: robot.activeView === t.key }" @click="setView(t.key)">
+        <button v-for="t in tabsLeft" :key="t.key" class="tab"
+                :class="{ active: isTabActive(t) }" @click="setView(t.key)">
           <Icon :name="t.icon" :size="15" /> {{ t.label }}
         </button>
       </div>
       <!-- 居中标题 -->
-      <div id="brand" :title="BRAND.name + ' · ' + brandSubtitle()">
-        <span class="brand-mark"><Icon :name="BRAND.logo" :size="19" /></span>
+      <div id="brand" :title="BRAND.name + ' · ' + BRAND.subtitle + ' · ' + brandSubtitle()">
         <span class="brand-text">
           <span class="brand-name">{{ BRAND.name }}</span>
+          <span class="brand-sub">{{ BRAND.subtitle }}</span>
         </span>
       </div>
-      <!-- 右侧 4 个 tab -->
+      <!-- 右侧 tab（side:"right"）+ 速度滑块 -->
       <div class="tabs-right">
-        <button v-for="t in visibleTabs.slice(4)" :key="t.key" class="tab"
-                :class="{ active: robot.activeView === t.key }" @click="setView(t.key)">
+        <button v-for="t in tabsRight" :key="t.key" class="tab"
+                :class="{ active: isTabActive(t) }" @click="setView(t.key)">
           <Icon :name="t.icon" :size="15" /> {{ t.label }}
         </button>
-      </div>
-      <!-- 速度滑块 -->
-      <!-- ★ 全项目唯一速度口径。min/max 直接引用 core/safetyConst.js 的常量
-           （与后端 SPEED_MIN/SPEED_MAX 同口径）：以前这里写 min="1"，
-           而操作 1~4 会被后端拒绝或夹到 5 —— 表现为"我设了 1% 却按 5% 跑"。
-           有静态守卫盯着两处一致（tools/verify_speed.mjs）。 -->
-      <div class="speed-control">
-        <span class="speed-label">速度</span>
-        <input type="range" :min="SPEED_MIN" :max="SPEED_MAX"
-               v-model.number="exec.speed" class="speed-slider" />
-        <span class="speed-value">{{ exec.speed }}%</span>
+        <!-- 速度滑块 -->
+        <!-- ★ 全项目唯一速度口径。min/max 直接引用 core/safetyConst.js 的常量
+             （与后端 SPEED_MIN/SPEED_MAX 同口径）：以前这里写 min="1"，
+             而操作 1~4 会被后端拒绝或夹到 5 —— 表现为"我设了 1% 却按 5% 跑"。
+             有静态守卫盯着两处一致（tools/verify_speed.mjs）。 -->
+        <div class="speed-control">
+          <span class="speed-label">速度</span>
+          <input type="range" :min="SPEED_MIN" :max="SPEED_MAX"
+                 v-model.number="exec.speed" class="speed-slider" />
+          <span class="speed-value">{{ exec.speed }}%</span>
+        </div>
       </div>
     </header>
     <div v-if="showBanner" id="safety-banner" :class="safety.state">
@@ -543,8 +555,29 @@ onBeforeUnmount(() => {
     <div id="main">
       <RealMonitor v-show="robot.activeView === 'live'" />
       <SimMonitor v-show="robot.activeView === 'sim'" />
-      <PointExecView v-show="robot.activeView === 'point'" />
-      <ProgramExecView v-show="robot.activeView === 'program'" />
+      <!-- ★ 2026-10-10 用户口径：「点位执行」与「程序执行」合并成一个入口 ——
+           顶栏只出「点位执行」一个 tab，两者在**右栏顶部的 tab 条**里切换。
+           这个 tab 条通过具名插槽塞进两页的右栏（内容在本组件作用域，直接调 setView）。 -->
+      <PointExecView v-show="robot.activeView === 'point'">
+        <template #sidebarTop>
+          <div class="seg mini exec-tabs">
+            <button :class="{ on: robot.activeView === 'point' }"
+                    @click="setView('point')">点位执行</button>
+            <button :class="{ on: robot.activeView === 'program' }"
+                    @click="setView('program')">程序执行</button>
+          </div>
+        </template>
+      </PointExecView>
+      <ProgramExecView v-show="robot.activeView === 'program'">
+        <template #sidebarTop>
+          <div class="seg mini exec-tabs">
+            <button :class="{ on: robot.activeView === 'point' }"
+                    @click="setView('point')">点位执行</button>
+            <button :class="{ on: robot.activeView === 'program' }"
+                    @click="setView('program')">程序执行</button>
+          </div>
+        </template>
+      </ProgramExecView>
       <SortingView v-show="robot.activeView === 'sort'" />
       <AiControlView v-show="robot.activeView === 'ai'" />
       <EventsView v-show="robot.activeView === 'ops'" />
@@ -703,30 +736,31 @@ onBeforeUnmount(() => {
   height: 1px; background: linear-gradient(90deg, transparent, rgba(47,214,240,0.4), transparent);
   pointer-events: none; }
 
-/* ---- 三段式顶栏：左 tabs | 居中标题 | 右 tabs ---- */
-.tabs-left, .tabs-right { flex: 1; display: flex; min-width: 0; }
+/* ---- 三段式顶栏：左 tabs | 居中标题 | 右 tabs ----
+   ★ 左右两组用 `flex: 1 1 0`（不是 flex:1）→ 两组**等宽**，标题才真正居中；
+     速度滑块放在右组内（用 margin-left:auto 顶到最右），否则右侧多一块会把标题挤偏。 */
+.tabs-left, .tabs-right { flex: 1 1 0; display: flex; min-width: 0; }
 .tabs-left { justify-content: flex-end; }
 .tabs-right { justify-content: flex-start; }
 
-/* ---- 居中标题 ---- */
-#brand { flex: none; display: flex; align-items: center; gap: 10px;
+/* ---- 居中标题（无图标：品牌名在上、副标题在下，两行都居中）---- */
+#brand { flex: none; display: flex; align-items: center;
   padding: 0 10px; white-space: nowrap; }
-.brand-mark { width: 32px; height: 32px; flex: none; display: grid; place-items: center;
-  border-radius: 9px; color: var(--accent);
-  background: linear-gradient(145deg, var(--accent-soft2), var(--accent-soft3));
-  border: 1px solid var(--accent-line);
-  box-shadow: 0 0 14px var(--accent-soft), inset 0 0 0 1px var(--accent-soft3); }
-.brand-text { display: flex; align-items: center; min-width: 0; overflow: hidden; }
+.brand-text { display: flex; flex-direction: column; align-items: center;
+  justify-content: center; min-width: 0; overflow: hidden; line-height: 1.18; }
 .brand-name { font-size: 18px; font-weight: 800; white-space: nowrap;
   letter-spacing: .04em; overflow: hidden; text-overflow: ellipsis;
   font-family: 'Chakra Petch', var(--font);
   background: linear-gradient(120deg, var(--accent), #6ea8ff);
   -webkit-background-clip: text; background-clip: text; color: transparent;
   filter: drop-shadow(0 0 12px rgba(47,214,240,0.25)); }
+.brand-sub { font-size: 10.5px; font-weight: 500; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  letter-spacing: .07em; max-width: 300px; }
 
-/* ---- 速度滑块 ---- */
-.speed-control { flex: none; display: flex; align-items: center; gap: 8px;
-  padding: 0 10px; border-left: 1px solid var(--line); white-space: nowrap; }
+/* ---- 速度滑块（在右组内，margin-left:auto 顶到最右） ---- */
+.speed-control { margin-left: auto; flex: none; display: flex; align-items: center; gap: 8px;
+  padding: 0 4px 0 10px; border-left: 1px solid var(--line); white-space: nowrap; }
 .speed-label { font-size: 11px; color: var(--muted); font-weight: 600; }
 .speed-slider { width: 90px; height: 4px; -webkit-appearance: none; appearance: none;
   background: var(--panel3); border-radius: 2px; outline: none; cursor: pointer; }

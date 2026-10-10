@@ -17,16 +17,26 @@ const camBase = cameraBase;
 const POST_TIMEOUT_MS = 8000;
 const STATUS_TIMEOUT_MS = 4000;
 
+// ★★ 2026-10-10 安全加固（静态评审 A1）：相机服务可选的**共享令牌**。
+//   后端（camera_service.py）设了 EFORT_CAMERA_TOKEN 时，**写接口**要求 X-Camera-Token；
+//   这里用**构建期**变量 VITE_CAMERA_TOKEN 提供同一把令牌（构建时烘进 bundle）。
+//   ⚠ 它只是"挡局域网/挡第三方网页"的粗粒度门槛，**不是强认证**；真要强认证应上 HTTPS。
+const CAM_TOKEN = import.meta.env?.VITE_CAMERA_TOKEN || "";
+
 /**
  * 带超时的 fetch。
  * ★ 用 AbortController 而不是"race 一个 Promise"：后者只是让调用方提前返回，
  *   底层请求仍在跑，连开几个就会把浏览器连接数占满。
+ * ★ 配了 VITE_CAMERA_TOKEN 就统一带上 X-Camera-Token（GET 带上也无害）。
  */
 async function fetchWithTimeout(url, opts, ms) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), ms);
+  const o = CAM_TOKEN
+    ? { ...opts, headers: { ...((opts && opts.headers) || {}), "X-Camera-Token": CAM_TOKEN } }
+    : opts;
   try {
-    return await fetch(url, { ...opts, signal: ac.signal });
+    return await fetch(url, { ...o, signal: ac.signal });
   } finally {
     clearTimeout(timer);
   }
@@ -57,8 +67,10 @@ export const useCameraStore = defineStore("camera", {
     colorConf: (s) => s.status?.vision?.min_conf ?? 0.35,
     // ★ 目标检测置信度阈值（YOLO）：/status 的 conf。误报多就往上调。
     detConf: (s) => s.status?.conf ?? 0.5,
-    /** 三色识别目标（红/绿/蓝）。 */
-    colorTargets: (s) => s.status?.vision?.targets || ["红", "绿", "蓝"],
+    /** 可识别色（2026-10-10 七色重构）：七色调色板 + 黑（无彩色）。
+     *  ★ "有效 / 无效"由**用户指令**决定，色片只展示"检测器能识别到哪些色"。 */
+    colorTargets: (s) => s.status?.vision?.targets
+      || ["红", "橙", "黄", "绿", "青", "蓝", "紫", "黑"],
     /** 颜色识别累计次数（"目标"统计用；YOLO 关掉后 det_count 恒为 0）。 */
     colorCount: (s) => s.status?.vision?.count ?? 0,
     /** 相机自身报的错（如"未找到相机"），与 serviceDown 区分开。 */

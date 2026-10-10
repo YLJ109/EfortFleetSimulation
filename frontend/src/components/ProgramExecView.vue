@@ -220,6 +220,8 @@ watch(() => rc.readyTick, (n) => {
       <CameraPanel :views="['program', 'live']" />
     </template>
 
+    <!-- ★ 右栏顶部：与「点位执行」共用的页内 tab 条（由 App.vue 传入 —— 两页合并成一个入口） -->
+    <slot name="sidebarTop" />
     <!-- 就绪提示盒：一屏只给一个结论 —— 就绪 / 未就绪 + 一句原因。 -->
     <div class="ready-box" :class="{ ok: isReady }">
       <span class="rb-dot"></span>

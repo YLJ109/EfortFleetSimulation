@@ -911,15 +911,21 @@ input:disabled + .slider { opacity: .45; cursor: not-allowed; }
   font-size: 11.5px; color: var(--muted); }
 .why-row.bad { color: var(--warn, #d48806); }
 
-/* 三色目标 chips */
+/* 可识别色 chips（2026-10-10 七色调色板 + 无彩色「黑」） */
 .target-row { display: flex; gap: 6px; margin-top: 6px; }
 .target-chip {
   font-size: 11px; line-height: 1; padding: 4px 10px; border-radius: 10px;
   color: #fff; opacity: .92;
 }
 .chip-红 { background: #e5404a; }
+.chip-橙 { background: #ff7a18; }
+.chip-黄 { background: #ffd400; color: #3a2c00; }
 .chip-绿 { background: #2f9e57; }
+.chip-青 { background: #00bfc8; color: #04333a; }
 .chip-蓝 { background: #2f6fed; }
+.chip-紫 { background: #8a3fc0; }
+/* ★ 黑 = **无彩色**（识别到了，但永不进分拣，原路放回原位） */
+.chip-黑 { background: #1c1f24; border: 1px solid #5a616b; }
 
 .action-btns {
   display: flex; gap: 6px;

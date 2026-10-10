@@ -22,7 +22,7 @@ export const SHORTCUT_GROUPS = ["导航", "视图", "执行", "安全"];
 /**
  * 快捷键清单（唯一事实来源：解析表 + 「关于」页的说明都读它）。
  *   id     —— 动作标识，App.vue 按它分派
- *   keys   —— 触发键（KeyboardEvent.key 的小写形式；数字键用 1~9，范围见 TAB_KEY_COUNT）
+ *   keys   —— 触发键（KeyboardEvent.key 的小写形式；数字键用 1~8，范围见 TAB_KEY_COUNT）
  *   label  —— 界面上显示的键帽文字
  *   group  —— 分组
  *   desc   —— 一句话说明
@@ -32,7 +32,7 @@ export const SHORTCUT_GROUPS = ["导航", "视图", "执行", "安全"];
  */
 export const SHORTCUTS = [
   {
-    id: "tab", keys: ["1", "2", "3", "4", "5", "6", "7"], label: "1 ~ 7",
+    id: "tab", keys: ["1", "2", "3", "4", "5", "6", "7", "8"], label: "1 ~ 8",
     group: "导航", desc: "从左到右切到第 N 个模块（没有权限的模块不显示，序号顺延）",
     needAuth: false, danger: false, when: "任何页面",
   },
@@ -66,8 +66,8 @@ export const SHORTCUTS = [
 /** id → 定义（供「关于」页与提示文案取描述）。 */
 export const SHORTCUT_BY_ID = Object.fromEntries(SHORTCUTS.map((s) => [s.id, s]));
 
-/** 数值键位数（= 最大可直达模块数）。 */
-export const TAB_KEY_COUNT = 9;
+/** 数值键位数（= 顶栏可直达模块数，与 src/tabs.js 的 TAB_KEY_COUNT 必须一致）。 */
+export const TAB_KEY_COUNT = 8;
 
 const IGNORE_TAGS = { INPUT: 1, TEXTAREA: 1, SELECT: 1, OPTION: 1 };
 

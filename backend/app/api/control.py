@@ -453,7 +453,7 @@ def _program_dir() -> str:
 def _safe_file(name: str) -> Optional[str]:
     """文件名 → 目录内绝对路径；拒绝路径穿越，文件不存在返回 None。
     支持 .json 与 .xpl 两种可执行程序文件。"""
-    base = os.path.abspath(_program_dir())
+    base = os.path.realpath(_program_dir())   # ★ realpath：连**软链**一起解析（评审 A5）
     n = (name or "").strip().replace("\\", "/")
     n = os.path.basename(n)                 # 只认文件名，丢弃任何目录片段
     if not n or n in (".", "..") or ".." in n:
@@ -468,7 +468,8 @@ def _safe_file(name: str) -> Optional[str]:
         if not os.path.isfile(p):
             p = os.path.abspath(os.path.join(base, n + ".json"))
     try:
-        if os.path.commonpath([p, base]) != base:
+        # ★ 用 realpath 比较：目录内若有**指向外面的软链**，abspath 看不出来（评审 A5）
+        if os.path.commonpath([os.path.realpath(p), base]) != base:
             return None
     except ValueError:                      # 不同盘符时 commonpath 抛错
         return None
@@ -898,6 +899,36 @@ _RUN_PROGRESS: Dict[str, Dict] = {}
 #   变成 null，界面只能靠乐观值猜。
 _LAST_RUN_ID: Optional[str] = None
 
+# ★★ 2026-10-10：执行登记的**存活判据**（现场死机自愈，见 `_purge_dead_runs`）。
+#   · 登记里带执行线程 → 以 `thread.is_alive()` 为准（最准）；
+#   · 否则用心跳：执行循环每次 `_set_progress()/RunContext.progress()` 都会刷新它。
+_RUN_STALE_S = 45.0
+
+# =====================================================================
+# ★★ 2026-10-10：**统一场景状态** —— 3D 的唯一数据源。
+#
+#   背景（用户："AI 执行没有变颜色…**所有的执行都要联动**"）：
+#   前端 3D 只轮询 `/sorting/state`，而 AI 执行的状态在 `/ai/state` ——
+#   于是 AI 跑的时候 3D 一动不动（`/sorting/state` 那时是空的）。
+#
+#   做法：每种执行（分拣 / AI / 井字棋）各自登记一个"场景状态提供者"，
+#   `GET /control/scene-state` 返回**当前在跑的那一个**。前端只认这一个口，
+#   于是"哪种执行在跑，3D 就跟着动"，且不新增轮询条数。
+# =====================================================================
+_SCENE_SRC: Dict[str, object] = {}
+
+# ★ 2026-10-10 性能（评审 B4）：`/control/scene-state` 被前端按 1s 轮询，
+#   没必要**每次都**清一遍死登记（清理由 `_reject_if_run_active` 与 `/force-release` 兜底）；
+#   这里每 5 次轮询清一次即可，把"取全局锁 + 遍历"的频次降下来。
+_SCENE_TICK = 0
+_SCENE_PURGE_EVERY = 5
+
+
+def register_scene_source(kind: str, fn) -> None:
+    """登记某类执行的**3D 场景状态**提供者（返回 None = 该源当前没状态）。"""
+    _SCENE_SRC[str(kind)] = fn
+
+
 
 def _cancel_expired() -> None:
     now = time.time()
@@ -914,7 +945,10 @@ def _is_cancelled(run_id: Optional[str]) -> bool:
 
 
 def _set_progress(run_id: Optional[str], **kw) -> None:
-    """更新某次执行的进度快照（线程安全；供 /control/run-state 读取）。"""
+    """更新某次执行的进度快照（线程安全；供 /control/run-state 读取）。
+
+    ★ 顺带刷新 `_RUN_ACTIVE` 的**心跳**（存活判据，见 `_purge_dead_runs`）。
+    """
     if not run_id:
         return
     with _RUN_CANCEL_LOCK:
@@ -923,6 +957,9 @@ def _set_progress(run_id: Optional[str], **kw) -> None:
             st = {"run_id": run_id, "running": True, "paused": False}
             _RUN_PROGRESS[run_id] = st
         st.update(kw)
+        info = _RUN_ACTIVE.get(run_id)
+        if info is not None:
+            info["heartbeat"] = time.time()
 
 
 def _pause_event(run_id: str) -> "threading.Event":
@@ -973,6 +1010,55 @@ def _sleep_pausable(seconds: float, run_id: Optional[str]) -> bool:
     return _is_cancelled(run_id)
 
 
+def _purge_dead_runs() -> List[str]:
+    """清掉**已经死掉**的执行登记（现场死机自愈，2026-10-10）。
+
+    ★ 为什么要自愈（用户原话）："程序正在执行中，但是没跑代码，就绪和取消都成功，
+      无法下达指令"。根因是 `_RUN_ACTIVE` 里残留了一条**没有活线程**的登记 ——
+      `_reject_if_run_active()` 只看它是否非空，于是**永久**拒绝所有手动下发；
+      而 `/ready`、`/ready/cancel` 不看它，所以"就绪和取消都成功"。三条现象全对上。
+    ★ 判据（**宁可不杀**，绝不误清真在跑的执行）：
+      · 登记带执行线程 → **只认 `thread.is_alive()`**（长运动最长可等完成位 ~30s，
+        用"心跳超时"去判会误杀真在跑的执行 —— 那是把机器人交给手动指令，绝不允许）；
+      · 没有登记线程（新调用方漏登记）→ 才用心跳兜底（停摆超过 `_RUN_STALE_S`）。
+    ★ 只动**软件登记**：不写任何寄存器、不产生任何运动。
+    """
+    now = time.time()
+    dead: List[str] = []
+    with _RUN_CANCEL_LOCK:
+        for rid, info in list(_RUN_ACTIVE.items()):
+            th = info.get("thread")
+            if th is not None:
+                # ★ 有执行线程 → **只认 is_alive()**（最准）。
+                #   不能再用"心跳停摆"去判：一次长运动最长可等完成位 ~30s，
+                #   用超时误杀真在跑的执行 = 把机器人交给手动指令，绝不能发生。
+                if not th.is_alive():
+                    dead.append(rid)
+                continue
+            ev = _RUN_PAUSE.get(rid)
+            if ev is not None and ev.is_set():
+                continue                                   # 暂停 = 正常状态，不是死
+            # 没有登记线程（未来的新调用方可能忘了）→ 用心跳兜底
+            last = float(info.get("heartbeat") or info.get("started_at") or now)
+            if now - last > _RUN_STALE_S:
+                dead.append(rid)
+        for rid in dead:
+            _RUN_ACTIVE.pop(rid, None)
+            _RUN_CANCEL.pop(rid, None)
+            _RUN_PAUSE.pop(rid, None)
+            st = _RUN_PROGRESS.get(rid)
+            if st is not None:
+                st["running"] = False
+                st["phase"] = "reaped"
+                st["error"] = ((st.get("error") or "")
+                               + "（登记已自动清理：执行线程已不存在）")
+    for rid in dead:
+        emit_event("control", "warn", "control.run_reaped",
+                   "检测到已死的执行登记，已自动清理（手动指令恢复可用）：%s" % rid,
+                   {"run_id": rid}, actor="control")
+    return dead
+
+
 def _reject_if_run_active(what: str) -> None:
     """★ 2026-09-29：序列/文件执行期间拒绝**手动**下发。
 
@@ -981,6 +1067,7 @@ def _reject_if_run_active(what: str) -> None:
     产生谁也说不清的半截状态（机器人走一半、阀开着、完成位对不上）。
     要手动操作，请先点「停止执行」。
     """
+    _purge_dead_runs()      # ★ 先自愈：清掉"没有活线程"的残留登记，避免永久死锁
     with _RUN_CANCEL_LOCK:
         active = list(_RUN_ACTIVE.keys())
     if active:
@@ -1023,7 +1110,8 @@ class RunContext:
             _RUN_PAUSE.pop(run_id, None)
             for k in [k for k, v in _RUN_PROGRESS.items() if not v.get("running")]:
                 _RUN_PROGRESS.pop(k, None)
-        _RUN_ACTIVE[run_id] = {"filename": name, "kind": kind, "started_at": time.time()}
+        _RUN_ACTIVE[run_id] = {"filename": name, "kind": kind, "started_at": time.time(),
+                               "heartbeat": time.time(), "thread": None}
         global _LAST_RUN_ID
         _LAST_RUN_ID = run_id
         _set_progress(run_id, name=name, kind=kind, running=True, paused=False,
@@ -1042,6 +1130,15 @@ class RunContext:
 
     def progress(self, **kw) -> None:
         _set_progress(self.run_id, **kw)
+
+    def set_thread(self, th) -> None:
+        """绑定执行线程（存活判据用）。★ 启动方必须在 `th.start()` 之后调用它 ——
+        否则 `_purge_dead_runs()` 只能退回"心跳超时"判死，不如 `is_alive()` 可靠。"""
+        with _RUN_CANCEL_LOCK:
+            info = _RUN_ACTIVE.get(self.run_id)
+            if info is not None:
+                info["thread"] = th
+                info["heartbeat"] = time.time()
 
     def finish(self, phase: str = "done") -> None:
         with _RUN_CANCEL_LOCK:
@@ -1353,23 +1450,56 @@ def api_files(tok: str = Depends(require_control)):
 
 @router.post("/run-file")
 def api_run_file(body: RunFileIn, tok: str = Depends(require_control)):
-    """按文件名执行：dry_run=True 试运行测试（只校验不下发），False 真实下发。"""
-    # ★ P0-7：为本次执行分配 run_id 并登记，供 /control/run-cancel 精确中止。
+    """按文件名执行：**立即返回**，真正的下发在后台线程（见 `_run_file_job`）。
+
+    ★★ 2026-10-10 性能根治（评审 B1）：原来是**同步**端点 —— 一次程序执行可能跑几分钟，
+      一直占着 anyio 线程池的一个 worker（池满 = "整个网页转圈、点哪都不响应"）。
+      现在：请求内只做**解析/校验**（保持 404 + 候选列表的**同步**语义，前端要用它），
+      校验通过就起后台线程跑执行体、立即返回 run_id。前端靠 `/control/run-state`
+      取进度与**最终结果**（`state.result`）。
+    """
+    # ★ P0-7：为本次执行分配 run_id（供 /control/run-cancel 精确中止）。
     run_id = (body.run_id or "").strip() or ("run-%d" % time.time_ns())
     _cancel_expired()
     disp_name = (body.name or "").strip() or ((body.filename or "").strip() or "序列")
-    with _RUN_CANCEL_LOCK:
-        _RUN_CANCEL.pop(run_id, None)     # 同一 run_id 复用时先清掉旧的中止标记
-        _RUN_PAUSE.pop(run_id, None)
-        # 只保留"最近一次"的进度快照，避免条目无限增长
-        for k in [k for k, v in _RUN_PROGRESS.items() if not v.get("running")]:
-            _RUN_PROGRESS.pop(k, None)
-    _RUN_ACTIVE[run_id] = {"filename": disp_name, "started_at": time.time()}
-    global _LAST_RUN_ID
-    _LAST_RUN_ID = run_id          # 供收尾后读取终态（见 api_run_state）
+
+    # ① 同步预检：解析出目标。拿不到时必须**在请求内**回 404（前端据此列候选）。
+    rkind = "program"          # 序列（items 模式）按"程序"对待 —— 与前端原口径一致
+    db0 = SessionLocal()
+    try:
+        if (body.filename or "").strip():
+            res0 = _resolve_file(body.filename, db0)
+            if res0 is None:
+                emit_event("control", "warn", "control.run_file_missing",
+                           f"按文件名执行未命中：{body.filename}",
+                           {"filename": body.filename}, actor=_actor(tok))
+                raise HTTPException(404, detail={
+                    "message": f"未找到可执行目标：{body.filename}",
+                    "candidates": _candidates(db0),
+                })
+            rkind = str(res0.get("kind") or "file")
+        elif not _norm_seq_items(body.items):
+            raise HTTPException(400, detail={"message": "序列为空或步骤非法"})
+    finally:
+        db0.close()
+
+    # ② 后台线程执行（登记/注销由 RunContext 负责；进度与结果写进 _RUN_PROGRESS）
+    ctx = RunContext(run_id, disp_name, kind="file")
+    th = threading.Thread(target=_run_file_job, args=(ctx, body, tok, run_id, disp_name),
+                          name="run-file", daemon=True)
+    th.start()
+    ctx.set_thread(th)          # ★ 绑定执行线程 → 卡死登记能被 is_alive() 精确识别
+    # ★ 立即返回：把 kind 一起给前端（原响应体里的 kind 用于"程序/文件/点位"分支的步骤高亮）
+    return {"ok": True, "started": True, "run_id": run_id,
+            "name": disp_name, "kind": rkind}
+
+
+def _run_file_job(ctx, body: RunFileIn, tok: str, run_id: str, disp_name: str) -> None:
+    """后台执行体 —— 就是原来那份**逐步下发逻辑，一行没改**。"""
     _set_progress(run_id, name=disp_name, running=True, paused=False,
                   index=0, total=0, step_name="", phase="starting")
     cancelled = False
+    payload = None
     db = SessionLocal()
     try:
         # ★ 2026-09-29：两种来源 —— 给了 filename 按文件执行（以文件为准）；
@@ -1622,16 +1752,75 @@ def api_run_file(body: RunFileIn, tok: str = Depends(require_control)):
                        actor=_actor(tok))
         return payload
     finally:
-        # ★ P0-7：无论正常结束/异常/中止，都要注销在跑登记并清掉中止标记
-        with _RUN_CANCEL_LOCK:
-            _RUN_ACTIVE.pop(run_id, None)
-            _RUN_CANCEL.pop(run_id, None)
-            _RUN_PAUSE.pop(run_id, None)
-        # ★ 2026-09-29：进度快照**保留**（供前端读取最后状态），但标记为已结束；
-        #   下一次执行开始时会清掉这些已结束的旧条目。
-        _set_progress(run_id, running=False, paused=False,
-                      phase=("cancelled" if cancelled else "done"))
-        db.close()
+        # ★★ 2026-10-10（B1 异步化）：**注销运行登记是第一件事** —— 收尾里任何一步
+        #   抛异常都不许把登记留在表里（那会永久拒绝手动下发，见 `_purge_dead_runs`）。
+        ctx.finish("cancelled" if cancelled else "done")
+        try:
+            # ★ 把**最终结果**写进进度快照：异步化后前端**没有 HTTP 响应体可读了**，
+            #   改从 `/control/run-state` 的 `state.result` 取（字段与原响应体一致）。
+            _set_progress(run_id, result=payload if isinstance(payload, dict) else {
+                "ok": False, "run_id": run_id, "name": disp_name, "count": 0,
+                "steps": [], "error": "执行未产出结果（收尾前异常，详见后端日志）"})
+        except Exception:  # noqa: BLE001
+            log.exception("写执行结果到进度快照失败 run_id=%s", run_id)
+        try:
+            db.close()
+        except Exception:  # noqa: BLE001
+            log.exception("关闭执行会话失败 run_id=%s", run_id)
+
+
+@router.get("/scene-state")
+def api_scene_state(tok: str = Depends(require_control)):
+    """★ 2026-10-10：**统一场景状态** —— 3D 的唯一数据源（任何页都可用）。
+
+    ★ 为什么要有它（用户："AI 执行没有变颜色…**所有的执行都要联动**"）：
+      前端 3D 原来只轮询 `/sorting/state`，而 AI 执行的状态在 `/ai/state` ——
+      AI 跑的时候 3D 一动不动。现在这里返回**当前在跑的那一个执行**的状态，
+      前端只认这一个口：**哪种执行在跑，3D 就跟着动**。
+
+    `state` 与 `/sorting/state` 的 state 同构（能给的给、给不了的为空）。
+    没有任何执行在跑时：`source=None, running=False`，仍把分拣的空状态带出来
+    （分拣页/收尾后需要它画"当前摆位"）。
+    """
+    global _SCENE_TICK
+    _SCENE_TICK += 1
+    if _SCENE_TICK % _SCENE_PURGE_EVERY == 1:      # ★ 降频（评审 B4）
+        _purge_dead_runs()
+    with _RUN_CANCEL_LOCK:
+        items = [(rid, dict(v)) for rid, v in _RUN_ACTIVE.items()]
+    src: Optional[str] = None
+    rid: Optional[str] = None
+    if items:
+        rid, info = items[-1]
+        src = str(info.get("kind") or "file")
+    fn = _SCENE_SRC.get(src or "sorting")
+    st = fn() if callable(fn) else None
+    if st is None and src and src != "sorting":
+        # 该执行种类没有 3D 语义（如"序列文件"）→ 保持**分拣场景**
+        #   （与改造前一致：那时统一返回的也是分拣那份状态，不会把托盘清空）
+        f2 = _SCENE_SRC.get("sorting")
+        st = f2() if callable(f2) else None
+    return {"ok": True, "source": src, "run_id": rid, "running": bool(items), "state": st}
+
+
+@router.post("/force-release")
+def api_force_release(tok: str = Depends(require_control)):
+    """★ 2026-10-10 兜底复位：清掉**卡死的执行登记**，让手动指令恢复可用。
+
+    ★ 只清"**已经死掉**"的登记（线程已不存在）。只要还有**活着的**执行，一律拒绝 ——
+      让你先走「停止执行」/「取消就绪」，**绝不把正在跑的机器人交给手动指令**。
+    ★ 只动软件登记：**不写任何寄存器、不产生任何运动**。
+    """
+    reaped = _purge_dead_runs()
+    with _RUN_CANCEL_LOCK:
+        alive = list(_RUN_ACTIVE.keys())
+    if alive:
+        return {"ok": False, "reaped": reaped,
+                "error": ("仍有**活着的**执行（%s）：请先用「停止执行」或「取消就绪」，"
+                          "不能强行清掉正在跑的机器人。" % ", ".join(alive[:2]))}
+    return {"ok": True, "reaped": reaped,
+            "message": (("已清掉 %d 条卡死的执行登记（未写任何寄存器）" % len(reaped))
+                        if reaped else "没有检测到卡死的执行登记（当前无执行在跑）")}
 
 
 @router.get("/locks")

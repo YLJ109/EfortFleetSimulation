@@ -36,9 +36,11 @@
 // =====================================================================
 import * as THREE from "three";
 import { sceneFromBaseMm } from "./sceneCoords.js";
+import { suckerLocalMmForSide } from "./endEffector.js";
 
-/** 三色 → 十六进制（与视觉/后端同名同色，避免"3D 里的红"与识别出的"红"不是一回事）。 */
-export const SORT_COLOR_HEX = { "红": 0xe02020, "绿": 0x2e9e4f, "蓝": 0x1f4fd8 };
+/** 四色 → 十六进制（与视觉/后端同名同色，避免"3D 里的红"与识别出的"红"不是一回事）。
+ *  ★ 「黑」= **无效颜色**（第 4 色）：识别到了但不进分拣，原路放回原位。 */
+export const SORT_COLOR_HEX = { "红": 0xe02020, "绿": 0x2e9e4f, "蓝": 0x1f4fd8, "黑": 0x1c1f24 };
 /** 未判色 = 未知灰；疑似没取到 = 警示红（与"红方块"区分：更亮 + 描边）。 */
 export const HEX_UNKNOWN = 0x8a8f95;
 export const HEX_SUSPECT = 0xff3b30;
@@ -49,6 +51,12 @@ const HEX_BLOCK_EDGE = 0x0b0e11;        // 方块描边（深色，让蓝色块�
 
 /** 方块默认尺寸(mm) —— 与后端 `BLOCK_MM_DEFAULT` 保持一致（现场可传参覆盖）。 */
 export const DEFAULT_BLOCK_MM = [70, 70, 14];
+
+// ★ 双面两块料（2026-10-10 · 方案 docs/方案-J6双面吸盘（一趟两件·靠J6翻转用另一面）.md §3/§4）：
+//   下板(−x) 与上板(+x) 的吸盘口沿工具局部 x 关于法兰轴**对称**，两口间距 =
+//   suckerLocalMmForSide(+1) − suckerLocalMmForSide(−1)。manager 只喂"下板吸盘口"这一个
+//   世界锚点，上板锚点就靠这个间距 + 锚点朝向镜像得到 —— 尺寸与建模几何同源，不手算硬编码。
+const HAND_MIRROR_MM = suckerLocalMmForSide(1, 0)[0] - suckerLocalMmForSide(-1, 0)[0];
 
 /** 托盘盒参数(mm)：内净空到料的间隙 / 壁厚 / 壁高 = 料厚 + 该值。 */
 //  ★ 托盘与料的高度关系（物理正确版）：**托盘底面坐在摆放面上，料的底面坐在托盘内底面上**
@@ -106,11 +114,14 @@ export function createSortingBlocks(liftY = 0) {
   const bBlocks = new Map();   // name -> { mesh, edge }
   const trays = [];            // A/B 两个托盘盒（Group）
   const trayGeos = [];         // 托盘盒几何（每盒尺寸不同，须各自释放）
-  let hand = null;             // 手上那块（跟随末端，位置每帧由 manager 喂世界坐标）
-  // 「手上那块」的朝向修正：绕自身 z 轴 90°，把料的厚度方向对齐吸盘开口方向（+x）。
+  let hand = null;             // 手上那块·**下板**（跟随末端，位置每帧由 manager 喂世界坐标）
+  let handUpper = null;        // 手上那块·**上板**（双面新增；同一套锚点镜像定位）
+  // 「手上那块」的朝向修正：绕自身 z 轴 −90°，把料的厚度方向对齐吸盘开口方向（−x）。
   // 建一次复用（每帧新建 Quaternion 会白白产生垃圾对象）。
+  // ★ 料是 70×70 方料（x=z=70），绕 z 正负 90° 视觉等价；这里取 −90° 只是让"厚 14"这一维
+  //   方向与下面的 −x 开口保持一致（改料尺寸为非方料时就不会错）。
   const Q_ROT_HAND = new THREE.Quaternion()
-    .setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI / 2);
+    .setFromAxisAngle(new THREE.Vector3(0, 0, 1), -Math.PI / 2);
 
   let slots = [];              // 后端返回的槽位表（已过滤：未示教/重叠不画）
   let planeZ = 0;              // 示教法兰高度(mm，基座系) —— **只用于体检显示**
@@ -137,6 +148,7 @@ export function createSortingBlocks(liftY = 0) {
       m.clear();
     });
     if (hand) { if (hand.group.parent) hand.group.parent.remove(hand.group); hand = null; }
+    if (handUpper) { if (handUpper.group.parent) handUpper.group.parent.remove(handUpper.group); handUpper = null; }
     if (camGroup) { if (camGroup.parent) camGroup.parent.remove(camGroup); camGroup = null; }
     trays.splice(0).forEach((t) => { if (t.parent) t.parent.remove(t); });
     if (blockGeo) { disposeGeo(blockGeo); blockGeo = null; }
@@ -299,15 +311,28 @@ export function createSortingBlocks(liftY = 0) {
     lastKey = "";
   }
 
-  /** 手上那块：跟随末端（位置由 manager 每帧喂世界坐标 mm）。 */
+  /** 手上那块·**下板**：跟随末端（位置由 manager 每帧喂世界坐标 mm）。 */
   function ensureHand() {
     if (hand) return hand;
     const b = mkBlock(matUnknown);
     b.group.visible = false;
-    b.group.userData = { sortHand: true };
+    // ★ face = 哪一面在吸（lower=下板 −x 开口 / upper=上板 +x 开口）；
+    //   供调试与回归读取（现场无真空反馈，"哪面在吸"是流程推断）。
+    b.group.userData = { sortHand: true, face: "lower", inferred: false };
     root.add(b.group);
     hand = b;
     return hand;
+  }
+
+  /** 手上那块·**上板**（双面新增）：与下板对称，靠 step() 的镜像锚点定位。 */
+  function ensureHandUpper() {
+    if (handUpper) return handUpper;
+    const b = mkBlock(matUnknown);
+    b.group.visible = false;
+    b.group.userData = { sortHand: true, face: "upper", inferred: false };
+    root.add(b.group);
+    handUpper = b;
+    return handUpper;
   }
 
   /**
@@ -336,8 +361,29 @@ export function createSortingBlocks(liftY = 0) {
     const piece = tttOn ? 0 : (Number(s.piece) || 0);
     const colorName = SORT_COLOR_HEX[s.color] ? s.color : "";
     const simColor = !!s.sim_color;
+
+    // ★ 双面两块料（2026-10-10）：后端会给 `hold_lower` / `hold_upper`（各为 null 或 {color, ok}）。
+    //   · 两个字段任一存在 → 按双面处理（两块可同时可见）；
+    //   · 只有旧的 `holding` → 退回"下板单件"，行为与以前**完全一致**（零回归）；
+    //   · 井字棋覆盖期间沿用它的 holding（单件·下板）。
+    const dual = !tttOn && ("hold_lower" in s || "hold_upper" in s);
+    // "哪一面在吸"是**流程推断**（现场无真空反馈）→ 如实带到 userData，不编"确实吸住了"。
+    const inferFlag = !!s.hold_inferred;
+    let holdL = null, holdU = null;
+    if (tttOn) {
+      if (tttOverride.holding) holdL = { color: "", ok: true };
+    } else if (dual) {
+      holdL = s.hold_lower || null;
+      holdU = s.hold_upper || null;
+    } else if (holding) {
+      holdL = { color: colorName, ok: true };
+    }
+    const heldCount = (holdL ? 1 : 0) + (holdU ? 1 : 0);
+    const holdKey = [holdL ? (holdL.color || "-") + (holdL.ok === false ? "!" : "") : "_",
+                     holdU ? (holdU.color || "-") + (holdU.ok === false ? "!" : "") : "_",
+                     inferFlag ? 1 : 0].join(",");
     const key = [placed, holding, suspect, piece, colorName, simColor,
-                 s.stage, s.running, s.dry_run,
+                 s.stage, s.running, s.dry_run, holdKey,
                  tttB ? tttB.map((v) => v || ".").join("") : "",
                  tttUsed ? tttUsed.join(",") : ""].join("|");
     if (key === lastKey) return;
@@ -346,7 +392,10 @@ export function createSortingBlocks(liftY = 0) {
     // A 区：已放走的 + （在手上的 / 疑似拿走的）都消失
     const goneA = new Set();
     for (let i = 1; i <= placed; i++) goneA.add("A" + i);
-    if (holding && placed < 9) goneA.add("A" + (placed + 1));
+    // 在手上的料按 A 区顺序占掉接下来 heldCount 格（单件时 heldCount=1 → 与旧行为一致）
+    for (let k = 1; k <= heldCount; k++) {
+      if (placed + k <= 9) goneA.add("A" + (placed + k));
+    }
     // ★ 井字棋：已取用的 A 格同样消失（棋子已被搬到 B 区）
     if (tttUsed) for (const nm of tttUsed) goneA.add(String(nm).trim().toUpperCase());
     // 失败停止（疑似没取到）：该格**画回来**并标红 —— 不带走、不显示夹持
@@ -357,7 +406,7 @@ export function createSortingBlocks(liftY = 0) {
       const isSuspect = name === suspectCell;
       b.group.visible = !taken || isSuspect;
       b.group.userData.suspect = isSuspect;
-      const hot = isSuspect || (!!s.running && !holding && idx === piece);
+      const hot = isSuspect || (!!s.running && !heldCount && idx === piece);
       b.mesh.material = isSuspect ? matSuspect : matBlack;
       // 取料中的那格高亮（emissive 让"正在取这一格"一眼可见）
       try {
@@ -388,12 +437,21 @@ export function createSortingBlocks(liftY = 0) {
       blk.group.visible = !!cn;
     });
 
-    // 手上那块：空跑（占位色）或未判色 → 未知灰，**绝不编一个颜色**出来
+    // 手上料：空跑（占位色）或未判色 → 未知灰，**绝不编一个颜色**出来。
+    // ★ 双面时上/下两块**各取各色**（两件可能不同色、也可能一件无效色）；
+    //   只有旧 holding 时只画下板那一块 —— 与以前一致。
+    const matForHeld = (rec) => {
+      const cn = (rec && SORT_COLOR_HEX[rec.color]) ? rec.color : "";
+      return (!simColor && cn) ? matByColor[cn] : matUnknown;
+    };
     const hb = ensureHand();
-    hb.group.visible = holding;
-    if (holding) {
-      hb.mesh.material = (!simColor && colorName) ? matByColor[colorName] : matUnknown;
-    }
+    hb.group.visible = !!holdL;
+    hb.group.userData.inferred = inferFlag;    // 如实标注：哪面在吸是**流程推断**
+    if (holdL) hb.mesh.material = matForHeld(holdL);
+    const hu = ensureHandUpper();
+    hu.group.visible = !!holdU;
+    hu.group.userData.inferred = inferFlag;
+    if (holdU) hu.mesh.material = matForHeld(holdU);
 
     // 摄像头判色闪烁
     if (String(s.stage || "").includes("判色")) camFlash = 0.9;
@@ -421,31 +479,43 @@ export function createSortingBlocks(liftY = 0) {
         });
       }
     }
-    if (hand && hand.group.visible) {
+    /**
+     * 把一块"手上料"摆到吸盘口上。
+     * @param {object} o 目标方块 {group}
+     * @param {boolean} upper false = 下板(−x 开口) · true = 上板(+x 开口)
+     * ★ 锚点只有**下板那一个**（manager 喂）；上板锚点沿工具局部 +x 平移 HAND_MIRROR_MM
+     *   镜像出来（口径见文件头/常量注释，尺寸与建模几何同源）。
+     */
+    const placeAt = (o, upper) => {
       if (anchorMm) {
-        // ★ 吸盘口锚点：位置取锚点世界坐标，再沿"锚点自身 +x 轴"外移半个料厚
-        //   （吸盘开口朝 +x，料贴在口外侧）。
+        // 吸盘口锚点：下板料心 = 锚点 + (−x 开口方向)·半厚（现有位置，保持不变）。
         const q = new THREE.Quaternion(anchorMm.q[0], anchorMm.q[1],
                                        anchorMm.q[2], anchorMm.q[3]);
-        const out = new THREE.Vector3(1, 0, 0).applyQuaternion(q);   // 锚点 +x 世界方向
-        hand.group.position.set(
-          (anchorMm.x + out.x * sizeM[2] * 500) / 1000,
-          (anchorMm.y + out.y * sizeM[2] * 500) / 1000,
-          (anchorMm.z + out.z * sizeM[2] * 500) / 1000,
+        const out = new THREE.Vector3(-1, 0, 0).applyQuaternion(q);   // 锚点 −x 世界方向（下板开口）
+        const halfMm = sizeM[2] * 1000 / 2;                           // 半料厚(mm)
+        // 上板：吸盘口 = 锚点沿工具局部 +x 平移 HAND_MIRROR_MM → 料心 = 锚点 − out·(间距+半厚)
+        const sgn = upper ? -1 : 1;
+        const offMm = upper ? (HAND_MIRROR_MM + halfMm) : halfMm;
+        o.group.position.set(
+          (anchorMm.x + sgn * out.x * offMm) / 1000,
+          (anchorMm.y + sgn * out.y * offMm) / 1000,
+          (anchorMm.z + sgn * out.z * offMm) / 1000,
         );
-        // 料默认是"平躺"的：BoxGeometry(x=长, y=厚, z=宽)。吸盘开口朝锚点 +x，
-        // 所以要让**厚度方向（局部 y）对齐锚点 x** → 绕**自身 z 轴**转 90°：
-        //   (x,y,z) → (−y, x, z)：原 y(14 厚) → x 方向 ✓，原 x(70) → y ✓，z(70) 不变 ✓
+        // 料默认是"平躺"的：BoxGeometry(x=长, y=厚, z=宽)。让**厚度方向（局部 y）对齐吸盘
+        // 开口（局部 x）** → 绕**自身 z 轴**转 −90°：
+        //   (x,y,z) → (y, −x, z)：原 y(14 厚) → x 方向 ✓，原 x(70) → y ✓，z(70) 不变 ✓
         // ⚠ 别转 y 轴：那是把长度转到 x，"料会竖着插进吸盘"（第一版就写错了）。
-        hand.group.quaternion.copy(q).multiply(Q_ROT_HAND);
+        o.group.quaternion.copy(q).multiply(Q_ROT_HAND);
       } else if (tcpMm) {
-        // 兜底（锚点还没建好时）：退回法兰中心下方，保证"至少跟着动、不消失"
-        hand.group.position.set(tcpMm.x / 1000,
-                                tcpMm.y / 1000 - sizeM[2] / 2 - 0.004,
-                                tcpMm.z / 1000);
-        hand.group.quaternion.identity();
+        // 兜底（锚点还没建好时）：退回法兰中心附近，保证"至少跟着动、不消失"。
+        // 此刻没有姿态信息，上下两块只能朝相反侧各偏一点，避免完全重叠。
+        const dy = (upper ? 1 : -1) * (sizeM[2] / 2 + 0.004);
+        o.group.position.set(tcpMm.x / 1000, tcpMm.y / 1000 + dy, tcpMm.z / 1000);
+        o.group.quaternion.identity();
       }
-    }
+    };
+    if (hand && hand.group.visible) placeAt(hand, false);
+    if (handUpper && handUpper.group.visible) placeAt(handUpper, true);
   }
 
   function setVisible(v) {
@@ -476,6 +546,8 @@ export function createSortingBlocks(liftY = 0) {
       camera: !!camGroup,
       camBase: camGroup && camGroup.userData.camBaseMm ? camGroup.userData.camBaseMm.slice() : null,
       hand: !!hand,
+      handUpper: !!handUpper,
+      handMirrorMm: HAND_MIRROR_MM,
       warned: warned.slice(), slots: slots.length,
     };
   }

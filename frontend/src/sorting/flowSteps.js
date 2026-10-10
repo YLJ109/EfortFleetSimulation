@@ -29,7 +29,10 @@ export const LOOP_STEPS = [
   { key: "stop_suck", label: "停止吸气", stages: ["放料·停止吸"] },
   { key: "blow", label: "放气", stages: ["放料·放气"], note: (p) => `${p.blow}ms` },
   { key: "stop_blow", label: "停止放气", stages: ["放料·停止放气"] },
-  { key: "back", label: "回到起点（开始/结束点）", stages: ["回起点"] },
+  { key: "back", label: "回到起点（开始/结束点）",
+    // ★ 2026-10-10：判不出色时后端会走「无法识别·放回原位」（原路放回取料格后再回起点）
+    //   —— 它同样属于"收尾/回起点"这一步，别让它成为未映射的孤儿 stage。
+    stages: ["回起点", "无法识别·放回原位"] },
 ];
 
 /** 循环外：开始那一步。 */

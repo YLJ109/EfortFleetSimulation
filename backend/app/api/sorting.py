@@ -23,13 +23,13 @@ from __future__ import annotations
 import json
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_control
-from app.api.control import new_run, request_cancel
+from app.api.control import new_run, register_scene_source, request_cancel
 from app.core.config import get_config
 from app.core.logger import get_logger
 from app.db.crud import (create_point, delete_point, list_points,
@@ -50,6 +50,17 @@ router = APIRouter(prefix="/api/sorting", tags=["sorting"])
 # 同时只允许一路分拣（与序列/文件执行共用一个"在跑"的世界观）
 _gate = threading.Lock()
 _job: Dict[str, object] = {"thread": None, "ctx": None, "state": None, "started_at": 0.0}
+
+
+# ★★ 2026-10-10：把**分拣状态**登记为 3D 的"场景状态源"之一（见 control.py 的
+#   `/control/scene-state`）。前端 3D 只认那一个口 —— 于是"哪种执行在跑，3D 都跟着动"。
+def _scene_state() -> Optional[Dict]:
+    with _gate:
+        st = _job.get("state")
+    return dict(st) if isinstance(st, dict) else None
+
+
+register_scene_source("sorting", _scene_state)
 
 # ★★ 2026-10-08 用户现场反馈："已停止：检测不到（无有效判定…）——物体都没取、
 #    也没来到摄像头那边啊"。根因：**判色在"机器人根本没动"的情况下也照做** ——
@@ -90,10 +101,14 @@ class _Stop(Exception):
 class StartIn(BaseModel):
     dry_run: bool = Field(default=True, description="空跑：只校验点位与读帧判色，绝不下发运动")
     speed_pct: int = Field(default=5, ge=5, le=100, description="沿用右上角那份全局速度")
-    dwell_ms: int = Field(default=1000, ge=0, le=10000, description="C 区停顿时长")
-    # ★ 2026-10-09 新增（用户流程口径）："吸取 → 等待0.5秒 → 抬起"。
+    # ★ 2026-10-10 用户口径：C 位停留 **0.5 秒**，并且**这 0.5 秒内抓完 N 帧**（默认 3 帧）。
+    #   帧间隔见 FRAME_GAP_S：3 帧跨度 = 2 × 0.15 = 0.3s ≤ 0.5s。
+    dwell_ms: int = Field(default=500, ge=0, le=10000,
+                          description="C 区停顿时长（ms，默认 500；其间抓 N 帧判色）")
+    # ★ 2026-10-09 新增（用户流程口径）："吸取 → 停一下 → 抬起"。
     #   吸上后**先停一下再抬**，让真空建立/料被完全吸住 —— 立刻抬起容易在半空掉件，
-    #   而现场没有真空反馈，掉了也只能等判色失败才发现。默认 500ms。
+    #   而现场没有真空反馈，掉了也只能等判色失败才发现。
+    # ★ 2026-10-10 用户口径：停顿时长 **1s → 0.5 秒**。
     suck_hold_ms: int = Field(default=500, ge=0, le=5000,
                               description="吸取后停留（ms，默认 500）：等吸牢再抬起")
     frames: int = Field(default=3, ge=1, le=9, description="停顿后抓几帧判色")
@@ -105,6 +120,12 @@ class StartIn(BaseModel):
     blow_ms: int = Field(default=500, ge=0, le=3000,
                          description="放气持续时间（ms，默认 500；吹完就地「停止放气」）")
     max_pieces: int = Field(default=9, ge=1, le=9, description="本轮做几件（调试可设 1）")
+    # ★★ 2026-10-10 双面（一趟两件）总开关：**默认 False → 走下面那条原单件编排（一行未改）**。
+    #   只有显式打开时才走 `_run_sorting_dual_face`（J6 双面吸盘：一趟两面各吸一件，
+    #   靠 J6 翻转切换面；放件用"停止吸→放→停止放→立刻吸"的原地四步）。
+    #   见 docs/方案-J6双面吸盘（一趟两件·靠J6翻转用另一面）.md。
+    dual_face: bool = Field(default=False,
+                            description="J6 双面吸盘一趟两件（默认 False = 原单件路径）")
 
 
 # ---------------------------------------------------------------- 只读
@@ -306,6 +327,7 @@ def api_start(body: StartIn, tok: str = Depends(require_control)):
         _job["thread"] = th
         _job["ctx"] = ctx
     th.start()
+    ctx.set_thread(th)      # ★ 绑定执行线程：让"卡死登记"能被 is_alive() 精确识别
     emit_event("sorting", "info", "sorting.start",
                "开始分拣（%s，速度 %d%%，%d 件，抓 %d 帧）" % (
                    "空跑" if body.dry_run else "真实下发", body.speed_pct,
@@ -403,8 +425,22 @@ def _air(ctx, action: str, dry: bool, stage: str, st=None) -> None:
 _HINT_NO_PIECE = "（若 A 区已无料/未放料请先补料；也可能是件没吸住、或红色吸盘挡住了视野）"
 
 
-def _capture(ctx, frames: int, min_conf: float, stage: str, st=None) -> Dict:
-    """停顿后连抓 N 帧 → 投票。任何一帧失败都记下来，最终交给投票判"检测不到"。"""
+# ★ 2026-10-10 用户口径："摄像头点位 0.5 秒内取三帧图片"。
+#   帧间隔固定 0.15s → 3 帧跨度 = 2×0.15 = **0.3s ≤ 0.5s**（在 C 位停留窗口内取完）。
+#   ⚠ 别把它调大到 >0.25s，否则 3 帧跨度会超过 0.5s（这条在 test_sorting 里有钉子）。
+FRAME_GAP_S = 0.15
+
+
+def _capture(ctx, frames: int, min_conf: float, stage: str, st=None,
+             valid_colors: Optional[Sequence[str]] = None) -> Dict:
+    """停顿后连抓 N 帧 → 投票。任何一帧失败都记下来，最终交给投票判"检测不到"。
+
+    ★ `valid_colors`（2026-10-10，用户口径"用户提到的颜色才是有效色"）：
+      · 不传（默认）= 红/绿/蓝（**三色分拣 / 井字棋口径，零回归**）；
+      · AI 链路传 `S.RECOGNIZED_COLORS`（7 色）→ 检测器**如实报出真实颜色**（含橙/黄/青/紫），
+        再由"配额 / 摆法"决定放走还是放回 —— 于是"用户没提到的颜色"表现为**诚实的放回**，
+        而不是被误报成"无法识别"（那样现场会以为是识别坏了）。
+    """
     got: List[Dict] = []
     for i in range(int(frames)):
         if ctx.cancelled():
@@ -415,15 +451,95 @@ def _capture(ctx, frames: int, min_conf: float, stage: str, st=None) -> Dict:
         else:
             got.append({})
         if i + 1 < int(frames):
-            ctx.sleep(0.15)
-    v = S.vote_color(got, min_conf)
+            ctx.sleep(FRAME_GAP_S)
+    v = S.vote_color(got, min_conf, valid_colors=valid_colors)
     log.info("判色 %d 帧 → %s (conf=%s) %s", len(got), v.get("color"),
              v.get("conf"), v.get("votes"))
     return v
 
 
+# ---------------------------------------------------------------- 双面（一趟两件）原语
+# ★★ 用户口径（方案 §7-e）：J6 正/反面的姿态**由用户示教**，代码**不自算 +180°**。
+#   `J6反面` 就是一个**普通示教点位**（像 A1/A2，用户可增删改），代码只按名字取用。
+# ★ 名字必须与界面录入时用的名字**完全一致**：`frontend/src/components/SortingView.vue`
+#   的 extraSlots 里写的就是 "J6反面"；它同时也在 `S.OPTIONAL_EXTRA_POINTS` 里
+#   （→ 在示教白名单内，界面能存点/到点/删除）。三处任一改名都必须同步（回归钉）。
+DUAL_FACE_FLIP_POINT = "J6反面"
+# ★ 每面帧数：正面 2 + 反面 2 = **4 帧 / 2 个独立结论**（方案 §2 步 4）。
+#   与单面口径一样，帧跨度 = (N-1)×FRAME_GAP_S 必须 ≤ 0.5s（C 位停留窗口，回归钉）。
+DUAL_FRAMES_PER_FACE = 2
+
+
+def _rotation_guard(name: str) -> None:
+    """★ 方案 §6-1 回归钉：**带 J6 翻转的下发只允许出现在白名单点位**。
+
+    在**原料位（A 区格位）**请求旋转 → `_Stop` 拒绝并写明原因（这条改不掉）。
+    现场口径（用户）："只允许在正上位、摄像头点位、起点旋转，严禁原料位进行旋转"。
+    白名单依据见 `S.rotation_point_allowed`。
+    """
+    if not S.rotation_point_allowed(name):
+        raise _Stop("拒绝 J6 翻转：点位「%s」不在旋转白名单（只允许 正上位/摄像头点位/起点）" % name)
+
+
+def _move_flip(ctx, pmap, name, speed, dry, stage, st=None) -> None:
+    """**带 J6 翻转的下发**：先过旋转白名单（`_rotation_guard`）再走普通移动。
+
+    与 `_move` 的唯一区别就是那道护栏 —— 原料位翻转会被**拒绝在下发之前**，
+    不会出现"已经写下去才后悔"。
+    """
+    _rotation_guard(name)
+    _move(ctx, pmap, name, speed, dry, stage, st)
+
+
+def _dual_drop(ctx, dry: bool, st=None, keep: bool = False) -> None:
+    """★ 一趟两件的**原地放件四步**（方案 §5.2，顺序即工艺）：`停止吸 → 放 → 停止放 → 立刻吸`。
+
+    ★ 为什么必须"立刻复吸"：全项目**只有一路真空**（io.DOut[8]），两面共用它 ——
+      `停止吸` + `放` 会让**两件一起失真空**；要放的那件被吹落在台面/料上
+      （用户："方块在物体上面不会掉落"），另一件只能靠残余负压 + 惯性吊着 →
+      所以**立刻 `吸`** 把它重新吸住。
+    ★ 窗口越短，悬挂那件越安全：这四步**原地连续**做完，**中间不加任何 dwell、
+      不插入任何移动**（回归钉；方案 §5.3 已如实写明"悬挂件可能掉"的风险）。
+    ★ `keep=False`（放最后一件）→ 不复吸（放完手上就没有悬挂件了）。
+    """
+    _air(ctx, "release", dry, "落料·停止吸", st)
+    _air(ctx, "blow", dry, "落料·放气", st)
+    _air(ctx, "unblow", dry, "落料·停止放气", st)
+    if keep:
+        _air(ctx, "suck", dry, "落料·复吸", st)
+
+
+def _capture_per_face(ctx, faces: Sequence[str], frames_per_face: int,
+                      min_conf: float, stage: str) -> List[Dict]:
+    """**按面**抓帧投票：每个面各抓 `frames_per_face` 帧 → `vote_color_per_face` 分组结论。
+
+    ★ 判据**完全复用现有 `vote_color`**（经 `vote_color_per_face` 只做分组）——
+      绝不新造第二套判色逻辑（那正是本项目最忌讳的分叉）。
+    ★ 帧间隔沿用 `FRAME_GAP_S`：单面跨度 = (N-1)×0.15 ≤ 0.5s（与单面 `_capture` 同一约束）。
+    """
+    groups: List[List[Dict]] = []
+    for _slot in list(faces):
+        got: List[Dict] = []
+        for i in range(int(frames_per_face)):
+            if ctx.cancelled():
+                raise _Stop("已被停止", stage)
+            st_, js, err = camera_client.get_json("/vision/detect", timeout=6)
+            if st_ == 200 and not err and isinstance(js, dict):
+                got.append(js)
+            else:
+                got.append({})
+            if i + 1 < int(frames_per_face):
+                ctx.sleep(FRAME_GAP_S)
+        groups.append(got)
+    vs = S.vote_color_per_face(groups, min_conf)
+    log.info("双面判色 每面 %d 帧 → %s", int(frames_per_face),
+             [(v.get("slot"), v.get("color")) for v in vs])
+    return vs
+
+
 def _put_back(ctx, pmap, src_slot: str, speed: int, dry: bool,
-              blow_ms: int = 500, prefix: str = "放回原位", st=None) -> None:
+              blow_ms: int = 500, prefix: str = "放回原位", st=None,
+              go_home: bool = True, keep: bool = False) -> None:
     """★ 2026-10-10 用户口径：**判不出色（或自证不符）→ 把件原路放回取料格**。
 
     调用前提：件正被吸着、机器人停在半路（分拣停在 C 检测位）。
@@ -434,17 +550,28 @@ def _put_back(ctx, pmap, src_slot: str, speed: int, dry: bool,
       位置随机 —— 现场得满地找件，而且下一次取料还会撞上它。
     ★ 两路气在**这里正常关断**（不靠异常收尾兜底），所以调用方随后要把
       suck_on/blow_on 置 False，免得收尾再关一次。
+
+    ★ 两个**双面（一趟两件）**专用开关（默认值 = 既有单件行为，**零回归**）：
+      · `keep=True`  → 手上还吊着另一件：放完**不再等待**，改走"停止放 → **立刻复吸**"
+        （四步窗口越短，悬挂那件越安全）；收尾 `holding` 也按 keep 记（仍为流程推断）。
+      · `go_home=False` → **不回起点**（双面"两件都放完才回起点"，件与件之间不能回起点）。
     """
     _move(ctx, pmap, src_slot + "上", speed, dry, "%s·到原格上方" % prefix, st)
     _move(ctx, pmap, src_slot, speed, dry, "%s·下落" % prefix, st)
     _air(ctx, "release", dry, "%s·停止吸" % prefix, st)
     _air(ctx, "blow", dry, "%s·放气" % prefix, st)
-    if int(blow_ms) > 0:
-        ctx.sleep(int(blow_ms) / 1000.0)
-    _air(ctx, "unblow", dry, "%s·停止放气" % prefix, st)
-    _set(st, holding=False, stage="%s·完成" % prefix)
+    if keep:
+        # 还有件挂着 → 原地四步收尾：立刻停止放 + 复吸（不加 dwell）
+        _air(ctx, "unblow", dry, "%s·停止放气" % prefix, st)
+        _air(ctx, "suck", dry, "%s·复吸" % prefix, st)
+    else:
+        if int(blow_ms) > 0:
+            ctx.sleep(int(blow_ms) / 1000.0)
+        _air(ctx, "unblow", dry, "%s·停止放气" % prefix, st)
+    _set(st, holding=bool(keep), stage="%s·完成" % prefix)
     _move(ctx, pmap, src_slot + "上", speed, dry, "%s·抬起" % prefix, st)
-    _move(ctx, pmap, S.START_POINT, speed, dry, "%s·回起点" % prefix, st)
+    if go_home:
+        _move(ctx, pmap, S.START_POINT, speed, dry, "%s·回起点" % prefix, st)
 
 
 def vision_preflight(body_min_conf: Optional[float] = None) -> float:
@@ -469,6 +596,10 @@ def vision_preflight(body_min_conf: Optional[float] = None) -> float:
 
 
 def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -> None:
+    # ★★ 2026-10-10 双面（一趟两件）**只加这一条分支**：开关打开才走独立编排；
+    #   默认 False → **下面这段原单件编排一行未改**（零回归，见 tests/test_double_face.py）。
+    if bool(getattr(body, "dual_face", False)):
+        return _run_sorting_dual_face(ctx, body, pmap, min_conf)
     dry = bool(body.dry_run)
     speed = int(body.speed_pct)
     # ★ 判色的前提是"机器人真的把方块送到相机前"：
@@ -649,29 +780,252 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
             blow_on = False
             suck_on = False
     finally:
-        # ★★ 兜底：**无论走哪条路径**都不许把气路留在"开着"的状态。
-        #   电平保持型气路最容易出的现场事故就是"程序结束了阀还开着"。
+        # ★★ 2026-10-10：**注销运行登记最先做且不可跳过**（与 ai.py 同名修复同因）。
+        #   收尾里任何一步（关气 / 写结束态 / 写事件）抛异常，都不许把 `_RUN_ACTIVE` 留在表里 ——
+        #   那会让 `_reject_if_run_active()` 永久拒绝手动下发（现场"执行中但没跑代码、
+        #   就绪和取消都成功、指令下不去"的死机）。
+        ctx.finish(phase)
+        try:
+            # ★★ 兜底：**无论走哪条路径**都不许把气路留在"开着"的状态。
+            #   电平保持型气路最容易出的现场事故就是"程序结束了阀还开着"。
+            if not dry and (blow_on or suck_on):
+                for act, lab in (("unblow", "停止放"), ("release", "停止吸")):
+                    try:
+                        _air(ctx, act, False, "收尾·%s" % lab)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("收尾关气（%s）失败：%s", lab, exc)
+            _set(stage="结束", error=stop_reason, finished=True,
+                 ok=(phase == "done"), phase=phase, piece=stop_piece or None)
+            emit_event("sorting", "info" if phase == "done" else "warn", "sorting.stop",
+                       ("分拣完成" if phase == "done" else "分拣结束：%s" % stop_reason),
+                       {"phase": phase, "reason": stop_reason, "dry_run": dry,
+                        "placement": S.placement_summary(placement)},
+                       actor="control")
+        except Exception:  # noqa: BLE001
+            log.exception("分拣收尾异常（运行登记已注销，不影响后续指令）")
+
+
+def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
+                           min_conf: float) -> None:
+    """一趟两件（J6 双面吸盘）—— **仅** `dual_face=True` 时执行。
+
+    ★★ 默认（dual_face=False）**完全不走这里**：`_run_sorting` 顶部直接绕过本函数，
+       原单件编排一行未改（零回归）。
+    完整口径见 docs/方案-J6双面吸盘（一趟两件·靠J6翻转用另一面）.md（§2 流程 / §5.2 气路 / §6 护栏）。
+
+    一趟（= 最多两件）：
+      ① 正上位 → 取 A{i}（**下板**吸住）→ 抬起；
+      ② 在**正上位**把 J6 转到用户示教的「J6反面」点（`_move_flip` 过旋转白名单）；
+      ③ → 取 A{j}（**上板**吸住）：★ 这一步**绝不断真空**（一断第 1 件就掉，方案 §5.2）；
+      ④ 到 C 检测位：**正面 N 帧 → 投票**，J6 转到反面 → **反面 N 帧 → 投票**（两个独立结论）；
+      ⑤ **先放有效的那件**（按色落 B 槽）；无效件 → **原路放回它自己的 A 原位**（不消耗配额）；
+      ⑥ **两件都放完才回起点**（件与件之间不回起点）。
+    节拍：9 件 = 4 趟×2 + 最后 1 趟×1（见 `S.plan_trips`）。
+    """
+    dry = bool(body.dry_run)
+    speed = int(body.speed_pct)
+    real = real_write_enabled()
+    # 判色前提同默认路径：空跑 / 双闸未开时物体到不了 C 区 → 不调相机、不判色、不因"检测不到"停。
+    judge = (not dry) and real
+    if not judge:
+        emit_event("sorting", "warn", "sorting.no_judge",
+                   "本次不判色（双面）：%s（物体不会到 C 区，判色必然检测不到）"
+                   % ("空跑模式" if dry else "双闸未开，运动仅仿真"),
+                   {"dry_run": dry, "real_write": real, "dual_face": True}, actor="control")
+    # ★ 气路是电平保持型（写一次就保持）→ 异常/取消/收尾都必须主动关掉（同默认路径口径）。
+    blow_on = False
+    suck_on = False
+    start = S.START_POINT
+    cam = S.CAMERA_POINT
+    placement = S.new_placement()
+    stop_reason = ""
+    stop_piece = 0
+    phase = "done"
+    state = _job.get("state")
+    if not isinstance(state, dict):
+        state = {}
+    faces_n = len(S.FACE_SLOTS)
+    trips = S.plan_trips(list(S.A_SLOTS[: int(body.max_pieces)]), per_trip=faces_n)
+    done = 0
+    try:
+        _set(stage="回开始/结束点", dual_face=True)
+        _move(ctx, pmap, start, speed, dry, "回开始/结束点")
+        for trip in trips:
+            if ctx.cancelled():
+                stop_reason = "已被停止"; phase = "cancelled"; break
+            first = trip[0]
+            _set(piece=done + 1, stage="取料", color="", conf=0.0, target="",
+                 hold_lower=None, hold_upper=None, holding=False, suspect_pick=False,
+                 frame_detail=[], best_frame=None, votes={})
+
+            # ① 取第 1 件（下板）：上方 → 下落 → 吸 → 等吸牢 → 抬起
+            _move(ctx, pmap, first + "上", speed, dry, "取料·上方")
+            _move(ctx, pmap, first, speed, dry, "取料·下落")
+            _air(ctx, "suck", dry, "取料·吸")
+            suck_on = True
+            if int(body.suck_hold_ms) > 0:
+                ctx.sleep(int(body.suck_hold_ms) / 1000.0)
+            S.face_slot_put(state, "lower", piece=first, ok=True)
+            _move(ctx, pmap, first + "上", speed, dry, "抬起")
+
+            # ② 在正上位翻转 J6 → 用另一面（旋转白名单；只有两件趟才需要）
+            if len(trip) >= 2:
+                _move_flip(ctx, pmap, DUAL_FACE_FLIP_POINT, speed, dry, "翻转·J6反面")
+
+            # ③ 取第 2 件（上板）：★ 保持吸气，不碰气路（一断真空第 1 件就掉）
+            if len(trip) >= 2:
+                second = trip[1]
+                _move(ctx, pmap, second + "上", speed, dry, "取料·上方")
+                _move(ctx, pmap, second, speed, dry, "取料·下落")
+                _air(ctx, "suck", dry, "取料·吸")
+                suck_on = True
+                if int(body.suck_hold_ms) > 0:
+                    ctx.sleep(int(body.suck_hold_ms) / 1000.0)
+                S.face_slot_put(state, "upper", piece=second, ok=True)
+                _move(ctx, pmap, second + "上", speed, dry, "抬起")
+
+            # ④ 送检 → 正/反各 N 帧、分组投票（两个独立结论）
+            _move(ctx, pmap, cam, speed, dry, "送检")
+            _set(stage="停顿")
+            if ctx.sleep(int(body.dwell_ms) / 1000.0):
+                stop_reason = "已被停止"; phase = "cancelled"; break
+            faces = list(S.FACE_SLOTS[: len(trip)])
+            if not judge:
+                # 空跑 / 双闸未开：不调相机、不判色，用轮换占位色把选槽+落料逻辑走通
+                ph = _DRY_PLACEHOLDER_COLORS
+                verdicts = [{"ok": True, "color": ph[(done + i) % len(ph)],
+                             "conf": 0.0, "slot": faces[i], "votes": {},
+                             "placeholder": True} for i in range(len(faces))]
+                _set(stage="空跑·未判色", sim_color=True,
+                     color=",".join(v["color"] for v in verdicts))
+                log.info("空跑/未开双闸（双面）：跳过判色，占位色=%s",
+                         [v["color"] for v in verdicts])
+            else:
+                dev = _camera_deviation(pmap, cam)
+                if dev is not None and dev > CAM_ARRIVE_TOL_DEG:
+                    raise _Stop("未到达 C 检测点（实际偏差 %.1f° > %.1f°），不判色"
+                                % (dev, CAM_ARRIVE_TOL_DEG), "判色", done + 1)
+                _set(stage="判色")
+                verdicts = _capture_per_face(ctx, faces, DUAL_FRAMES_PER_FACE,
+                                             min_conf, "判色")
+                if verdicts:
+                    _set(frame_detail=verdicts[0].get("frame_detail") or [],
+                         best_frame=verdicts[0].get("best_frame"),
+                         votes=verdicts[0].get("votes") or {})
+            _set(color=",".join(str(v.get("color") or "") for v in verdicts))
+
+            # ⑤ 落料：先放有效件（B 槽），再放无效件（原路回自己 A 原位）
+            ordered = ([v for v in verdicts if v.get("ok")]
+                       + [v for v in verdicts if not v.get("ok")])
+            for k, v in enumerate(ordered):
+                keep = (k < len(ordered) - 1)      # 后面还有件挂着 → 立即复吸
+                slot = v.get("slot")
+                idx = S.FACE_SLOTS.index(slot) if slot in S.FACE_SLOTS else 0
+                src = trip[min(idx, len(trip) - 1)]
+                if v.get("ok"):
+                    plan = S.build_piece_plan(placement, v.get("color"))
+                    if not plan["ok"]:
+                        raise _Stop("%s" % plan["detail"], "选槽", done + 1)
+                    tgt = plan["slot"]
+                    _set(target=tgt)
+                    _move(ctx, pmap, tgt + "上", speed, dry, "放料·正上方")
+                    _dual_drop(ctx, dry, state, keep)
+                    suck_on = keep
+                    blow_on = False
+                    S.place(placement, v.get("color"), tgt)
+                    _set(placement=S.placement_summary(placement))
+                    emit_event("sorting", "info", "sorting.piece",
+                               "第 %d 件：%s → %s（双面 %s，conf %.2f）" % (
+                                   done + 1, v.get("color"), tgt, slot,
+                                   v.get("conf") or 0.0),
+                               {"piece": done + 1, "color": v.get("color"), "slot": tgt,
+                                "face": slot, "conf": v.get("conf") or 0.0,
+                                "dual_face": True, "dry_run": dry}, actor="control")
+                else:
+                    # 无效件 → 原路放回它自己的 A 原位（复用 _put_back 的移动+落料工艺）
+                    _set(stage="无法识别·放回原位", target="")
+                    _put_back(ctx, pmap, src, speed, dry,
+                              blow_ms=int(body.blow_ms),
+                              prefix="放回原位 %s" % src, st=state,
+                              go_home=False, keep=keep)
+                    suck_on = keep
+                    blow_on = False
+                S.face_slot_take(state, slot)
+                done += 1
+
+            # ⑥ 两件都放完才回起点（件与件之间不回起点）
+            _move(ctx, pmap, start, speed, dry, "回起点")
+
+        if not stop_reason:
+            _set(stage="收尾·回开始/结束点")
+            _move(ctx, pmap, start, speed, dry, "收尾回原点")
+    except _Stop as e:
+        if not dry and (blow_on or suck_on):
+            try:
+                _air(ctx, "unblow", False, "异常·停止放气")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("异常收气（停止放）失败：%s", exc)
+            try:
+                _air(ctx, "release", False, "异常·停止吸")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("异常收气（停止吸）失败：%s", exc)
+            blow_on = False
+            suck_on = False
+        stop_reason = e.reason
+        stop_piece = e.piece or int((_job.get("state") or {}).get("piece") or 0)
+        if "停止" in e.reason:
+            phase = "cancelled"
+        else:
+            phase = "error"
+            # 现场没有真空反馈 → 不知道件到底在不在手上：3D 不显示吸住（同默认路径口径）
+            _set(holding=False, suspect_pick=True)
+            try:
+                _set(stage="异常·回开始/结束点", error=e.reason)
+                _move(ctx, pmap, start, speed, dry, "异常回原点")
+            except _Stop as e2:
+                log.warning("异常后回原点也失败：%s", e2.reason)
+                stop_reason = "%s；回原点失败：%s" % (stop_reason, e2.reason)
+    except Exception as e:  # noqa: BLE001
+        log.exception("双面分拣异常")
+        stop_reason = "内部异常：%s" % str(e)[:150]
+        phase = "error"
         if not dry and (blow_on or suck_on):
             for act, lab in (("unblow", "停止放"), ("release", "停止吸")):
                 try:
-                    _air(ctx, act, False, "收尾·%s" % lab)
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("收尾关气（%s）失败：%s", lab, exc)
-        _set(stage="结束", error=stop_reason, finished=True,
-             ok=(phase == "done"), phase=phase, piece=stop_piece or None)
+                    _air(ctx, act, False, "内部异常·%s" % lab)
+                except Exception:  # noqa: BLE001
+                    pass
+            blow_on = False
+            suck_on = False
+    finally:
         ctx.finish(phase)
-        emit_event("sorting", "info" if phase == "done" else "warn", "sorting.stop",
-                   ("分拣完成" if phase == "done" else "分拣结束：%s" % stop_reason),
-                   {"phase": phase, "reason": stop_reason, "dry_run": dry,
-                    "placement": S.placement_summary(placement)},
-                   actor="control")
+        try:
+            if not dry and (blow_on or suck_on):
+                for act, lab in (("unblow", "停止放"), ("release", "停止吸")):
+                    try:
+                        _air(ctx, act, False, "收尾·%s" % lab)
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("收尾关气（%s）失败：%s", lab, exc)
+            _set(stage="结束", error=stop_reason, finished=True,
+                 ok=(phase == "done"), phase=phase, piece=stop_piece or None)
+            emit_event("sorting", "info" if phase == "done" else "warn", "sorting.stop",
+                       ("双面分拣完成" if phase == "done" else "双面分拣结束：%s" % stop_reason),
+                       {"phase": phase, "reason": stop_reason, "dry_run": dry,
+                        "dual_face": True,
+                        "placement": S.placement_summary(placement)},
+                       actor="control")
+        except Exception:  # noqa: BLE001
+            log.exception("双面分拣收尾异常（运行登记已注销，不影响后续指令）")
 
 
 # ---------------------------------------------------------------- 点位示教
-# ★ 为什么这几个接口要**白名单**：本页只该管分拣的 38 个点。若允许写任意名字，
+# ★ 为什么这几个接口要**白名单**：本页只该管分拣的点位。若允许写任意名字，
 #   一次手滑就能在点位库里造出没人认识的条目，而分拣引擎仍然"照名字找点"，
 #   出问题时极难排查。把"能写什么"限死，配合 /points 的体检形成闭环。
-_WHITELIST = {p["name"] for p in S.expected_points()}
+# ★★ 2026-10-10：白名单 = **38 个必备点 ∪ 可选附加点**（J6 正面/反面，见 S.OPTIONAL_EXTRA_POINTS）
+#   —— J6 双面分拣要能录入这两个姿态；但它们**不是开跑必备**（体检允许缺失），
+#   所以**不并入** expected_points()，38 这个数字与清单一个字未动。
+_WHITELIST = S.allowed_teach_points()
 
 
 class TeachIn(BaseModel):
@@ -688,7 +1042,8 @@ class NameIn(BaseModel):
 def _require_sorted_name(name: str) -> str:
     n = (name or "").strip()
     if n not in _WHITELIST:
-        raise HTTPException(400, detail="不允许的点位名：%s（只能操作分拣的 38 个点）" % (n or "空"))
+        raise HTTPException(400, detail="不允许的点位名：%s（只能操作分拣的 38 个点位 + J6 正/反面）"
+                            % (n or "空"))
     return n
 
 
@@ -778,7 +1133,7 @@ def api_goto(body: NameIn, tok: str = Depends(require_control)):
 
 @router.delete("/point")
 def api_del_point(name: str, tok: str = Depends(require_control)):
-    """删除某个分拣点位（仅限 38 个白名单名字）。"""
+    """删除某个分拣点位（38 个必备点 + J6 正/反面 附加点）。"""
     n = _require_sorted_name(name)
     with _gate:
         if _job.get("thread") and _job["thread"].is_alive():

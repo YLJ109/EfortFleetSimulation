@@ -58,7 +58,7 @@ section("A. 模块说明与真实 Tab 一一对应");
   const modKeys = MODULE_GUIDE.map((m) => m.key);
   eq(new Set(modKeys).size, modKeys.length, "A1 模块说明 key 无重复");
   eq([...modKeys].sort(), [...tabKeys].sort(), "A2 模块说明的 key 集合 == tabs.js 的 TABS 集合");
-  eq(modKeys, tabKeys, "A3 顺序也一致（「关于」页按 1~8 编号，顺序错会与顶栏对不上）");
+  eq(modKeys, tabKeys, "A3 顺序也一致（「关于」页按 1~9 编号，顺序错会与顶栏对不上）");
   ok(MODULE_GUIDE.every((m) => m.icon && m.label && m.desc && m.use), "A4 每个模块都有 icon/label/desc/use");
   ok(MODULE_GUIDE.every((m) => Array.isArray(m.tips) && m.tips.length > 0), "A5 每个模块至少有一条 tips");
   for (const m of MODULE_GUIDE) {

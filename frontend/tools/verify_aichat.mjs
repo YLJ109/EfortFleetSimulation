@@ -34,7 +34,7 @@ console.log("== A0. 「回到起点」是真实动作（不是闲聊、更不许
   const nl = read("../backend/app/services/nl_intent.py");
   const llmSrc = read("../backend/app/services/llm.py");
   const view = read("src/components/AiControlView.vue");
-  ok("规则层直接命中「回到起点」→ goto_start（规则优先，不绕大模型）",
+  ok("规则层仍能命中「回到起点」→ goto_start（**降级路径**；主入口已是大模型优先）",
      /intent="goto_start"/.test(nl) && /"action": "goto_start"/.test(nl));
   ok("后端 _run 真的会走到开始/结束点（不是一张空计划）",
      /if act == "goto_start":/.test(aiApi)

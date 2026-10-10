@@ -9,7 +9,18 @@
   - 判色：CIE Lab + CIEDE2000（感知均匀、与设备无关）；
           ★ 白/银/米白/灰/黑 **单独走低饱和判据**，不参与彩色 ΔE 竞争
             （否则"深蓝"常被最近的"黑"抢走 —— 这是现场最常见的误判）；
-  - 稳定：连续 N 帧"质心不动 + 框稳定"才触发一次，保证 1 秒停留只记录/播报一次。
+  - 稳定：连续 N 帧"质心不动 + 框稳定"才触发一次，保证 1 秒停留只记录/播报一次；
+  - 七色调色板（2026-10-10）：可识别色 = 红/橙/黄/绿/青/蓝/紫（`PALETTE_NAMES`）。
+          检测器**只如实报"是什么颜色"**；"有效 / 无效"由上层（用户指令）决定 ——
+          用户没提到的颜色 + 无彩色(黑) → 原路放回原位（见 backend/services/sorting.py）。
+  - 暗色兜底（2026-10-10）：黑/深色物体在彩色掩膜里往往是"零像素"（或只有少量带色偏的
+          像素），会被报成"检测不到"或被误判成蓝/青；用户口径是「黑色 = 无效颜色，
+          要能识别到并原路放回原位」。做法（只影响"暗/彩如何共存"，**彩色判据不动**）：
+            ① 彩色候选**一个都不丢** —— 其中"暗 **且** 不艳（低色度/低饱和）"的改判为「黑」；
+            ② **没有**任何彩色候选时，才用低亮度掩膜找一遍并报「黑」。
+          ★「暗 **且** 不艳」是关键：只按"暗"改判会把**暗绿/暗蓝**误判成黑
+            （dark_object_mask 的阈值在亮背景下会顶到 130，暗绿 V≈87 也落进去）。
+          ⚠ 不做"按面积用暗色候选顶掉彩色候选"：C 位背景有大块暗矩形（显示器等），会误吞彩料。
 
 ★ 本模块**不 import 相机 SDK，也不碰 HTTP**：全部是纯函数 + 一个带状态的小引擎，
   所以可以脱离相机、用静态图直接跑回归（tools/vision_color_test.py）。
@@ -37,11 +48,43 @@ COLOR_CARD: Dict[str, str] = {
 }
 
 # =====================================================================
-# 三色目标：分拣只认红 / 绿 / 蓝。
-#   ★ 判色只在 RGB_NAMES 三色里做最近邻，其余颜色一律判为"未知"，
-#     由置信度阈值过滤，不参与画框 / 记录 / 分拣。
+# 颜色名与"有效/无效"的边界（2026-10-10 七色重构后见下方）
 # =====================================================================
+# ★★ 2026-10-10 用户口径："把 7 种颜色都能识别" + "只要用户说的颜色是有效颜色，
+#     用户没有提到的颜色的是无效颜色"。
+#   · **调色板（可识别色）** = 7 色：红/橙/黄/绿/青/蓝/紫 —— 检测器能给出的颜色名；
+#   · "有效 / 无效"**不在这里定**：由上层按用户指令动态划（见 backend/services/sorting.py
+#     的 `vote_color(..., valid_colors=...)`）；检测器**只如实报"是什么颜色"**。
+#   · RGB_NAMES 保留：既是调色板子集，也是旧调用方 / classify_rgb / ColorSampler 的兼容名。
+PALETTE_NAMES = ("红", "橙", "黄", "绿", "青", "蓝", "紫")
+
 RGB_NAMES = ("红", "绿", "蓝")
+DARK_NAME = "黑"                          # 无彩色（"确信不是 7 色之一"）；永远不是有效色
+TARGET_NAMES = PALETTE_NAMES + (DARK_NAME,)   # 界面展示用：七色 + 无彩色
+
+# 调色板各色展示 hex（判色结果回给界面画框用；黑无颜色 → None）
+PALETTE_HEX: Dict[str, Optional[str]] = {
+    "红": "#E02020", "橙": "#FF7A18", "黄": "#FFD400", "绿": "#1FA74A",
+    "青": "#00BFC8", "蓝": "#1F4FD8", "紫": "#8A3FC0",
+}
+
+# 色相带（OpenCV H ∈ [0,180)）：7 色**纯划分**（无缝隙、无重叠），红带跨 0° 环绕。
+#   ★★ 边界不是几何中点，而是**照顾现场实测**（见 docs/方案-七色识别与有效色集）：
+#     现场实测：**绿 H≈69~70（光照/白平衡漂移可达 80+）、蓝 H≈104~106**。
+#     · 绿带上限取 **88**（不是理论中点 75）：★ 2026-10-10 现场反馈"绿被判成青"，
+#       根因就是上一版把分界放在 75 —— 离实测绿(69~70)只有 5 格，一漂就翻边。
+#       现退到 88 → 绿有 ≥18 格余量；蓝仍从 100 起（护住蓝 104~106）。
+#     · 青带 = [88,100)：只留给"真青"（H≈91 的强青），不抢绿。
+#     橙/黄/紫 占用原来"都不认"的空档（12~35 / 135~160）。
+HUE_BANDS: Tuple[Tuple[str, float, float], ...] = (
+    ("红", 0.0, 12.0), ("红", 160.0, 180.0),
+    ("橙", 12.0, 22.0),
+    ("黄", 22.0, 35.0),
+    ("绿", 35.0, 88.0),
+    ("青", 88.0, 100.0),
+    ("蓝", 100.0, 135.0),
+    ("紫", 135.0, 160.0),
+)
 
 # 三色参考卡（固定，与 18 类卡独立）：分拣只认这三色，判色只用它做参考。
 #   三色 Lab 互相 ΔE 足够大，非三色(橙/黄/青/草绿…）归到最近的三色时 conf 明显偏低，
@@ -116,6 +159,35 @@ DEFAULT_THR: Dict[str, float] = {
     # ★ 软提示线（不拦检、只写 reason 提醒复核）：fill 低于它就标注"杂色（建议复核）"。
     #   与 fill_min 解耦 —— 以前两者共用一个 0.72，调了一个另一个跟着动，很容易改错。
     "fill_warn": 0.72,
+    # ★★ 2026-10-10 用户口径："黑色是无效颜色，要能识别到并放回原位"。
+    #   纯黑/深色物体**饱和度和亮度都低** → hsv_color_mask（高饱和 + 不过暗）一个像素都不收
+    #   → 现场表现是"检测不到（没有彩色块）"，而不是"无效颜色"。
+    #   这里给一条**暗色兜底**：只在"彩色候选一个都没有"时才用它再找一遍（见 VisionEngine.detect）；
+    #   找到就按普通候选上报，判色必然给"未知"（非红绿蓝）→ 走既有的"原路放回原位"。
+    #
+    #   ★★ 判据是**相对**的（2026-10-10 实测黑块实物照后改）：
+    #     哑光黑实物在光下 V 实测 **58~105**（不是 20），固定阈值 55 会把料切碎 → 检不出；
+    #     而背景（桌面 187）远亮于它 —— 所以按"**明显暗于画面背景亮度**"来判：
+    #         thr = min(dark_val_max, 背景亮度中位 × dark_ratio)
+    #     背景不够亮（对比 < dark_min_contrast）时**直接不启用** —— 宁可不猜，也不误报。
+    #   ⚠ 默认值仍需**现场真图**复核（C 位取景）；可用 /vision/config 覆盖。
+    "dark_val_max": 130.0,     # 暗色兜底的**绝对上限**（够亮背景下不把中灰也算进来）
+    "dark_ratio": 0.70,        # 背景亮度中位的比例：低于它的像素算"暗色物体"
+    "dark_min_contrast": 25.0,  # 背景亮度 − 该阈值 至少要差这么多，否则不启用
+    # ★ 暗色候选的**置信度**。★ 语义要说清：这里表达的是"**确信它不是红/绿/蓝**"
+    #   （无效颜色），不是"颜色判对了"。上游（camera_service.pick_best / 后端 vote_color）
+    #   拿 conf 当门 —— 给 0 会被直接滤掉，本支路就白加了，现场又变回"检测不到"。
+    #   注意：后端 vote_color 只认"name ∈ 红/绿/蓝"，所以给多高都**不会**被当成有效颜色，
+    #   只会让"无效颜色"这个**原因**如实传到分拣流程（→ 原路放回原位）。
+    "dark_conf": 0.5,
+    # ★★ 2026-10-10 七色重构：**"黑"必须"暗 且 不艳"**（修现场"绿色检测不到"）。
+    #   旧规则只看"暗"（`_dark_self_frac ≥ 0.5`）→ 亮背景下 dark_object_mask 的阈值顶到 130，
+    #   暗绿(V≈87)也落进去 → 误判成黑。现在按候选 ROI 的中位统计：
+    #       V 暗 **且**（Lab 色度低 **或** 饱和度低）→ 才判「黑」。
+    #   真图实测余量（docs/方案-七色识别与有效色集 §7）：彩色件最低 chroma=18.0 / S=96；
+    #   暗色件最高 chroma=5.0 / S=62 → 阈值取中缝，两侧各留 ≥6 余量。
+    "dark_chroma_max": 12.0,   # 判"黑"的 Lab 色度上限（≤ 它 = 不艳）
+    "dark_s_max": 80.0,        # 判"黑"的 HSV 饱和度上限（≤ 它 = 不艳）
 }
 
 # 每个键的合法区间：越界一律夹回，不做"拒绝整包"，避免现场配置一个错值就全不检测。
@@ -133,6 +205,12 @@ _THR_RANGE: Dict[str, Tuple[float, float]] = {
     "aspect_max": (1.0, 50.0),
     "fill_min": (0.0, 1.0),      # 0 = 关闭该硬门槛（现场可据此完全退回旧行为）
     "fill_warn": (0.0, 1.0),     # 软提示线（只写 reason，不拦检）
+    "dark_val_max": (0.0, 255.0),  # 暗色兜底亮度上限（绝对）
+    "dark_ratio": (0.05, 1.0),     # 背景亮度中位的比例
+    "dark_min_contrast": (0.0, 255.0),  # 背景与阈值的最小亮度差
+    "dark_conf": (0.0, 1.0),       # 暗色候选置信度（"确信不是三色"）
+    "dark_chroma_max": (0.0, 128.0),  # 判"黑"的 Lab 色度上限
+    "dark_s_max": (0.0, 255.0),    # 判"黑"的 HSV 饱和度上限
 }
 
 
@@ -162,13 +240,14 @@ def norm_thr(thr) -> Dict[str, float]:
     return out
 
 
-def _hue_vote(bgr_roi, s_min=None, v_min=None):
-    """逐像素色相分箱投票判红/绿/蓝。返回 (name, ratio)。
+def _palette_vote(bgr_roi, s_min=None, v_min=None):
+    """逐像素色相分箱投票判**调色板七色**（红/橙/黄/绿/青/蓝/紫）。返回 (name, ratio)。
 
     ratio = 多数色带像素数 / 彩色像素数（该候选色相的一致性）。
     ★ 关键：H 是环形标尺(0°≡180°)，直接 `mean()` 会把"红带的 0° 端 + 176° 端"
-      平均拉到约 40°（青/绿带）→ 误判绿。逐像素分箱投票从根本上避开环形均值陷阱，
-      又与参考实现"只看三色带"的判定方式一致。
+      平均拉到约 40°（青/绿带）→ 误判绿。逐像素分箱投票从根本上避开环形均值陷阱。
+    ★ 七色带由 `HUE_BANDS` 一处定义，**纯划分、无缝隙、无重叠**（红带跨 0° 累加两段）。
+      现场实测 红(H2~4)/绿(H69~70)/蓝(H104~106) 全部落在各自带内 → 三色零回归。
     """
     if bgr_roi is None or bgr_roi.size == 0:
         return ("", 0.0)
@@ -181,21 +260,28 @@ def _hue_vote(bgr_roi, s_min=None, v_min=None):
     if n < 40:
         return ("", 0.0)
     H = hsv[..., 0][sel]
-    nr = int(((H < 12) | (H >= 160)).sum())   # 红带（扩到 160 容纳高饱和品红/玫红）
-    # ★★ 2026-10-08 修正：绿带与蓝带原来留了 **90~95 的 5° 空隙**（绿 [35,90)、蓝 [95,135)）
-    #   —— 偏青的绿（OpenCV H≈91~94，即 182°~188°）会**同时落在两条带之外**，
-    #   表现为"这块绿色怎么都认不出"。现在把边界接上：绿 [35,95)、蓝 [95,135)，
-    #   两条带**无缝隙、无重叠**（纯划分，各自中心不变，不会把蓝判成绿）。
-    #   ⚠ 副作用（如实说明）：偏青的物体（H 90~95）现在归**绿**（以前是"都不认"）。
-    #     取舍理由：本系统只认红/绿/蓝三色，"归到绿"比"检测不到"对现场更可用；
-    #     若现场确实有青色料需要区分，那是另一套色卡的事，不在三色分拣范围内。
-    ng = int(((H >= 35) & (H < 95)).sum())    # 绿带（上限 90 → 95，补掉与蓝之间的空隙）
-    nb = int(((H >= 95) & (H < 135)).sum())   # 蓝带（收窄上限 145→135，不再吞紫）
-    m = max(nr, ng, nb)
+    counts: Dict[str, int] = {}
+    for nm, lo, hi in HUE_BANDS:
+        counts[nm] = counts.get(nm, 0) + int(((H >= lo) & (H < hi)).sum())
+    # 按带序取最大（红在 HUE_BANDS 里排最前 → 并列时稳定偏向红，与旧行为一致）
+    name, m = "", 0
+    for nm, _lo, _hi in HUE_BANDS:
+        if counts[nm] > m:
+            name, m = nm, counts[nm]
     if m == 0:
-        return ("", 0.0)                       # 全落在三色带之外 → 非三色
-    name = "红" if nr == m else ("绿" if ng == m else "蓝")
+        return ("", 0.0)                       # 全落在七色带之外 → 非彩色
     return (name, float(m) / float(n))
+
+
+def _hue_vote(bgr_roi, s_min=None, v_min=None):
+    """旧接口：**只认红/绿/蓝**（非三色返回空串）。内部已走七色调色板投票。
+
+    ★ 保留它是为了不惊动旧调用方（tools/hard_test.py 等）。新代码请直接用
+      `_palette_vote`（七色）—— 注意：偏青的物体（H75~100）现在归**青**，
+      不再是旧口径的"归绿"。
+    """
+    name, ratio = _palette_vote(bgr_roi, s_min=s_min, v_min=v_min)
+    return (name if name in RGB_NAMES else "", ratio)
 
 
 def hue_color_name(bgr_roi) -> str:
@@ -254,6 +340,44 @@ def classify_rgb(lab: Sequence[float], card: Optional[Dict[str, np.ndarray]] = N
             "alt": alt, "alt_de": alt_de, "chroma": round(chroma, 1)}
 
 
+def classify_palette(lab: Sequence[float], card: Optional[Dict[str, np.ndarray]] = None
+                     ) -> Dict[str, object]:
+    """**七色调色板**判定：只在 红/橙/黄/绿/青/蓝/紫 里做 ΔE 最近邻（**复核/提示**用）。
+
+    与 classify_rgb 的关系：classify_rgb 只认三色（旧路径保留）；本函数覆盖 7 色，
+    供 `VisionEngine._color` 与 HSV 投票**互相印证**（一致→置信度略升，分歧→降）。
+    低色度（灰/黑/白）→ "未知"。现场实测卡优先，缺项用标准卡补（不会 KeyError）。
+    """
+    L, A, B = float(lab[0]), float(lab[1]), float(lab[2])
+    chroma = float(np.hypot(A, B))
+    tbl = dict(PALETTE_CARD_LAB)
+    if isinstance(card, dict):
+        for k, v in card.items():
+            if k in PALETTE_NAMES and v is not None:
+                arr = np.asarray(v, dtype=np.float64).ravel()
+                if arr.size >= 3 and np.all(np.isfinite(arr[:3])):
+                    tbl[k] = arr[:3]
+    if chroma < CHROMA_CUT:
+        return {"name": "未知", "hex": None, "de": None,
+                "conf": 0.0, "alt": None, "alt_de": None, "chroma": round(chroma, 1)}
+    names = [n for n in PALETTE_NAMES if n in tbl]
+    refs = np.stack([tbl[n] for n in names], axis=0)
+    des = delta_e_2000(np.array([L, A, B], dtype=np.float64), refs)
+    order = np.argsort(des)
+    i1 = int(order[0])
+    de1 = float(des[i1])
+    name = names[i1]
+    alt, alt_de = None, None
+    if len(order) > 1:
+        i2 = int(order[1])
+        de2 = float(des[i2])
+        if de2 - de1 < 10.0:
+            alt, alt_de = names[i2], round(de2, 2)
+    return {"name": name, "hex": PALETTE_HEX.get(name), "de": round(de1, 2),
+            "conf": round(max(0.0, min(1.0, 1.0 - de1 / 25.0)), 3),
+            "alt": alt, "alt_de": alt_de, "chroma": round(chroma, 1)}
+
+
 def hsv_color_mask(bgr: np.ndarray, sat_min=None, val_min=None,
                    morph: int = 5) -> np.ndarray:
     """HSV 彩色前景掩膜（参照实时"彩色矩形目标"检测思路）。
@@ -277,6 +401,129 @@ def hsv_color_mask(bgr: np.ndarray, sat_min=None, val_min=None,
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
     return mask
+
+
+def dark_object_mask(bgr: np.ndarray, val_max=None, ratio=None, min_contrast=None,
+                     morph: int = 5) -> np.ndarray:
+    """**暗色物体**掩膜（黑/深灰等低亮度物体）—— 彩色掩膜之外的**兜底支路**。
+
+    ★ 为什么要有它（2026-10-10 用户口径："黑色是无效颜色，要能识别到"）：
+      `hsv_color_mask` 只收"高饱和 + 不过暗"的像素，纯黑物体**两头都不满足**
+      → 整块一个像素都进不了掩膜 → 现场表现成"检测不到（没有彩色块）"，
+      而不是"无效颜色"。
+    ★★ 判据是**相对**的（实测黑块实物照后的修正）：
+      哑光黑实物在光下 V 实测 58~105（不是 20 那种"纯黑"），**固定阈值必然切碎**；
+      而背景通常远亮于它。所以：
+          thr = min(val_max, 背景亮度中位 × ratio)
+      且要求"背景 − thr ≥ min_contrast"（背景不够亮就**不启用** —— 宁可不猜，不误报）。
+    ★ 只在"彩色候选一个都没有"时才启用（见 VisionEngine.detect）：
+      红/绿/蓝这条路径**零改动**，不存在把三色判丢的风险。
+    """
+    if val_max is None:
+        val_max = float(DEFAULT_THR["dark_val_max"])
+    if ratio is None:
+        ratio = float(DEFAULT_THR["dark_ratio"])
+    if min_contrast is None:
+        min_contrast = float(DEFAULT_THR["dark_min_contrast"])
+    h, w = bgr.shape[:2]
+    if h * w == 0:
+        return np.zeros((h, w), np.uint8)
+    blurred = cv2.GaussianBlur(bgr, (5, 5), 0)
+    hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+    v = hsv[..., 2].astype(np.float64)
+    bg = float(np.median(v))                       # 画面主体是背景（暗物体占比小）
+    thr = min(float(val_max), bg * float(ratio))
+    if bg - thr < float(min_contrast):
+        # 背景本身就不亮 → 分不出"暗物体"，直接不启用（避免整屏一片黑全被当成物体）
+        return np.zeros((h, w), np.uint8)
+    mask = (v <= thr).astype(np.uint8) * 255
+    k = np.ones((morph, morph), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    return mask
+
+
+# "它其实是暗色物体吗" 的判据 = **暗 且 不艳**（见 _looks_dark）。
+# ★★ 为什么这么改（2026-10-10 用户口径两连击）：
+#   ① "把黑色物体识别成蓝色了，应该是黑色" —— 黑块在灯下常有蓝/青色偏，会混进彩色掩膜被投成"蓝"；
+#   ② 但旧的"只看暗"（`_dark_self_frac ≥ 0.5`）**太宽** —— 亮背景下 dark_object_mask 阈值顶到 130，
+#      **暗绿/暗蓝也落进去** → 现场"绿色检测不到"。故必须叠加"不艳"（低色度/低饱和）。
+
+
+def _force_dark_col(col: Optional[Dict], thr: Optional[Dict] = None) -> Dict:
+    """把候选的判色结果**改写**成第 4 色「黑（无效颜色）」。
+
+    ★ 语义：`name="黑"` 表达的是"**确信它不是红/绿/蓝**"，不是"判出了有用颜色"。
+      后端 `services/sorting.vote_color` 只认红/绿/蓝 → 它仍走"原路放回原位"。
+    ★ conf 必须能过上游门槛（`camera_service.pick_best`）—— 否则刚检出的候选又被滤掉，
+      现场又变回"检测不到"。给 `dark_conf`（默认 0.5），只代表"确信不是三色"。
+    """
+    out = dict(col or {})
+    out["name"] = DARK_NAME
+    out["reason"] = "无效颜色（黑/暗色，非红绿蓝）"
+    out["dark"] = True
+    out["hex"] = None
+    out["conf"] = round(float((thr or {}).get("dark_conf") or 0.0), 3)
+    if out.get("lab") is None:
+        out["lab"] = [0.0, 0.0, 0.0]
+    return out
+
+
+def _roi_medians(bgr: np.ndarray, box) -> Tuple[float, float, float]:
+    """候选**框内**像素的中位 (V, S, Lab 色度)。
+
+    ★ 用**框内**（含少量背景）而不是"仅彩色掩膜像素"：黑块的彩色掩膜像素本身 S≥门槛
+      （>=mask_sat_min），拿它算 S 必然偏高、分不出黑；框内大多数像素是"没进掩膜的暗面/暗边"，
+      才代表这块物体真实的"艳不艳"。真图实测：彩色件框内 S=96~145、暗件 S=9~62 → 分得开。
+    """
+    m = np.zeros(bgr.shape[:2], np.uint8)
+    cv2.fillPoly(m, [np.int32(box)], 255)
+    ys, xs = np.nonzero(m)
+    if ys.size == 0:
+        return (0.0, 0.0, 0.0)
+    px = bgr[ys, xs]
+    hsv = cv2.cvtColor(px.reshape(-1, 1, 3), cv2.COLOR_BGR2HSV).reshape(-1, 3)
+    lab = cv2.cvtColor(px.reshape(-1, 1, 3), cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(np.float64)
+    a = lab[:, 1] - 128.0
+    b = lab[:, 2] - 128.0
+    chroma = np.hypot(a, b)
+    return (float(np.median(hsv[:, 2])), float(np.median(hsv[:, 1])), float(np.median(chroma)))
+
+
+def _roi_hue(bgr_roi, s_min=None, v_min=None) -> float:
+    """候选 ROI 里"彩色像素"（S/V 过门）的**色相中位**（OpenCV H，0~179）。诊断用。
+
+    ★ 为什么要它（2026-10-10 现场"绿被判青"的教训）：判色在"绿↔青"之间摇摆时，
+      光看色名分不清是"色相真的到青了"还是"取景里混进了别的东西"。
+      把 H 如实报出来（进 `/vision/detect` 与落盘 JSON），一眼就能定界、不用猜。
+    无彩色像素（<40）→ -1.0（表示"给不出色相"）。
+    """
+    if bgr_roi is None or bgr_roi.size == 0:
+        return -1.0
+    s_lim = HUE_S_MIN if s_min is None else float(s_min)
+    v_lim = HUE_V_MIN if v_min is None else float(v_min)
+    hsv = cv2.cvtColor(bgr_roi, cv2.COLOR_BGR2HSV)
+    sel = (hsv[..., 1] >= s_lim) & (hsv[..., 2] >= v_lim)
+    if int(sel.sum()) < 40:
+        return -1.0
+    return float(np.median(hsv[..., 0][sel]))
+
+
+def _looks_dark(bgr: np.ndarray, box, thr: Optional[Dict] = None) -> bool:
+    """候选是不是"暗色物体（黑）" —— **暗 且 不艳**两条件同时成立。
+
+    ★ 为什么不能只看"暗"（2026-10-10 现场 bug）：暗绿/暗蓝件 V 低（真图 V≈87），
+      亮背景下 dark_object_mask 的阈值顶到 130 → 也被判"暗" → 误判成黑（"绿色检测不到"）。
+      补上"不艳"（低 Lab 色度 **或** 低 HSV 饱和）后：彩色件 chroma≥18、S≥96 → 保留本色；
+      暗件 chroma≤5、S≤62 → 判黑（真图实测，见 docs/方案-七色识别与有效色集 §4）。
+    """
+    t = thr or DEFAULT_THR
+    v_med, s_med, c_med = _roi_medians(bgr, box)
+    if v_med > float(t.get("dark_val_max", DEFAULT_THR["dark_val_max"])):
+        return False                                   # 不够暗 → 不是黑
+    if c_med <= float(t.get("dark_chroma_max", DEFAULT_THR["dark_chroma_max"])):
+        return True                                    # 暗且低色度（消色）→ 黑
+    return s_med <= float(t.get("dark_s_max", DEFAULT_THR["dark_s_max"]))
 
 
 # 无彩色（低饱和）单独判定，不参与彩色 ΔE 竞争。
@@ -440,6 +687,12 @@ CARD_LAB: Dict[str, np.ndarray] = {
 # 预计算三色卡 Lab（供 classify_rgb 三色判色）
 RGB_CARD_LAB: Dict[str, np.ndarray] = {
     n: srgb_to_lab(np.array(hex_to_rgb(h), dtype=np.float64)) for n, h in RGB_CARD.items()
+}
+
+# 预计算七色调色板 Lab（供 classify_palette 复核）
+PALETTE_CARD_LAB: Dict[str, np.ndarray] = {
+    n: srgb_to_lab(np.array(hex_to_rgb(h), dtype=np.float64))
+    for n, h in PALETTE_HEX.items()
 }
 
 
@@ -988,17 +1241,52 @@ class VisionEngine:
                     work, sat_min=int(self.thr["mask_sat_min"]),
                     val_min=int(self.thr["mask_val_min"])))
         # ★ 审计修复 P0-cam-3: 面积/短边门槛走可配置阈值表（算法结构未变）
-        rects = find_rectangles(mask,
-                                min_area_ratio=self.thr["min_area_ratio"],
-                                max_area_ratio=self.thr["max_area_ratio"],
-                                min_side=int(self.thr["min_side"]),
-                                min_area_abs=self.thr["min_area_abs"],
-                                rect_fill=self.thr["min_fill"],
-                                solidity=self.thr["solidity_min"],
-                                aspect=(1.0, self.thr["aspect_max"]))
+        def _find(m):
+            return find_rectangles(m,
+                                   min_area_ratio=self.thr["min_area_ratio"],
+                                   max_area_ratio=self.thr["max_area_ratio"],
+                                   min_side=int(self.thr["min_side"]),
+                                   min_area_abs=self.thr["min_area_abs"],
+                                   rect_fill=self.thr["min_fill"],
+                                   solidity=self.thr["solidity_min"],
+                                   aspect=(1.0, self.thr["aspect_max"]))
+
+        rects = _find(mask)
+        # ★★ 2026-10-10：**暗色兜底**（黑/深色物体）—— 见 dark_object_mask 的说明。
+        #   ★★ 2026-10-10 修正（用户："现在红色也没有检测到…把黑色识别成蓝色了"）：
+        #     旧写法在"暗色块 ≥ dark_area_gain 倍彩色候选"时执行 `rects = drects`，把彩色候选
+        #     **整批丢弃** —— 画面里只要有一块较大的暗区（黑料 / 夹具 / 暗显示器 / 暗背景），
+        #     红/绿就整批消失（现场"红色检测不到、部分绿色检测不到"）。
+        #     现改为**彩色候选一个不丢**：
+        #       · 有彩色候选 → 以它们为准；其中"框内以暗色像素为主"的（黑块被光照带偏混进
+        #         彩色掩膜、被投成蓝/青）**改判为「黑」（无效色）** ← 修"黑→蓝"；
+        #       · **一个彩色候选都没有** → 才用暗色候选（黑块在彩色掩膜里是零像素）。
+        #     ⚠ 不再做"面积竞争/追加暗色候选"：C 位背景里有暗显示器等**大块暗矩形**，
+        #       一旦让暗色候选按面积参与竞争，它们会顶掉真正的彩料（就是本次回归的根因）。
+        dark_fallback = False
+        if self.color_only and not rects:
+            # ★★ 2026-10-10 性能（评审 B3）：暗色掩膜**只在"一个彩色候选都没有"时才算**。
+            #   原来每帧都算（一次 5×5 高斯 + 色彩转换 + 中位数，约几毫秒/帧），
+            #   而它**只服务于这条兜底支路** —— 有彩色候选时算完就扔，纯浪费。
+            dmask = dark_object_mask(work,
+                                     val_max=float(self.thr["dark_val_max"]),
+                                     ratio=float(self.thr["dark_ratio"]),
+                                     min_contrast=float(self.thr["dark_min_contrast"]))
+            drects = _find(dmask)
+            if drects:
+                rects = drects
+                dark_fallback = True
         results = []
         for r in rects:
             col = self._color(work, mask, r)
+            if dark_fallback:
+                # 暗色兜底找出来的候选（彩色掩膜里几乎没有它）→ 第 4 色「黑（无效）」
+                col = _force_dark_col(col, self.thr)
+            elif self.color_only and _looks_dark(work, r["box"], self.thr):
+                # 彩色掩膜收进来的候选，但**暗 且 不艳** → 其实是暗色物体
+                #   （黑块带蓝/青色偏被投成"蓝"）→ 改判「黑」。
+                # ★ 只看"暗"会把暗绿/暗蓝误判成黑（现场"绿色检测不到"的根因）→ 必须叠加"不艳"。
+                col = _force_dark_col(col, self.thr)
             results.append({
                 "rect": r["rect"], "box": r["box"].tolist(), "area": r["area"],
                 "color": col,
@@ -1044,12 +1332,14 @@ class VisionEngine:
             return {"name": "未知", "hex": None, "conf": 0.0, "alt": None,
                     "reason": "采样不足", "ratio": 0.0, "fill": round(fill, 3),
                     "lab": [0.0, 0.0, 0.0]}
-        # 取该候选 bounding 矩形内的 BGR，用 HSV 色相分箱直判红/绿/蓝
+        # 取该候选 bounding 矩形内的 BGR，用 HSV 色相分箱直判**七色调色板**
         x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
         roi = work[y0:y1 + 1, x0:x1 + 1]
         # ★ 审计修复 P0-cam-3: 色相投票的 S/V 门槛走可配置阈值表
-        name, ratio_color = _hue_vote(roi, s_min=self.thr["hue_s_min"],
-                                      v_min=self.thr["hue_v_min"])
+        name, ratio_color = _palette_vote(roi, s_min=self.thr["hue_s_min"],
+                                          v_min=self.thr["hue_v_min"])
+        # ★ 诊断：把真实色相一并报出（现场"绿↔青"定界全靠它，见 _roi_hue）
+        hue_val = _roi_hue(roi, s_min=self.thr["hue_s_min"], v_min=self.thr["hue_v_min"])
         dom = dominant_lab(work, sub)
         de = None
         alt = None
@@ -1063,7 +1353,7 @@ class VisionEngine:
         lab_arr = [round(float(v), 2)
                    for v in cv2.cvtColor(roi, cv2.COLOR_BGR2LAB).reshape(-1, 3).mean(axis=0)]
         if dom["ok"]:
-            cr = classify_rgb(dom["lab"])
+            cr = classify_palette(dom["lab"])
             name_l = cr["name"]
             de = cr["de"]
             alt = cr["alt"]
@@ -1085,8 +1375,8 @@ class VisionEngine:
                     "de": de, "alt_de": alt_de, "chroma": chroma}
         if not name:
             return {"name": "未知", "hex": None, "conf": 0.0, "alt": alt,
-                    "reason": "非红绿蓝三色", "ratio": round(fill, 3),
-                    "fill": round(fill, 3), "lab": lab_arr,
+                    "reason": "非七色之一（红/橙/黄/绿/青/蓝/紫）", "ratio": round(fill, 3),
+                    "fill": round(fill, 3), "lab": lab_arr, "hue": round(hue_val, 1),
                     "de": de, "alt_de": alt_de, "chroma": chroma}
         # =====================================================================
         # ★★ 置信度（2026-10-08 重做，修"三色全都检不出"）
@@ -1123,9 +1413,9 @@ class VisionEngine:
         # 形状偏"杂" → 软提示（不拦检）
         if not reason and fill_warn > 0 and fill < fill_warn:
             reason = "杂色（建议复核）"
-        return {"name": name, "hex": {"红": "#E02020", "绿": "#1FA74A", "蓝": "#1F4FD8"}[name],
+        return {"name": name, "hex": PALETTE_HEX.get(name),
                 "conf": round(float(min(1.0, max(0.0, conf))), 3), "alt": alt,
-                "reason": reason,
+                "reason": reason, "hue": round(hue_val, 1),
                 "ratio": round(fill, 3), "fill": round(fill, 3), "lab": lab_arr,
                 "de": de, "alt_de": alt_de, "chroma": chroma}
 

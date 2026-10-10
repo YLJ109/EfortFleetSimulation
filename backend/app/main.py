@@ -222,6 +222,23 @@ class BodyLimitMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(BodyLimitMiddleware)
 
+# ★★ 2026-10-10 性能加固（静态评审 B1）：
+#   本项目大量端点是 `def`（同步）—— Starlette 会把它们丢进 anyio 的线程池（**默认 40**）。
+#   而 `/control/run-file`（一次程序执行可能跑几分钟）、`/api/ready`（等锁+轮询 ~6s）、
+#   `/ai/chat`（LLM 超时 12s）都是**占着一个 worker 直到返回**；
+#   几个长任务 + 若干长轮询就能把池占满 → 表现是"整个网页转圈、点哪都不响应"。
+#   把这些任务的瓶颈是**设备 I/O 与全局执行锁**（它们自己会排队），不是 CPU ——
+#   多给几个线程只是避免"池被长任务占满，连短请求也跟着排队"。
+#   ⚠ 这是**止血**，不是根治：根治要把长任务改成"起线程 + 立刻返回 run_id"
+#     （`/ai/exec`、`/sorting/start` 已是这个模式；`/run-file` 因为前端要读它的
+#     逐步结果，异步化需要连 UI 一起改，另行排期）。
+try:
+    import anyio
+    anyio.to_thread.current_default_thread_limiter().total_tokens = int(
+        os.environ.get("EFORT_THREAD_POOL", "96"))
+except Exception:  # noqa: BLE001  （anyio 版本差异时静默跳过，不因此起不来）
+    pass
+
 # 请求日志 + 全局异常处理
 app.add_middleware(RequestLogMiddleware)
 register_exception_handlers(app)

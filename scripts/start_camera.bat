@@ -2,15 +2,21 @@
 setlocal
 chcp 65001 >nul
 REM =====================================================================
-REM  EFORT Vision Service  (Hikrobot GigE camera + YOLO)
-REM  Runs camera/camera_service.py on the interpreter that carries
-REM  torch / ultralytics / the MVS SDK python wrapper.
+REM  EFORT Vision Service  (color sorting: OpenCV only)
+REM  Runs camera/camera_service.py on the camera venv.
+REM
+REM  Camera: ordinary USB webcam by default (OpenCV/DirectShow).
+REM          Hikrobot GigE via the MVS SDK wrapper is OPTIONAL / legacy —
+REM          you do NOT need it (nor any MVS client program) for USB cameras.
+REM          When no GigE camera is connected you WILL see
+REM          "  [海康工业相机(MVS)] 发现 0 个设备"  -> that is normal.
 REM
 REM  Overridable via .env (project root) or real environment variables:
 REM    EFORT_CAMERA_PYTHON      interpreter path
-REM    EFORT_MVS_SDK_DIR        dir containing MvCameraControl_class.py
-REM    EFORT_MVS_RUNTIME_DIR    MVS runtime DLL dir
+REM    EFORT_MVS_SDK_DIR        dir containing MvCameraControl_class.py (optional)
+REM    EFORT_MVS_RUNTIME_DIR    MVS runtime DLL dir (optional)
 REM    CAMERA_PORT              HTTP port (default 8100)
+REM    EFORT_CAMERA_HOST        bind address (default 127.0.0.1; 0.0.0.0 = LAN)
 REM =====================================================================
 cd /d "%~dp0.."
 
@@ -21,9 +27,15 @@ if exist ".env" (
     )
 )
 
-set "MVCAM_RUNTIME=%EFORT_MVS_RUNTIME_DIR%"
-if "%MVCAM_RUNTIME%"=="" set "MVCAM_RUNTIME=C:\Program Files (x86)\Common Files\MVS\Runtime\Win64_x64"
-if exist "%MVCAM_RUNTIME%" set "PATH=%MVCAM_RUNTIME%;%PATH%"
+REM ★★ 2026-10-10：默认 EFORT_CAMERA_KIND=usb —— **不启用海康工业相机**，
+REM   连 MVS 运行时都不塞进 PATH（USB 摄像头用不到它，还会让启动输出出现
+REM   "海康工业相机(MVS) 发现 0 个设备"那种看着像报错的噪音）。
+if "%EFORT_CAMERA_KIND%"=="" set "EFORT_CAMERA_KIND=usb"
+if /i not "%EFORT_CAMERA_KIND%"=="usb" (
+    set "MVCAM_RUNTIME=%EFORT_MVS_RUNTIME_DIR%"
+    if "%MVCAM_RUNTIME%"=="" set "MVCAM_RUNTIME=C:\Program Files (x86)\Common Files\MVS\Runtime\Win64_x64"
+    if exist "%MVCAM_RUNTIME%" set "PATH=%MVCAM_RUNTIME%;%PATH%"
+)
 
 if "%CAMERA_PORT%"=="" set "CAMERA_PORT=8100"
 
@@ -45,9 +57,12 @@ if not exist "%CAM_PY%" (
 
 echo ============================================
 echo  EFORT Vision Service
-echo  Hikrobot GigE camera + YOLO
+echo  Camera : USB webcam (OpenCV). Hikrobot GigE = optional.
+echo  kind   : %EFORT_CAMERA_KIND%   (usb = 不启用工业相机; mvs/auto = 才用海康)
 echo  python : %CAM_PY%
-echo  url    : http://127.0.0.1:%CAMERA_PORT%
+echo  url    : http://%EFORT_CAMERA_HOST%:%CAMERA_PORT%   (default host 127.0.0.1)
+echo  NOTE   : if port %CAMERA_PORT% is already in use, the service is ALREADY running -
+echo           do not start a second instance (it cannot open a held camera).
 echo ============================================
 echo.
 

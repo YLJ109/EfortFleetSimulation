@@ -61,13 +61,22 @@ const showMiss = ref(false);
 
 // 运行参数（与后端 StartIn 对齐）
 const dryRun = ref(true);         // ★ 默认空跑：先不动机器
-const dwellMs = ref(1000);
+const dwellMs = ref(500);
 const frames = ref(3);
 const blowMs = ref(500);
 // ★ 吸取后停留（ms）：等真空吸牢再抬起。与后端 StartIn.suck_hold_ms 默认一致，
 //   界面上写死"500"会与真实参数脱节，所以跟着一起送、一起显示。
+//   ★ 2026-10-10 用户口径：**0.5 秒**。
 const suckHoldMs = ref(500);
 const maxPieces = ref(9);
+
+// ★ 分拣模式（2026-10-10 用户需求）：正常 = 现状（单面，一趟一件）；快速 = J6 双面（一趟两件）。
+//   · 它只映射到后端 StartIn.dual_face 一个字段（false/true），别的一概不动。
+//   · **不做持久化**：这个开关会改变**真机动作**（多一次 J6 翻转、多取/多放一件）。
+//     若存进 localStorage，上次误选「快速」、这次进页面没注意，就会带着双面流程真机开跑 ——
+//     每次进页面回到「正常」最安全，代价只是多按一下。
+const mode = ref("normal");       // normal | fast
+const dualFace = computed(() => mode.value === "fast");
 
 // 示教（点动操作已移交点位执行页；这里只保留存点/到点/清点的忙态与反馈）
 const pointBusy = ref("");
@@ -87,11 +96,34 @@ const bCells = B_SLOTS.map((s) => ({ key: s, slots: [
 const extraSlots = [
   { name: "C检测", label: "摄像头位" },
   { name: "开始/结束点", label: "开始/结束" },
+  // ★ 2026-10-10 用户口径：新增两个**只有 J6 不同**的可录入姿态，供 J6 双面分拣
+  //   在「正面 / 反面」之间切换（用同一位置覆盖左右两侧）。
+  //   名字必须与后端 services/sorting.py 的 OPTIONAL_EXTRA_POINTS、
+  //   api/sorting.py 的 DUAL_FACE_FLIP_POINT 完全一致（回归钉会比对源码）。
+  { name: "J6正面", label: "J6 正面（下板 · 正常面）" },
+  { name: "J6反面", label: "J6 反面（上板 · 翻转面）" },
 ];
 
 /** 未示教名单（体检结果里就是"缺哪些"）→ 用来判断每个点位槽的状态。 */
 const missing = computed(() => new Set((chk.value && chk.value.missing) || []));
-const isTaught = (name) => !!(chk.value && chk.value.ok) || !missing.value.has(name);
+// ★ 可选附加点（不在 38 个体检名单里、允许缺失）：判定"是否已示教"**不能**用 38 的 missing，
+//   否则它们会恒为"已示教"（绿点常亮 /「到点」可点）—— 那是界面在编故事。
+//   改为看点位库(exec.points)里是否真有这个名字（存过点才有）。
+//   ★ 对 38 个必备点，下面的 isTaught 表达式与改动前**逐字一致**。
+const OPTIONAL_POINTS = new Set(["J6正面", "J6反面"]);
+const isTaught = (name) => (OPTIONAL_POINTS.has(name)
+  ? !!ptOf(name)
+  : (!!(chk.value && chk.value.ok) || !missing.value.has(name)));
+
+// ★ 快速分拣（双面）必须的两个可录入点 —— 名字与后端一致的唯一口径：
+//   services/sorting.py 的 OPTIONAL_EXTRA_POINTS / api/sorting.py 的 DUAL_FACE_FLIP_POINT。
+//   为什么两个都要查、且**沿用上面的 isTaught**：后端跑到翻转会按名字找点，
+//   少一个就是"跑到一半找不到点"；而这两个点不在 38 体检名单里，必须看点位库(exec.points)
+//   里是否真存过（isTaught 对可选点就是这个语义），不能另写一套查询。
+const DUAL_FACE_POINTS = ["J6正面", "J6反面"];
+const dualFaceMissing = computed(() => DUAL_FACE_POINTS.filter((n) => !isTaught(n)));
+// 选了快速、却缺点位 → 拦下启动（正常模式不拦，保持现状）。
+const dualFaceBlocked = computed(() => dualFace.value && dualFaceMissing.value.length > 0);
 
 // ---------- 点位坐标 与 残影 ----------
 // ★ 为什么接残影：只看一行数字看不出"这个点到底摆在哪"。悬停/点选让 3D 里的残影
@@ -313,6 +345,9 @@ async function start() {
         dry_run: dryRun.value, speed_pct: exec.speed, dwell_ms: dwellMs.value,
         frames: frames.value, blow_ms: blowMs.value, max_pieces: maxPieces.value,
         suck_hold_ms: suckHoldMs.value,
+        // ★ 模式 → 后端 StartIn.dual_face：正常=false（走原单件编排）；快速=true（J6 双面一趟两件）。
+        //   必须是这个映射，不能写死；默认 normal 时送 false，与后端默认值一致（零回归）。
+        dual_face: dualFace.value,
       }),
     });
     const d = await r.json().catch(() => ({}));
@@ -462,14 +497,17 @@ const trayText = computed(() => {
 const judgeOff = computed(() => !!(st.value && st.value.judge === false));
 const missingCount = computed(() => (chk.value ? chk.value.missing.length : 38));
 const canStart = computed(() => auth.controlActive && !busy.value && !running.value
-  && !!(chk.value && chk.value.ok));
+  && !!(chk.value && chk.value.ok) && !dualFaceBlocked.value);
 const canTeach = computed(() => auth.controlActive && !running.value);
 const bCell = computed(() => {
   const map = {};
   for (const c of placement.value || []) for (const s of (c.used || [])) map[s] = c.color;
   return map;
 });
-const colorClass = (c) => (c === "红" ? "c-red" : c === "绿" ? "c-green" : c === "蓝" ? "c-blue" : "");
+// ★ 「黑」= 第 4 色（**无效颜色**，识别到了但原路放回原位）—— 也给个色标，
+//   否则现场看到的是灰点，容易误以为"没识别到"。
+const colorClass = (c) => (c === "红" ? "c-red" : c === "绿" ? "c-green"
+  : c === "蓝" ? "c-blue" : c === "黑" ? "c-black" : "");
 
 watch(() => robot.activeView, (v) => {
   if (v !== "sort") {
@@ -571,6 +609,28 @@ watch(() => rc.readyTick, (n) => {
         <hr class="sp-hr" />
         <h3><Icon name="sliders" :size="15" /> 运行参数</h3>
         <p class="small muted">速度用右上角那一份（全项目唯一速度口径）：<b>{{ exec.speed }}%</b></p>
+        <!-- ★ 分拣模式：复用顶部 Tab 的 .srt-tabs/.srt-tab 分段样式（不新造视觉）。
+             两选一：正常分拣（默认，走原单件流程） / 快速分拣（J6 双面一趟两件）。
+             ★ 不做持久化：每次进页面都回到「正常」（理由见 script 里 mode 的注释）。
+             运行中禁用切换（不允许半截改模式）。 -->
+        <div class="pf-row">
+          <label>分拣模式</label>
+          <div class="srt-tabs mode-seg" role="tablist">
+            <button class="srt-tab" :class="{ on: mode === 'normal' }" :disabled="running"
+                    @click="mode = 'normal'">正常分拣</button>
+            <button class="srt-tab" :class="{ on: mode === 'fast' }" :disabled="running"
+                    @click="mode = 'fast'">快速分拣</button>
+          </div>
+        </div>
+        <p v-if="dualFace" class="small muted">
+          双面一趟两件：在 <b>J6正面</b>/<b>J6反面</b> 之间翻转，用同一位置覆盖左右两侧。
+          <b>首次使用请先空跑。</b>
+        </p>
+        <!-- ★ 护栏：选了快速却缺 J6正面/J6反面 → 禁用启动并写明原因（绝不带着缺失硬跑）。 -->
+        <p v-if="dualFaceBlocked" class="small err">
+          <Icon name="alert" :size="12" /> 快速分拣需要先录入 <b>J6正面</b> / <b>J6反面</b> 两个点
+          （当前缺：{{ dualFaceMissing.join("、") }}）。切到「点位」页示教后再开跑。
+        </p>
         <div class="pf-row">
           <label>C 区停顿</label>
           <input type="number" min="0" max="10000" step="100" v-model.number="dwellMs" :disabled="running" />
@@ -805,7 +865,7 @@ watch(() => rc.readyTick, (n) => {
       </div>
 
       <div class="card">
-        <h3><Icon name="camera" :size="15" /> C 区 与 开始/结束点</h3>
+        <h3><Icon name="camera" :size="15" /> C 区 与 开始/结束点 · J6 双面</h3>
         <div class="slot wide" v-for="sl in extraSlots" :key="sl.name"
              @mouseenter="hover(sl.name)" @mouseleave="unhover()">
           <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
@@ -830,6 +890,7 @@ watch(() => rc.readyTick, (n) => {
           <b>{{ sl.name }}</b>{{ coordText(ptOf(sl.name)) }}
         </div>
         <p class="small muted">「开始/结束点」是一个点：一轮开始先去、结束与异常都回这里。</p>
+        <p class="small muted">J6 正面/反面是<b>同一姿态、只有 J6 不同</b>；双面分拣靠在这两个点之间切换来实现「用同一位置覆盖左右两侧」。</p>
       </div>
     </template>
   </MonitorLayout>
@@ -850,6 +911,11 @@ watch(() => rc.readyTick, (n) => {
 .srt-tab.on::after { content: ""; position: absolute; left: 18%; right: 18%; bottom: -1px;
   height: 2px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
 .srt-tab.on svg { filter: drop-shadow(0 0 3px var(--accent)); }
+/* 分拣模式分段控件：复用上面 .srt-tabs/.srt-tab 的选中态视觉，只把它压成行内尺寸
+   （默认那两个 tab 是 flex:1 满宽，放进参数行里会撑开）。 */
+.mode-seg { flex: none; }
+.mode-seg .srt-tab { flex: none; padding: 5px 14px; font-size: 12.5px; }
+.mode-seg .srt-tab:disabled { opacity: .5; cursor: not-allowed; }
 .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px;
   background: var(--panel); }
 .card h3 { display: flex; align-items: center; gap: 6px; margin: 0 0 6px;
@@ -956,6 +1022,7 @@ watch(() => rc.readyTick, (n) => {
 .pcell.c-red { border-top: 2px solid #e24b4a; }
 .pcell.c-green { border-top: 2px solid #639922; }
 .pcell.c-blue { border-top: 2px solid #378add; }
+.pcell.c-black { border-top: 2px solid #1c1f24; }
 
 .slot { display: flex; align-items: center; gap: 5px; padding: 3px 0; }
 /* ★ 2026-10-09 布局优化：坐标并入操作行（原来是**独立的第二行**，9 格共多占 18 行，
@@ -1003,4 +1070,5 @@ watch(() => rc.readyTick, (n) => {
 .dotc.c-red { background: #e24b4a; }
 .dotc.c-green { background: #639922; }
 .dotc.c-blue { background: #378add; }
+.dotc.c-black { background: #1c1f24; box-shadow: inset 0 0 0 1px #5a616b; }
 </style>

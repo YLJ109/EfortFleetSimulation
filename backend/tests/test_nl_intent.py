@@ -121,7 +121,58 @@ def test_move_all_no_shuffle_when_not_said():
 def test_sorting_control(text, action):
     r = N.parse(text)
     assert r["ok"] is True and r["intent"] == "sorting"
-    assert r["plan"]["action"] == action
+    # ★ 2026-10-10：plan 形状统一成 {"action":"sorting","op":<op>}
+    #   —— 与 llm.sanitize / ai._echo / ai._run 同口径（以前写成 {"action":"resume"}，
+    #   导致 AI 页回显 "?"、点执行报"未知的流程操作"）。
+    assert r["plan"]["action"] == "sorting"
+    assert r["plan"]["op"] == action
+
+
+def test_sorting_control_not_hijacked_by_move_clause():
+    """★ 2026-10-10 现场事故：一句正常的**配额搬运**指令，末尾带了从句"…放回原位继续！"，
+    结果"继续"被当成"继续分拣" → 整句变成 sorting/resume → 回显 "?"。
+
+    正确：以搬运为准（move_quota），且"B5,B9已有摆放物体"要认成**禁放**。
+    """
+    r = N.parse("B5,B9已有摆放物体，从A区拿三个蓝，两个绿，一个红放到B区，"
+                "按同颜色一行或者一列摆放，如果出现无效颜色放回原位继续！")
+    assert r["ok"] is True and r["intent"] == "move_quota", r
+    assert r["plan"]["quotas"] == {"蓝": 3, "绿": 2, "红": 1}
+    assert r["plan"]["ban"]["to"] == ["B5", "B9"]
+
+
+def test_have_object_phrase_is_ban_put():
+    """★ "已有摆放物体" = 该格已经有东西 → 禁放（用户口径）；但**查询句**不能被误吃。
+
+    ★ 同时要能区分原因：这些格进 `ban["have"]`（回显写"按已有料处理"）。
+    """
+    r = N.parse("B5已有摆放物体，把A1放到B2")
+    assert r["intent"] == "move_one"
+    assert r["plan"]["ban"]["to"] == ["B5"]
+    assert r["plan"]["ban"]["have"] == ["B5"]
+    # 反证：含"已有"的**查询**（没有具体格）不能被当成约束整段剥掉
+    q = N.parse("A区已有几个盒子")
+    assert q["intent"] == "query_state", q
+
+
+def test_pattern_and_on_invalid_parsed():
+    """★ 2026-10-10 用户口径："按同颜色一行或者一列摆放" / "无效颜色放回原位继续"。
+
+    这两件事以前规则层**根本没有概念**（摆放位写死颜色列、判不出色就整轮停）。
+    """
+    r = N.parse("从A区拿三个蓝，两个绿，一个红放到B区，按同颜色一行或者一列摆放，"
+                "如果出现无效颜色放回原位继续！")
+    assert r["intent"] == "move_quota"
+    assert r["plan"]["pattern"] == "row_or_col"
+    assert r["plan"]["on_invalid"] == "continue"
+    assert r["plan"]["quotas"] == {"蓝": 3, "绿": 2, "红": 1}
+    # 明确说"排成一列" → col；"同一行" → row
+    assert N.parse("从A区拿三个红放到B区，排成一列")["plan"]["pattern"] == "col"
+    assert N.parse("从A区拿三个红放到B区，同一行摆放")["plan"]["pattern"] == "row"
+    # 没说摆放方式 → any（沿用既定颜色列，不干预）；没说"继续" → stop（旧口径）
+    plain = N.parse("从A区拿三个红放到B区")
+    assert plain["plan"]["pattern"] == "any"
+    assert plain["plan"]["on_invalid"] == "stop"
 
 
 def test_estop_has_priority():
@@ -139,7 +190,7 @@ def test_soft_stop_is_not_estop():
     for t in ("快停下别放了", "停下", "别动了", "停止"):
         r = N.parse(t)
         assert r["ok"] is True, (t, r)
-        assert r["intent"] == "sorting" and r["plan"]["action"] == "stop", (t, r)
+        assert r["intent"] == "sorting" and r["plan"] == {"action": "sorting", "op": "stop"}, (t, r)
     assert N.parse("急停")["intent"] == "estop"
     assert N.parse("紧急停止")["intent"] == "estop"
 

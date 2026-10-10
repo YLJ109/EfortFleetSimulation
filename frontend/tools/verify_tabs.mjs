@@ -21,6 +21,7 @@ const ROOT = path.resolve(HERE, "..");
 //   scheme "d:" 而报 ERR_UNSUPPORTED_ESM_URL_SCHEME。
 const {
   TABS, HOME_VIEW, tabAllowed, visibleTabs, allowedKeys, safeView, isKnownView,
+  navTabs,
 } = await import(pathToFileURL(path.join(ROOT, "src", "tabs.js")).href);
 
 let pass = 0, fail = 0;
@@ -94,15 +95,43 @@ ok(!NONE.isAdmin && !NONE.controlActive, "C4 快照自检：无令牌 controlAct
 // ---------------------------------------------------------------------
 section("D. 操作员令牌：执行页与系统设置出现，运维审计仍隐藏");
 // ---------------------------------------------------------------------
-eq(keys(OP), ["live", "sim", "point", "program", "sort", "ai", "settings", "about"],
-   "D1 操作员可见 = 只读页 + 点位执行 + 程序执行 + 分拣 + AI 执行 + 系统设置 + 关于");
-ok(keys(OP).includes("point") && keys(OP).includes("program"), "D2 拿到控制权限后执行页出现（不需要刷新）");
+// ★ 2026-10-10 用户口径（顶栏改版）：左 4（真实监控 / 点位执行 / 智能分拣 / AI 执行）
+//   + 右 4（模拟仿真 / 运维审计 / 系统设置 / 关于）；「程序执行」**与「点位执行」合并**
+//   成右栏 tab，不再占顶栏位置（hidden），但仍是合法页面（allowedKeys 里仍认它）。
+//   顺序 = src/tabs.js 的 TABS 顺序（guide.js 的模块清单与之同序，verify_about A3 钉着）。
+eq(keys(OP), ["live", "point", "program", "sort", "ai", "sim", "settings", "about"],
+   "D1 操作员可见 = 真实监控 + 点位执行(+程序执行) + 智能分拣 + AI 执行 + 模拟仿真 + 系统设置 + 关于");
+ok(keys(OP).includes("point"), "D2 拿到控制权限后「点位执行」页出现（不需要刷新）");
+ok(keys(OP).includes("program"),
+   "D2a 「程序执行」仍是合法页面（与点位执行合并、靠右栏 tab 切换）");
 ok(keys(OP).includes("settings"), "D2b 系统设置对操作员可见（可改非管理员项，管理员项由后端逐字段拦）");
-ok(keys(OP).includes("sort"), "D2c 分拣页对操作员可见（会下发运动，必须持控制令牌）");
+ok(keys(OP).includes("sort"), "D2c 智能分拣页对操作员可见（会下发运动，必须持控制令牌）");
 ok(keys(OP).includes("ai"),
    "D2d AI 执行页对操作员可见（会下发运动，但 AI 不是权限后门：仍需令牌）");
 ok(!keys(OP).includes("ops"), "D3 运维审计对操作员隐藏（需管理员）");
 ok(OP.controlActive && !OP.isAdmin, "D4 快照自检：操作员有令牌但不是 admin");
+
+// ---------------------------------------------------------------------
+section("D′. 顶栏布局（用户 2026-10-10 口径：左 4 / 右 4；点位+程序合并）");
+// ---------------------------------------------------------------------
+{
+  eq(navTabs(ADMIN).map((t) => t.key),
+     ["live", "point", "sort", "ai", "sim", "ops", "settings", "about"],
+     "D′1 管理员顶栏 = 真实监控/点位执行/智能分拣/AI 执行 + 模拟仿真/运维审计/系统设置/关于");
+  ok(!navTabs(ADMIN).some((t) => t.key === "program"), "D′2 「程序执行」不在顶栏（已与点位执行合并）");
+  const nav = TABS.filter((t) => !t.hidden);
+  eq(nav.filter((t) => t.side !== "right").map((t) => t.key),
+     ["live", "point", "sort", "ai"],
+     "D′3 标题**左侧** = 真实监控 + 点位执行 + 智能分拣 + AI 执行");
+  eq(nav.filter((t) => t.side === "right").map((t) => t.key),
+     ["sim", "ops", "settings", "about"],
+     "D′4 标题**右侧** = 模拟仿真 + 运维审计 + 系统设置 + 关于");
+  ok((TABS.find((t) => t.key === "point").alias || []).includes("program"),
+     "D′5 「点位执行」声明 alias=[program]（切到程序执行时顶栏也高亮它）");
+  eq(TABS.find((t) => t.key === "sort").label, "智能分拣", "D′6 「分拣」已改名「智能分拣」");
+  ok(TABS.some((t) => t.key === "program" && t.hidden === true),
+     "D′7 「程序执行」标了 hidden:true（不占顶栏，但仍合法）");
+}
 
 // ---------------------------------------------------------------------
 section("E. 管理员令牌：全部 tab 可见");
@@ -132,8 +161,10 @@ eq(safeView(HOME_VIEW, NONE), HOME_VIEW, "G7 HOME_VIEW 永远可达");
 // ---------------------------------------------------------------------
 section("H. isKnownView：防手改 localStorage 塞垃圾值");
 // ---------------------------------------------------------------------
-ok(isKnownView("live") && isKnownView("ops") && isKnownView("program"), "H1 正常 key 被认作已知页面");
-ok(!isKnownView("exec"), "H2 已废弃的 'exec'（旧 ExecutionView）不再算合法页面");
+// ★ 2026-10-10 修正：'program'（程序执行页）恢复后重新算合法页面；'exec' 仍为历史废弃值。
+ok(isKnownView("live") && isKnownView("ops") && isKnownView("sim") && isKnownView("program"),
+   "H1 正常 key 被认作已知页面");
+ok(!isKnownView("exec"), "H1b 已废弃的 'exec'（旧 ExecutionView）不再算合法页面");
 ok(!isKnownView("") && !isKnownView(null) && !isKnownView("__proto__"), "H3 空值/原型污染键被拒");
 
 // ---------------------------------------------------------------------

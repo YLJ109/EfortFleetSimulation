@@ -184,14 +184,37 @@ def test_seq_load_missing(client, seq_dir):
 
 
 # ---------------------------------------------------------------- 5. items 模式
+def _wait_result(client, h, run_id, timeout=10.0):
+    """★ 2026-10-10（B1 异步化）：`/run-file` 立即返回，**结果改从 `/run-state` 取**。"""
+    import time as _t
+    t0 = _t.time()
+    while _t.time() - t0 < timeout:
+        r = client.get("/api/control/run-state", params={"run_id": run_id}, headers=h)
+        assert r.status_code == 200, r.text
+        st = (r.json() or {}).get("state") or {}
+        if st.get("result"):
+            return st["result"]
+        _t.sleep(0.05)
+    raise AssertionError("等待执行结果超时：%s" % run_id)
+
+
 def test_runfile_items_mode_dry_run(client, seq_dir):
-    """编辑器缓冲可直接执行（items 模式），dry_run 只解析不下发。"""
+    """编辑器缓冲可直接执行（items 模式），dry_run 只解析不下发。
+
+    ★ 2026-10-10（B1 性能根治）：`/run-file` 已**异步化** —— POST 只回
+      `{ok, started, run_id, kind}`；逐步结果去 `/control/run-state` 的
+      `state.result` 取（字段与老的响应体一致）。同步的 404/400 语义不变。
+    """
     body = {"items": [{"type": "point", "point_id": 1}, {"type": "suck"},
                       {"type": "wait", "seconds": 0.2}, {"type": "release"}],
             "name": "ed", "dry_run": True, "speed_pct": 5}
     r = client.post("/api/control/run-file", json=body, headers=_admin(client))
     assert r.status_code == 200, r.text
-    d = r.json()
+    start = r.json()
+    assert start["ok"] is True and start["started"] is True and start["run_id"]
+    assert start["kind"] == "program"
+    assert "steps" not in start, "异步化后 POST 不再带逐步结果（应去 /run-state 取）"
+    d = _wait_result(client, _admin(client), start["run_id"])
     assert d["kind"] == "program" and d["count"] == 4 and d["readonly"] is True
     assert [s.get("op") for s in d["steps"]] == [None, "suck", "wait", "release"]
 

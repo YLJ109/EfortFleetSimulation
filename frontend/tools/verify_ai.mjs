@@ -94,8 +94,11 @@ ok("后端 sanitize 白名单存在（动作/流程/格号三道）",
 ok("没有 key 时 enabled()=False（纯规则可用，不报错）",
   /def enabled\(\)[\s\S]{0,220}return bool\(_env\("EFORT_LLM_API_KEY"\)\)/.test(llmMod));
 ok("页面对未配置大模型给出明确状态", /llmOn \? "已启用" : "未配置（规则解析）"/.test(view));
-ok("大模型只在规则解析失败后才调用（规则优先）",
-  /if not res.get\("ok"\) and llm\.enabled\(\):/.test(api));
+ok("解析入口 = **大模型优先**（每句话先过大模型；规则只在降级时用且标注 source=rule-degraded）",
+  /if llm\.enabled\(\):[\s\S]{0,220}llm\.parse\(text\)/.test(api)
+  && /["']rule-degraded["']/.test(api));
+ok("急停是**安全直达**（急停不绕大模型：不能等网络）",
+  /NL\.is_estop\(text\)/.test(api) && /["']safety["']/.test(api));
 ok("key 不回传前端（config 只说开没开）",
   /llm_enabled/.test(api) && !/api_key|apiKey|EFORT_LLM_API_KEY/.test(
     api.slice(api.indexOf("def api_config"), api.indexOf("def api_config") + 400)));

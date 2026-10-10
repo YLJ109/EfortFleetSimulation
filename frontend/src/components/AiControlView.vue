@@ -63,10 +63,35 @@ const runCtx = ref(null);
 /** 进度气泡 → 代码式步骤 + 当前步（-1 = 还没进入任何一步） */
 const steps = (m) => planSteps(m.ctx && m.ctx.plan);
 const cur = (m) => stepIndex((m.st || {}).stage, steps(m));
+// ★ 2026-10-10 用户口径："光给个执行按钮不行，要文字描述 + 运行过程" ——
+//   计划卡在**执行前**就把"这一步一步"摊开，别等跑起来才看得见。
+const planStepsOf = (m) => planSteps(m.parsed && m.parsed.plan);
+/** 回显文案里后端会写 `**强调**`（Markdown 味）——气泡是纯文本渲染，去掉星号更干净。 */
+const plain = (t) => String(t == null ? "" : t).replace(/\*\*/g, "");
 /** 计划里的逐格约束（禁取/禁放）—— 界面用**黑色方块**标出来（2026-10-10 用户口径） */
 const banOf = (m) => {
   const b = (m.parsed && m.parsed.plan && m.parsed.plan.ban) || {};
   return { from: b.from || [], to: b.to || [] };
+};
+/** ★ 来源标注（用户口径 Q7）：谁解析的必须说清 —— 大模型 / 降级到系统规则 / 安全直达。
+ *   "降级"必须明确写"**不是**云端大模型"，否则会被误以为是大模型解析。 */
+const srcLabel = (m) => {
+  const s = (m.parsed && m.parsed.source) || "";
+  if (s === "llm") return "由云端大模型解析";
+  if (s === "rule-degraded") return "⚠ 降级：系统解析规则（**不是**云端大模型）";
+  if (s === "safety") return "安全直达（急停，不绕大模型）";
+  if (s === "rule") return "系统解析规则（大模型未配置）";
+  return "";
+};
+/** ★ 件数回显（用户口径 Q8）：这一轮会动多少件（批量 / 按颜色配额）。 */
+const qtyOf = (m) => {
+  const o = m.parsed || {};
+  const p = o.plan || {};
+  if (p.action === "move_all") return Number(o.batch_count) || 0;
+  if (p.action === "move_quota") {
+    return Object.values(p.quotas || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+  }
+  return 0;
 };
 /** 禁用格 = **黑色方块**（用户口径："禁止摆放你就放黑色方块就行了"） */
 const BAN_SQ = {
@@ -313,8 +338,30 @@ const stageLine = (m) => {
           <div class="bub" :class="{ bad: m.bad }">
             <template v-if="m.type === MSG.PLAN">
               <div class="plan-t">
-                {{ (m.parsed && m.parsed.echo && m.parsed.echo.title) || "我理解为" }}
-                <span class="muted">· {{ (m.parsed && m.parsed.echo && m.parsed.echo.detail) || "" }}</span>
+                {{ plain((m.parsed && m.parsed.echo && m.parsed.echo.title) || "我理解为") }}
+                <span class="muted">· {{ plain((m.parsed && m.parsed.echo && m.parsed.echo.detail) || "") }}</span>
+              </div>
+              <!-- ★ 来源标注（用户口径 Q7）：谁解析的必须说清 —— 大模型 / 降级到规则 / 安全直达 -->
+              <div v-if="srcLabel(m)" :style="{ fontSize: '11px', margin: '2px 0 4px',
+                       color: (m.parsed && m.parsed.source === 'rule-degraded') ? '#f2c500' : 'var(--muted)' }">
+                {{ srcLabel(m) }}
+              </div>
+              <!-- ★ 做不到（占用/禁放/摆不下）→ 摊开原因 + 建议，**不给执行按钮**（用户口径 Q1②） -->
+              <div v-if="m.parsed && !m.parsed.ok"
+                   :style="{ margin: '4px 0', padding: '6px 8px', borderRadius: '4px',
+                             background: 'rgba(229,72,77,.10)', border: '1px solid rgba(229,72,77,.5)',
+                             fontSize: '12px' }">
+                <div style="color:#ff6b6b; font-weight:600">
+                  ⚠ 无法实现：{{ plain(m.parsed.error || "这个要求做不到") }}
+                </div>
+                <ul v-if="m.parsed.suggestions && m.parsed.suggestions.length"
+                    style="margin:4px 0 0; padding-left:18px">
+                  <li v-for="(s, i) in m.parsed.suggestions" :key="'sug' + i">{{ plain(s) }}</li>
+                </ul>
+              </div>
+              <!-- ★ 件数回显（用户口径 Q8）：让人一眼看到"这一轮会动多少件"再确认 -->
+              <div v-if="qtyOf(m)" :style="{ fontSize: '12px', margin: '4px 0', color: '#f2c500' }">
+                本次将动 <b>{{ qtyOf(m) }}</b> 件 —— 确认无误再说「执行」
               </div>
               <!-- ★ 2026-10-10 用户口径："禁止摆放你就放黑色方块就行了"：
                    禁用格一律渲染成**黑色方块**，一眼看出哪格不能拿/不能放。 -->
@@ -331,14 +378,21 @@ const stageLine = (m) => {
                 </span>
               </div>
               <div v-if="m.parsed && m.parsed.echo && m.parsed.echo.note" class="plan-n">
-                {{ m.parsed.echo.note }}
+                {{ plain(m.parsed.echo.note) }}
               </div>
               <ul v-if="m.parsed && m.parsed.warnings && m.parsed.warnings.length" class="warns">
-                <li v-for="(w, i) in m.parsed.warnings" :key="i">{{ w }}</li>
+                <li v-for="(w, i) in m.parsed.warnings" :key="i">{{ plain(w) }}</li>
               </ul>
-              <div class="plan-b">
+              <!-- ★ 运行过程（执行前先摊开：等宽、带序号，一眼看清会怎么跑） -->
+              <div class="plan-steps">
+                <div v-for="(s, i) in planStepsOf(m)" :key="i" class="plan-step">
+                  <span class="ps-n">{{ i + 1 }}</span><span>{{ s }}</span>
+                </div>
+              </div>
+              <!-- ★ 只有"能执行"时才给执行按钮；做不到（ok=false）**不给**（别让人白点一次） -->
+              <div v-if="m.parsed && m.parsed.ok" class="plan-b">
                 <button class="primary" :disabled="!ai.canExec" @click="doExec">
-                  <Icon name="play" :size="12" /> 执行
+                  <Icon name="play" :size="12" /> 执行{{ qtyOf(m) ? `（${qtyOf(m)} 件）` : "" }}
                 </button>
                 <span class="muted">或说「执行」</span>
               </div>
@@ -351,7 +405,7 @@ const stageLine = (m) => {
                    :style="{ fontSize: '11px', color: 'var(--muted)' }">你问：{{ m.ctx.raw }}</div>
               <div v-if="m.ctx && m.ctx.echo && m.ctx.echo.detail"
                    :style="{ fontSize: '13px', margin: '2px 0 4px' }">
-                我理解：{{ m.ctx.echo.detail }}
+                我理解：{{ plain(m.ctx.echo.detail) }}
               </div>
               <div :style="{ fontFamily: 'Consolas, monospace', fontSize: '12px',
                              lineHeight: '1.7', margin: '4px 0' }">
@@ -521,6 +575,12 @@ const stageLine = (m) => {
 
 .plan-t { font-weight: 700; color: var(--txt); font-size: 13px; }
 .plan-n { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+/* 运行过程（执行前摊开）：等宽 + 序号，与进度气泡同一套观感 */
+.plan-steps { margin: 6px 0 2px; padding: 6px 8px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--panel2); }
+.plan-step { display: flex; gap: 8px; font-family: Consolas, monospace; font-size: 12px;
+  line-height: 1.65; color: var(--txt2, var(--muted)); }
+.plan-step .ps-n { width: 12px; text-align: right; flex: none; color: var(--muted); }
 .plan-b { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .warns { margin: 4px 0 0; padding-left: 16px; font-size: 11.5px; color: var(--warn, #d48806); }
 .run { font-size: 12.5px; }
