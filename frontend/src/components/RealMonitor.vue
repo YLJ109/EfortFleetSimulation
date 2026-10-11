@@ -16,12 +16,30 @@
 //   ⇒ 本页不再有任何"离线跳舞演示"（演示动作只保留在「模拟仿真」页）。
 import { computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRobotStore, zeroQ, zeroTcp } from "../stores/robot.js";
+import { useCameraStore } from "../stores/camera.js";
 import { highlightJoint } from "../three/manager.js";
 import CameraPanel from "./CameraPanel.vue";
 import MonitorLayout from "./MonitorLayout.vue";
 import RobotParamsCard from "./RobotParamsCard.vue";
+import Icon from "./Icon.vue";
 
 const robot = useRobotStore();
+const cam = useCameraStore();
+
+/**
+ * ★ 2026-10-11 用户口径：相机与「实时捕捉」**默认都关**（不再启动即开相机）。
+ *   「实时捕捉」= 本页是否实时抓取相机画面（MJPEG 取流）的显式开关：
+ *     · 默认关；可手动开/关，**不需要控制权限**（按钮不禁用）；
+ *     · 关掉时 CameraPanel 会**真正释放取流**（不是只隐藏画面）；
+ *     · 状态如实：下方提示文案按"服务不可用 / 未开捕捉 / 相机未开 / 正在抓取"逐级说清。
+ *   拿到控制权限后由 App.vue 自动把它与相机一起开启（幂等）。
+ */
+const captureHint = computed(() => {
+  if (cam.serviceDown) return "相机服务不可用（8100 未启动）";
+  if (!cam.liveCapture) return "已关闭：不抓取相机画面（点上方按钮开启，不需要权限）";
+  if (!cam.opened) return "已开启：等待相机开启后显示实时画面";
+  return "已开启：正在实时抓取相机画面";
+});
 
 // 离线：未连接真机，或后端已降级为模拟数据（两种情况都没有真机位姿可读）
 const offline = computed(() => !robot.connected || robot.simulated);
@@ -53,6 +71,25 @@ onBeforeUnmount(() => { highlightJoint(-1); robot.setDemo(false); });
         <CameraPanel />
       </template>
     <div class="side-cards">
+      <!-- ★ 2026-10-11 用户口径：「实时捕捉」开关（默认关、不需权限、状态如实）。
+           放在右栏最上，与 3D 视口右上角的摄像头面板配套：面板管"相机设备开/关"，
+           这里管"本页是否实时抓取画面"。关掉时面板会真正释放取流。 -->
+      <div class="card live-cap">
+        <h3>
+          <Icon name="camera" :size="14" /> 实时捕捉
+          <span class="h3-sub" :class="{ on: cam.liveCapture }">{{ cam.liveCapture ? "已开启" : "已关闭" }}</span>
+        </h3>
+        <div class="btns">
+          <button :class="{ primary: cam.liveCapture }"
+                  :title="cam.liveCapture
+                    ? '关闭后停止抓取相机画面（可随时再开，不需要权限）'
+                    : '开始实时抓取相机画面（不需要控制权限）'"
+                  @click="cam.toggleLiveCapture()">
+            <Icon name="power" :size="15" /> {{ cam.liveCapture ? "关闭实时捕捉" : "开启实时捕捉" }}
+          </button>
+        </div>
+        <p class="small" style="margin-top:8px">{{ captureHint }}</p>
+      </div>
       <!-- ★ R1：本页是只读监控，右栏只有关节角 / TCP 两张读数卡，相对其它页偏窄。
            这里显式加一行"本页能做什么"的指路（不新增任何按钮/装饰），补足信息与高度。 -->
       <p class="small muted">本页为<b>只读监控</b>：示教 / 点动 / 执行请到「点位执行」页；点动前先到底栏「真机链路」一键就绪。</p>
@@ -62,3 +99,9 @@ onBeforeUnmount(() => { highlightJoint(-1); robot.setDemo(false); });
     </div>
   </MonitorLayout>
 </template>
+
+<style scoped>
+/* 「实时捕捉」标题右侧的状态小标：开着用绿、关着沿用全局 .h3-sub 的灰。
+   ★ 不做美化兜底 —— 显示的就是 cam.liveCapture 的真实值。 */
+.live-cap .h3-sub.on { color: var(--ok); }
+</style>

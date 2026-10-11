@@ -50,7 +50,7 @@ import { apiControl } from "./net/control.js";   // ★ P0-3：围栏上报需�
 const robot = useRobotStore();
 const safe = useSafetyStore();
 const ui = useUiStore();
-const cam = useCameraStore();   // ★ 2026-10-09 用户需求："每次启动项目自动打开摄像头"
+const cam = useCameraStore();   // ★ 2026-10-11 口径：相机/实时捕捉**默认关**，拿到控制权限后自动开
 // 链路自检（机器人/摄像头/示教器档位）：★ 由本组件做**唯一**的启停者，
 // 底栏状态灯与引导条都只是它的消费者 —— 两个轮询者必然出现自相矛盾的界面。
 const link = useLinkStore();
@@ -89,6 +89,18 @@ async function doLogin() {
   if (await auth.login(pw.value)) { auth.closeLogin(); pw.value = ""; }
 }
 function releaseControl() { auth.logout(); }
+
+// ★★ 2026-10-11 用户口径：相机与「实时捕捉」**默认都关**（不再启动即开相机）；
+//   但**一旦拿到控制权限** → 自动开启「实时捕捉」+ 自动开启相机。
+//   · 只在"权限从无到有"的**上升沿**触发（login 成功 / 刷新时本地已存着有效令牌 → immediate 即命中）；
+//   · **幂等**：setLiveCapture 是赋值、ensureOpen 先探状态（已开/过渡中直接返回），不会重复发 /open；
+//   · 权限**消失不强制关**（保留现场正在看的画面；关闭由用户手动 / 相机面板负责）。
+//   · 相机不可用时 ensureOpen 静默返回（原因写在 cam.error，界面自己如实显示）。
+watch(() => auth.controlActive, (now, was) => {
+  if (!now || was) return;          // 只在上升沿动作（was=undefined 的 immediate 视为"从无到有"）
+  cam.setLiveCapture(true);
+  cam.ensureOpen();
+}, { immediate: true });
 
 // ---------- 全局键盘快捷键 ----------
 // ★ 解析逻辑全在 src/shortcuts.js（纯函数，被 tools/verify_shortcuts.mjs 逐种上下文钉死）。
@@ -451,9 +463,9 @@ onMounted(async () => {
   asr.loadConfig();        // 语音字幕配置（是否启用/有没有密钥）→ 底栏按钮才能如实提示
   await robot.loadMeta();  // 初始化机器人模型（子组件 onMounted 已登记容器）
   robot.connect();         // 建立 WebSocket（连上后由上面的 watch 拉起轮询）
-  // ★ 2026-10-09 用户需求："每次启动项目自动打开摄像头"。
-  //   先探一次状态：服务在、相机还没开 → 自动 open；服务不可达/已开 → 交给面板自愈，不重复触发。
-  cam.refresh().then(() => { if (cam.opened) return; if (!cam.serviceDown) cam.open(); });
+  // ★ 2026-10-11 口径变更：**不再"每次启动项目自动打开摄像头"**。
+  //   相机与「真实监控」页的「实时捕捉」**默认都关**；两者都由用户手动开启（不需要权限），
+  //   或"拿到控制权限"时由上面的 auth.controlActive watch 自动开启（幂等）。
   await safe.load();       // 拉取安全围栏配置并应用到 3D
   switchView(HOME_VIEW);   // canvas 挂到 live 视图（restoreView 若不动作就停在这里）
   restoreView();           // 恢复上次停留的页面：刷新后回到同一页

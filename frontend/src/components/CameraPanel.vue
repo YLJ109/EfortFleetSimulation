@@ -133,6 +133,8 @@ const placeholderTitle = computed(() => {
   if (s && s.opening) return "正在打开相机…";
   if (s && s.closing) return "正在关闭…";
   if (s && s.opened) {
+    // ★ 2026-10-11：真实监控页的「实时捕捉」关着 → 不取流，如实说"已关闭"（不是假装在连）。
+    if (OWN_VIEW === "live" && !cam.liveCapture) return "实时捕捉已关闭";
     // 审计修复 P0-ui-1：占位层永远带文字 + 深色底（见 .cam-placeholder），
     // "连接中"不再表现为一块没有任何提示的纯黑
     if (streamStalled.value) return "画面中断，正在自动重连…";
@@ -144,6 +146,10 @@ const placeholderTitle = computed(() => {
 
 const placeholderSub = computed(() => {
   if (cam.serviceDown) return "请启动 camera/camera_service.py 后点「重试」";
+  // ★ 实时捕捉关着（相机已开）→ 指路到真实监控页右侧的开关（不需要权限）。
+  if (OWN_VIEW === "live" && cam.opened && !cam.liveCapture) {
+    return "在右侧打开「实时捕捉」即显示画面（不需要权限）";
+  }
   if (streamStalled.value) return "MJPEG 连接已断开，正在重新建连";
   if (connecting.value) return "首帧到达后自动显示画面";
   return "";
@@ -299,7 +305,11 @@ function releaseStream() {
 
 function connectStream() {
   // 页面隐藏时不断 MJPEG：隐藏页仍会持续解码视频流（GPU/网络大头）
-  const want = cam.canStream && isActive() && !document.hidden;
+  // ★★ 2026-10-11「实时捕捉」口径（用户）：默认关；它是「真实监控」页上的显式开关。
+  //   · 只在**本页=真实监控(live)** 时受它约束 —— 关掉就**真正释放取流**（停流），不是隐藏；
+  //   · 分拣/执行/AI 页不受它影响，相机一开就照常出画面（避免误关整条流程的取流）。
+  const allowCapture = OWN_VIEW !== "live" || cam.liveCapture;
+  const want = cam.canStream && allowCapture && isActive() && !document.hidden;
   if (want) {
     // ★ 有在途连接、或正处在退避等待期 → 都不动（否则 1s 一次的状态轮询会把
     //   指数退避冲掉，服务一挂就变成每秒猛敲）。
@@ -350,7 +360,8 @@ function checkStall() {
   if (!beginConnect()) scheduleRetry();
 }
 
-watch(() => cam.status, connectStream);
+// ★ 状态变化、或「实时捕捉」开关变化（真实监控页）→ 重算取流（开则建连、关则真停流）。
+watch([() => cam.status, () => cam.liveCapture], connectStream);
 
 // 页面隐藏 → 断流省资源；回到前台 → 重新拉流
 function onVis() { connectStream(); }
@@ -391,6 +402,9 @@ async function onToggle() {
   if (acting.value) return;
   acting.value = true;
   try {
+    // ★ 手动点「开启相机」= 用户要看画面 → 顺带打开「实时捕捉」（仅真实监控页受它约束）。
+    //   默认两者都关；这里只在"即将开启"时补上捕捉，避免开了相机却没画面。
+    if (!cam.opened) cam.setLiveCapture(true);
     await cam.toggle();
   } catch (e) {
     cam.error = e.message;

@@ -50,6 +50,15 @@ export const useCameraStore = defineStore("camera", {
     failCount: 0,          // 连续失败次数（供界面显示退避状态）
     devices: [],           // 可用相机设备列表
     currentDevice: null,   // 当前已打开的设备信息
+    // ★★ 2026-10-11 用户口径：「相机」与「实时捕捉」**默认都关** —— 启动不再自动开相机；
+    //   「实时捕捉」是「真实监控」页上的一个显式开关（见 components/RealMonitor.vue），
+    //   控制**本页是否实时抓取相机画面（MJPEG 取流）**：
+    //     · 与"相机设备是否开启"（cam.open/close）是两件事：设备开着但没开捕捉 → 不取流；
+    //     · 关掉时 CameraPanel 会**真正释放两路 <img> 的 src**（停流），不是只隐藏画面；
+    //     · 只管「真实监控」页 —— 分拣/执行/AI 页的相机取流不受它影响（避免误关流程取流）。
+    //   默认 false；**可手动开/关，不需要控制权限**；拿到控制权限后由 App.vue 自动置 true。
+    //   不持久化：每次进入应用回到默认「关」。
+    liveCapture: false,
   }),
   getters: {
     busy: (s) => !!(s.status && (s.status.opening || s.status.closing)),
@@ -157,6 +166,27 @@ export const useCameraStore = defineStore("camera", {
     async close() {
       const r = await this.camPost("/close");
       this.status = r.status;
+    },
+    /** ★ 实时捕捉开关（「真实监控」页）：只切换"是否实时抓取本页相机画面"。
+     *  与相机设备开关解耦；**不需要控制权限**；状态如实（见 CameraPanel 的取流门控）。 */
+    setLiveCapture(v) {
+      this.liveCapture = !!v;
+    },
+    toggleLiveCapture() {
+      this.setLiveCapture(!this.liveCapture);
+    },
+    /**
+     * ★ 幂等"确保相机已开"（供 App.vue 的"拿到控制权限 → 自动开相机"用）。
+     *   已开 / 正在过渡 → 直接返回（不重复发 /open）；否则先 refresh 探一次真实状态再决定。
+     *   失败不抛出（原因已写入 this.error），避免打断 watch 回调。
+     */
+    async ensureOpen() {
+      if (this.opened || this.busy) return;
+      await this.refresh();
+      if (this.opened || this.serviceDown) return;
+      try {
+        await this.open();
+      } catch (e) { /* 失败已由 camPost 写入 this.error，这里不抛出 */ }
     },
     /** 加载可用相机设备列表。 */
     async loadDevices() {

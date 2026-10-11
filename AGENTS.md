@@ -63,6 +63,13 @@ REM    管理员口令见 .env 的 EFORT_ADMIN_PASSWORD（本机开发环境用�
 
 **相机不在也能跑**：后端照常启动，只有视觉/判色相关功能会报"相机未开启"。
 
+> ★★ **2026-10-11 起：相机与「实时捕捉」默认都关**（不再"启动项目自动打开摄像头"）。
+> 「实时捕捉」是「真实监控」页右栏的显式开关（`stores/camera.js` 的 `liveCapture`）：
+> 关掉时 `CameraPanel` **真正释放 MJPEG 取流**（不是只隐藏画面），且只约束「真实监控」页，
+> 分拣/执行/AI 页的取流不受影响。两者**都不需要控制权限**即可手动开；**拿到控制权限后
+> 由 `App.vue` 的 `auth.controlActive` 上升沿 watch 自动开启两者**（幂等：`cam.ensureOpen()`）。
+> 回归钉：`frontend/tools/verify_live_capture.mjs`。
+
 ---
 
 ## 2. 代码地图（"我要改 X" → 去哪个文件）

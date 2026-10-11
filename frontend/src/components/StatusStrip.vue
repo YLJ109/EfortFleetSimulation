@@ -178,6 +178,9 @@ async function doCamReconnect() {
   await link.refresh();
 }
 async function doCamOpen() {
+  // ★ 用户手动开相机 = 要看画面 → 顺带打开「实时捕捉」（真实监控页的取流开关，
+  //   默认关）；与相机面板的「开启相机」同一口径。）
+  cam.setLiveCapture(true);
   await cam.open();
   await link.refresh();
   link.actionMsg = (link.camera && link.camera.opened)
