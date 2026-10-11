@@ -51,10 +51,17 @@ export const useTicTacToeStore = defineStore("tictactoe", {
     // ★ 两种模式（2026-10-10 用户口径）：false = 默认（不判色、不去 C 位）；
     //   true = 拍照自证（取件后到 C 位拍照核对颜色，不符/判不出 → 放回原位并停）
     verifyColor: false,
+    // ★★ 2026-10-11（方案 §D）「正常 / 快速」：false = 正常（一趟一子，现状）；
+    //   true = 快速（一趟两子：机器人子正面 + 用户子反面，J6 双面）。
+    //   ★ 本轮：先手**随机**（不再强制用户先行）；机器人先手时**先提前显示**其落子
+    //     （后端棋盘与 2D/3D 同源），提示「机器人已下棋完成（已显示，待搬子）」，再等你落子。
+    //   默认**正常**；快速需已录 `J6正面`/`J6反面`（缺 → 开局被拒并说明）。
+    fast: false,
     // ★ 自证约定（2026-10-10 用户口径："也可以切换别的颜色，用户自己选吧"）
     //   圆/叉各自应有的颜色 —— 缺省 红/蓝，界面可改，开局随 colors 传给后端。
     selfColor: { O: "红", X: "蓝" },
-    // 复盘（仅 2D 回放，不动机器人）
+    // ★ 2D「回放」查看器（按棋谱逐手回看，**只查看、不动机器人**）—— 与"真实复盘"分开：
+    //   真实复盘 = POST /tictactoe/replay（机器人真的动，逐个把棋子搬回原位）。
     replay: null,
     replayIdx: 0,
     replayPlaying: false,
@@ -184,6 +191,7 @@ export const useTicTacToeStore = defineStore("tictactoe", {
           body: JSON.stringify({ difficulty: this.difficulty, dry_run: this.dryRun,
                                  speed_pct: useExecStore().speed,
                                  verify_color: this.verifyColor,
+                                 fast: this.fast,
                                  colors: { O: this.selfColor.O, X: this.selfColor.X } }),
         });
         if (r.status === 401 || r.status === 403) { this._needAuth(); return false; }
@@ -315,7 +323,44 @@ export const useTicTacToeStore = defineStore("tictactoe", {
       this.err = "控制令牌已失效，请重新验证";
     },
 
-    /** 载入复盘棋谱（仅终局后有数据；只放 2D，不动机器人）。 */
+    /** ★ 真实复盘（2026-10-11 用户口径：「机器人复盘要真实复盘，机器人要动起来，
+     *  每一个棋子放到原位」）：机器人**真的动**，逐个把棋子搬回各自原位（来源 A 格）。
+     *
+     *  只发起后端真实复盘线程（POST /tictactoe/replay，复用 `_carry`，不新增下发通道）；
+     *  进度/回执走轮询到的 `state.stage`（"复盘：搬回第 N/共 M 个棋子 → A?（原位）"）。
+     *  · 空跑局：后端只更新棋盘、不动机器人（同一流程的预演路径），终态同样清空棋盘；
+     *  · 真实局：后端会过"未就绪"闸门（伺服未上电 → 409 统一文案，原样展示不美化）；
+     *  · 速度：沿用右上角那份全局速度（与本局 / 复位同口径）。
+     *  ★ 开始前 `stopReplay()` 退出 2D 回放查看器 —— 让 2D/3D 都跟随**真实**棋盘（不编故事）。 */
+    async startReplay() {
+      if (!this._authed()) return false;
+      this.busy = true; this.err = ""; this.msg = "";
+      try {
+        const r = await apiControl("/tictactoe/replay", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ speed_pct: useExecStore().speed }),
+        });
+        if (r.status === 401 || r.status === 403) { this._needAuth(); return false; }
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || !d.ok) {
+          this.err = errMsg(d, r.status);
+          useExecStore().logLine("err", "[井字棋] 复盘被拒：" + this.err);
+          return false;
+        }
+        this.stopReplay();
+        this.msg = d.dry_run
+          ? "已开始复盘（空跑：只更新棋盘，机器人不动）"
+          : "已开始复盘：机器人逐个把棋子搬回原位（来源 A 格）";
+        useExecStore().logLine("info", "[井字棋] " + this.msg);
+        await this.poll(false);
+        return true;
+      } catch (e) {
+        this.err = "复盘异常：" + ((e && e.message) || e);
+        return false;
+      } finally { this.busy = false; }
+    },
+
+    /** 载入棋谱做 **2D 回放查看**（只读数据、逐手回看，不动机器人）。 */
     async loadReplay() {
       if (!this._authed()) return false;
       this.err = "";

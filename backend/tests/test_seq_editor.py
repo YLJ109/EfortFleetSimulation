@@ -351,7 +351,9 @@ def test_vacuum_accepts_blow_action(client):
     但一按就"请求非法"。本条把这个入参闸门钉死。
     """
     h = _admin(client)
-    for act in ("suck", "release", "blow"):
+    # ★★ 2026-10-11：动作集扩到 8 个（含反面那一路）—— 正则必须全部放行，否则前端点了就 422。
+    for act in ("suck", "release", "blow", "unblow",
+                "suck_back", "release_back", "blow_back", "unblow_back"):
         r = client.post("/api/control/vacuum", json={"action": act}, headers=h)
         assert r.status_code != 422, "%s 不该被入参拒：%s" % (act, r.text)
         # 测试环境真实下发总闸关闭 → 403；有令牌但闸关是预期行为
@@ -361,17 +363,21 @@ def test_vacuum_accepts_blow_action(client):
 
 
 def test_vacuum_blow_maps_to_bit3(client):
-    """★ 放气必须映射到 40135.Bit3 / 完成位 40035.Bit3（不与吸气/关阀复用位）。"""
-    from app.services.modbus import VAC_BIT_SUCK, VAC_BIT_RELEASE, VAC_BIT_BLOW
-    assert (VAC_BIT_SUCK, VAC_BIT_RELEASE, VAC_BIT_BLOW) == (0x0002, 0x0004, 0x0008)
-    seen = set()
+    """★ 位号必须与用户权威位表一致：下板 1~4 位 / 反面 5~8 位。
+
+    2026-10-11 起位号收敛到 `modbus.VAC_ACTIONS`（**单一映射口**）——
+    本钉改为**查表断言**（不再在 rc_vacuum 源码里找字面量，那正是要消灭的"散落硬编码"）。
+    """
+    from app.services.modbus import VAC_ACTIONS
+    bits = {k: v[0] for k, v in VAC_ACTIONS.items()}
+    assert bits["suck"] == 0x0002 and bits["release"] == 0x0004
+    assert bits["blow"] == 0x0008 and bits["unblow"] == 0x0010
+    assert bits["suck_back"] == 0x0020 and bits["release_back"] == 0x0040
+    assert bits["blow_back"] == 0x0080 and bits["unblow_back"] == 0x0100
     import inspect
     import app.services.modbus as M
     src = inspect.getsource(M.ModbusRobot.rc_vacuum)
-    for bit in ("0x0002", "0x0004", "0x0008"):
-        assert bit in src, "rc_vacuum 未覆盖完成位 %s" % bit
-        seen.add(bit)
-    assert "blow" in src and "suck/release/blow" in src, "rc_vacuum 未接受 blow 动作"
+    assert "VAC_ACTIONS" in src, "rc_vacuum 必须走单一映射口 VAC_ACTIONS（不得再写死位号）"
 
 
 # ---------------------------------------------------------------- 放气动作闸门
@@ -383,7 +389,9 @@ def test_vacuum_accepts_blow_action(client):
     但一按就"请求非法"。本条把这个入参闸门钉死。
     """
     h = _admin(client)
-    for act in ("suck", "release", "blow"):
+    # ★★ 2026-10-11：动作集扩到 8 个（含反面那一路）—— 正则必须全部放行，否则前端点了就 422。
+    for act in ("suck", "release", "blow", "unblow",
+                "suck_back", "release_back", "blow_back", "unblow_back"):
         r = client.post("/api/control/vacuum", json={"action": act}, headers=h)
         assert r.status_code != 422, "%s 不该被入参拒：%s" % (act, r.text)
         # 测试环境真实下发总闸关闭 → 403；有令牌但闸关是预期行为
@@ -393,14 +401,18 @@ def test_vacuum_accepts_blow_action(client):
 
 
 def test_vacuum_blow_maps_to_bit3(client):
-    """★ 放气必须映射到 40135.Bit3 / 完成位 40035.Bit3（不与吸气/关阀复用位）。"""
-    from app.services.modbus import VAC_BIT_SUCK, VAC_BIT_RELEASE, VAC_BIT_BLOW
-    assert (VAC_BIT_SUCK, VAC_BIT_RELEASE, VAC_BIT_BLOW) == (0x0002, 0x0004, 0x0008)
-    seen = set()
+    """★ 位号必须与用户权威位表一致：下板 1~4 位 / 反面 5~8 位。
+
+    2026-10-11 起位号收敛到 `modbus.VAC_ACTIONS`（**单一映射口**）——
+    本钉改为**查表断言**（不再在 rc_vacuum 源码里找字面量，那正是要消灭的"散落硬编码"）。
+    """
+    from app.services.modbus import VAC_ACTIONS
+    bits = {k: v[0] for k, v in VAC_ACTIONS.items()}
+    assert bits["suck"] == 0x0002 and bits["release"] == 0x0004
+    assert bits["blow"] == 0x0008 and bits["unblow"] == 0x0010
+    assert bits["suck_back"] == 0x0020 and bits["release_back"] == 0x0040
+    assert bits["blow_back"] == 0x0080 and bits["unblow_back"] == 0x0100
     import inspect
     import app.services.modbus as M
     src = inspect.getsource(M.ModbusRobot.rc_vacuum)
-    for bit in ("0x0002", "0x0004", "0x0008"):
-        assert bit in src, "rc_vacuum 未覆盖完成位 %s" % bit
-        seen.add(bit)
-    assert "blow" in src and "suck/release/blow" in src, "rc_vacuum 未接受 blow 动作"
+    assert "VAC_ACTIONS" in src, "rc_vacuum 必须走单一映射口 VAC_ACTIONS（不得再写死位号）"

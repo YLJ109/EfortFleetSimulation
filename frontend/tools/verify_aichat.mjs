@@ -198,5 +198,27 @@ console.log("== F. 语音播报（用户口径：动作/报错/颜色/去哪儿/
 }
 
 console.log("");
+console.log("== G. 「快速完成」→ 双面（一趟两件） ==");
+{
+  // ★★ 2026-10-11（方案 §C）：触发词需语境；没提到=一面；回显/计划卡如实标注本次模式。
+  const nl = read("../backend/app/services/nl_intent.py");
+  const llmSrc = read("../backend/app/services/llm.py");
+  const aiApi = read("../backend/app/api/ai.py");
+  const chat = read("src/ai/aiChat.js");
+  ok("规则层识别「快速完成/双面/一趟两件」（需语境，命中即 dual_face=true）",
+     /_DUAL_FACE_RE/.test(nl) && /"dual_face": True/.test(nl));
+  ok("只说「快速」不算（_QUICK_ONLY_RE → 回显本次=正常）",
+     /_QUICK_ONLY_RE/.test(nl) && /本次 = 正常/.test(nl));
+  ok("大模型 sanitize 透传布尔 dual_face（只认 True，非 bool 回落一面）",
+     /plan\.get\("dual_face"\) is True/.test(llmSrc));
+  ok("_echo 如实标注「本次 = 正常 / 快速」（计划卡/回显同源）",
+     /本次 = 正常/.test(aiApi) && /本次 = 快速/.test(aiApi));
+  ok("/ai/exec 把 dual_face 真正传下去（不再恒 False）",
+     /StartIn\(dry_run=True, dual_face=dual\)/.test(aiApi));
+  ok("前端计划卡步骤显示本次=正常/快速",
+     /本次=快速/.test(chat) && /本次=正常/.test(chat));
+}
+
+console.log("");
 console.log("结果: " + pass + " 通过 / " + fail + " 失败");
 process.exit(fail ? 1 : 0);

@@ -70,14 +70,16 @@ ok("claimMode 委托 link.claimMode（档位声明绝不另写一份）",
 // ★ 架构变更（2026-10-10）：就绪卡不再由各页各自挂载。原先只有「点位执行」「分拣」两页的
 //   可折叠右栏里有它 → 现场反映"别的页面也没有一键就绪"。统一收进底部「真机链路」入口：
 //   App 提供切换按钮 + #bottom-zone —— 任何页面都能点。
-// ★★ 架构变更（2026-10-11）：底部状态区改为**五选一**（StatusStrip：运行日志/机器人/
-//   摄像头/示教器/真机链路）—— 「真机链路」是其中一片，面板内容仍是 RcReadyCard。
+// ★★ 架构变更（2026-10-11）：底部状态区改为**状态片条**（StatusStrip：运行日志/摄像头/
+//   示教器/真机链路）—— 「真机链路」是其中一片，面板内容仍是 RcReadyCard。
 //   原来独立的切换按钮 + LinkPanel 浮窗已并入这一片。
+// ★★ 架构变更（2026-10-11 第二轮）：原「机器人」片与「真机链路」片**合并为一个**
+//   （用户原话："底部有两个真机链路两个合并掉"）→ 机器人链路内容迁入真机链路面板。
 ok("就绪卡由底部状态区「真机链路」片统一挂载（StatusStrip 内嵌 RcReadyCard）",
   statusStrip.includes("import RcReadyCard from") && statusStrip.includes("<RcReadyCard"));
-ok("App 底栏挂 StatusStrip（五选一，含真机链路片）+ bottom-zone",
+ok("App 底栏挂 StatusStrip（状态片条，含真机链路片）+ bottom-zone",
   app.includes("<StatusStrip") && app.includes("bottom-zone"));
-ok("LinkPanel 仍内嵌 RcReadyCard（保留文件，仅入口已并入五选一）",
+ok("LinkPanel 仍内嵌 RcReadyCard（保留文件，仅入口已并入底部状态区）",
   linkPanel.includes("import RcReadyCard from") && linkPanel.includes("<RcReadyCard />"));
 ok("点位执行页不再各自挂载 RcReadyCard（已收进底栏浮层，避免出现第二份）",
   !pointView.includes("<RcReadyCard />") && !pointView.includes("import RcReadyCard from"));

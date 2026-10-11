@@ -325,10 +325,13 @@ def test_put_back_sequence(monkeypatch):
     from app.api import sorting as SA
 
     seq = []
+    # ★ 2026-10-11：`_put_back` 新增 `face`（双面"用哪面取的就用哪面放回"）——
+    #   stub 必须一起接受 `face`，否则本钉子会因签名不匹配而假失败（工艺顺序不变）。
     monkeypatch.setattr(SA, "_move",
-                        lambda ctx, pmap, name, sp, dry, stage, st=None: seq.append(("move", name)))
+                        lambda ctx, pmap, name, sp, dry, stage, st=None, face=None:
+                        seq.append(("move", name)))
     monkeypatch.setattr(SA, "_air",
-                        lambda ctx, act, dry, stage, st=None: seq.append(("air", act)))
+                        lambda ctx, act, dry, stage, st=None, face=None: seq.append(("air", act)))
     monkeypatch.setattr(SA, "_set", lambda st=None, **kw: None)
 
     class _Ctx:

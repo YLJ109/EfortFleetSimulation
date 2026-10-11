@@ -32,7 +32,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_control
-from app.api.control import new_run, register_scene_source, request_cancel
+from app.api.control import (new_run, register_scene_source, request_cancel,
+                            reject_if_not_ready)
 from app.api.sorting import (_Stop, _air, _capture, _joints_of, _move,  # 复用同一套原语
                             _set as _set_state)
 from app.core.logger import get_logger
@@ -292,8 +293,17 @@ def _echo(intent: str, plan: Dict) -> Dict:
     if a == "sorting":
         zh = {"start": "开始分拣", "stop": "停止执行（软停，不是急停）",
               "pause": "暂停", "resume": "继续"}.get(plan.get("op"), plan.get("op"))
-        return {"title": "分拣流程", "detail": zh,
-                "note": "「停止」= 当前动作结束后停并回起点；急停请明说「急停」"}
+        note = "「停止」= 当前动作结束后停并回起点；急停请明说「急停」"
+        if plan.get("op") == "start":
+            # ★★ 2026-10-11（方案 §C）：**如实标注本次模式** ——
+            #   「正常（一面）」/「快速（双面·一趟两件）」。用户口径："计划卡上如实标本次=正常/快速"。
+            if plan.get("dual_face"):
+                return {"title": "分拣流程",
+                        "detail": "开始分拣（本次 = 快速 · 双面 · 一趟两件：第 1 件正面、第 2 件反面）",
+                        "note": note}
+            return {"title": "分拣流程",
+                    "detail": "开始分拣（本次 = 正常 · 一面，一趟一件）", "note": note}
+        return {"title": "分拣流程", "detail": zh, "note": note}
     if a == "inventory":
         return {"title": "盘点 A 区",
                 "detail": "逐件 取料 → 送 C 位判色 → **原格放回**（不搬运、不改变 A 区）",
@@ -609,17 +619,30 @@ def api_exec(body: ExecIn, tok: str = Depends(require_control)):
             return {"ok": True, "action": "sorting", "op": op, "message": msg}
         if op == "start":
             from app.api.sorting import StartIn, api_start
-            r = api_start(StartIn(dry_run=True), tok)
-            emit_event("ai", "info", "ai.sorting", "AI 指令：开始分拣（空跑起步）",
-                       {"raw": rec["raw"]}, actor="control")
+            # ★★ 2026-10-11（方案 §C）：把 `dual_face` **真正传下去**（过去恒 False）。
+            #   plan 里 `dual_face=True`（语法「快速完成/双面/一趟两件」）→ 本次走双面（一趟两件）；
+            #   其余一律一面（默认）—— 大模型降级/没解析出也回落一面。
+            dual = bool(plan.get("dual_face"))
+            r = api_start(StartIn(dry_run=True, dual_face=dual), tok)
+            emit_event("ai", "info", "ai.sorting",
+                       "AI 指令：开始分拣（空跑起步，%s）" % ("快速·双面" if dual else "正常·一面"),
+                       {"raw": rec["raw"], "dual_face": dual}, actor="control")
             return {"ok": bool(r.get("ok")), "action": "sorting", "op": "start",
-                    "message": "已开始分拣（空跑）；确认无误后到分拣页切真机",
+                    "dual_face": dual,
+                    "message": "已开始分拣（空跑，%s）；确认无误后到分拣页切真机"
+                               % ("快速·双面·一趟两件" if dual else "正常·一面"),
                     "state": r.get("state")}
         raise HTTPException(400, detail="未知的流程操作")
 
     # ---- 运动类：单件/批量/看颜色 ----
     if not body.confirm and act != "move_one":
         raise HTTPException(400, detail="这类指令需要先确认（点「确认执行」）")
+
+    # ★ 统一"未就绪"闸门：真实下发（非空跑）前先校验伺服是否上电 —— 未就绪直接拒绝，
+    #   不排队、不接替（排队接替的是"已就绪"场景）。空跑 dry_run=true 放行。
+    #   放在目标解析之前：伺服没上电时，先给出"机器人没有就绪"，而不是先纠结点位。
+    reject_if_not_ready(dry=bool(body.dry_run))
+
     # ★★ 2026-10-09：忙碌检查**从"解析之前"挪到了"解析+点位校验之后"**。
     #   为什么：要支持"接管"（执行中来新指令 → 旧任务回起点后自动接上新的），
     #   排队的计划必须是**已经校验通过**的 —— 否则会把一个坏计划排进队列，
@@ -1092,7 +1115,11 @@ def _piece(ctx, pmap, st, dry, src: str, dst: Optional[str], look_only: bool,
     _set_state(st, src=src, stage="取料", color="", conf=0.0, target="", holding=False,
                suspect_pick=False, judge=judge)
     _move(ctx, pmap, src + "上", speed, dry, "取料·上方", st)
-    _move(ctx, pmap, src, speed, dry, "取料·下落", st)
+    # ★★ 统一口径（2026-10-11 用户原话「我在正上位反面，去原料区是变成了正面」）：
+    #   `src` 是**原料位**（A 区取料格）→ 一律 `keep`（保持当前面、绝不翻面）；
+    #   此刻当前=正面（上面那步）→ 与旧的"正面"行为等价（零回归）。
+    _move(ctx, pmap, src, speed, dry, "取料·下落", st,
+          face=S.face_for_target(src, S.FACE_FRONT))
     _air(ctx, "suck", dry, "取料·吸", st)
     _job["suck_on"] = True
     _set_state(st, holding=True)

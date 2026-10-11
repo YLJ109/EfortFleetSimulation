@@ -1,13 +1,16 @@
 // =====================================================================
-// 底部状态区"五选一"守卫（headless 静态检查）
+// 底部状态区守卫（headless 静态检查）
 //
 // 用户口径（2026-10-11，原话）：
 //   "底部的真机链路能不能跟机器人/摄像头/示教器那样样式…还有运行日志也放进去，
 //    五个样式、状态，五选一显示，点别的地方自己隐藏，默认运行日志开启状态，
 //    绿色/黄色/红色点要亮起来，运行日志放在最左侧。"
+// 用户口径（2026-10-11 第二轮，原话）：
+//   "底部有两个真机链路两个合并掉" —— 原「机器人 真实链路」片与「真机链路 就绪」片
+//   合并为一个「真机链路」片（保留 RcReadyCard，机器人链路内容迁入其面板）。
 //
 // 这个脚本把这次改版里**最容易悄悄退化**的几条钉死：
-//   A. 五个片的名字与顺序（运行日志在最左）；
+//   A. 状态片的名字与顺序（运行日志最左、真机链路最右；机器人片已被合并掉）；
 //   B. 默认开运行日志；运行中自动开日志；
 //   C. 点外部收起（document 监听 + #bottom-zone 判定），且不阻塞页面；
 //   D. 灯的三态判据存在，且只按真实字段取色（不兜底成绿）。
@@ -31,25 +34,31 @@ const strip = read("src/components/StatusStrip.vue");
 const ui = read("src/stores/ui.js");
 const s3d = read("src/stores/sorting3d.js");
 
-// ---- 前四片沿用 linkview.js 的既有样式与判据（三片 = 机器人/摄像头/示教器）----
+// ---- 摄像头/示教器两片沿用 linkview.js 的既有样式与判据（机器人片已并入真机链路）----
 const { allPills } = await import(pathToFileURL(join(root, "src", "linkview.js")).href);
 const pillLabels = allPills(null).map((p) => p.label);
-const EXPECT = ["运行日志", ...pillLabels, "真机链路"];
+// ★ 2026-10-11 第二轮用户口径：「底部有两个真机链路两个合并掉」——
+//   原「机器人 真实链路」片 + 「真机链路 就绪」片合并为一个「真机链路」片
+//   （保留内容更全的 RcReadyCard，并把机器人链路内容迁入其面板）。
+//   → StatusStrip 实际渲染的片 = 运行日志 / 摄像头 / 示教器 / 真机链路。
+const EXPECT = ["运行日志", "摄像头", "示教器", "真机链路"];
 
 console.log("");
-console.log("== A. 五个片的名字与顺序（运行日志最左） ==");
+console.log("== A. 状态片的名字与顺序（运行日志最左、真机链路最右；机器人已并入真机链路） ==");
 {
-  ok("linkview 三片是 机器人/摄像头/示教器（承上）",
+  ok("linkview 三片仍是 机器人/摄像头/示教器（承上，纯函数不改）",
      JSON.stringify(pillLabels) === JSON.stringify(["机器人", "摄像头", "示教器"]),
      JSON.stringify(pillLabels));
   ok("StatusStrip 定义了「运行日志」片", strip.includes('label: "运行日志"'));
   ok("StatusStrip 定义了「真机链路」片", strip.includes('label: "真机链路"'));
-  // 五片的拼装顺序：日志（最左）→ link.pills（机器人/摄像头/示教器）→ 真机链路（最右）
-  ok("★ tabs 顺序 = [logTab, ...link.pills, linkTab]（运行日志最左、真机链路最右）",
-     /tabs\s*=\s*computed\(\s*\(\)\s*=>\s*\[logTab\.value\s*,\s*\.\.\.link\.pills\s*,\s*linkTab\.value\]\s*\)/.test(strip));
-  ok(`期望顺序 ${EXPECT.join(" · ")}`, EXPECT.length === 5);
-  // 五选一：同一个展开位（open === p.key），再点同一片收起（toggle 里 next==="" 的分支）
-  ok("★ 五选一门控 = open === p.key（共用同一个浮层容器）", strip.includes("open === p.key"));
+  // ★ 两个「真机链路」合并：tabs 必须**过滤掉** robot 片（否则底部又出现两个真机链路入口）。
+  ok("★ tabs = [logTab, ...link.pills.filter(key!=='robot'), linkTab]（机器人片已并入）",
+     /tabs\s*=\s*computed\(\s*\(\)\s*=>\s*\[[\s\S]{0,400}?link\.pills\.filter\(\(p\)\s*=>\s*p\.key\s*!==\s*"robot"\)[\s\S]{0,240}?linkTab\.value/.test(strip));
+  ok("★ 真机链路面板内含「机器人链路」块（原机器人片内容迁入，不丢功能）",
+     strip.includes("机器人链路") && strip.includes('class="lp-robot"'));
+  ok(`期望顺序 ${EXPECT.join(" · ")}`, EXPECT.length === 4);
+  // 多选一：同一个展开位（open === p.key），再点同一片收起（toggle 里 next==="" 的分支）
+  ok("★ 多选一门控 = open === p.key（共用同一个浮层容器）", strip.includes("open === p.key"));
   ok("★ 再点同一片可收起（toggle：next = open===k ? '' : k）",
      /open\.value\s*===\s*k\s*\?\s*""\s*:\s*k/.test(strip));
 }

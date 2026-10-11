@@ -479,23 +479,35 @@ async function teach(name) {
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) { pointMsg.value = "存点失败：" + errText(d, r.status).base; return; }
-    pointMsg.value = "已保存 " + name + "：" + (d.joints || []).map((v) => Number(v).toFixed(1)).join(", ");
+    // ★ 2026-10-11：J6 正/反面**只留 J6** —— 回执也只报 J6（否则会把"其余 5 轴写 0"
+    //   当成坐标显示出来，界面像在编故事）。其余点位照旧显示完整 6 值。
+    if (d.j6_only) {
+      const v = Number((d.joints || [])[5]);
+      pointMsg.value = "已保存 " + name + "：仅 J6 = " + (Number.isFinite(v) ? v.toFixed(1) : "-")
+        + "°（其余轴不使用）";
+    } else {
+      pointMsg.value = "已保存 " + name + "：" + (d.joints || []).map((v) => Number(v).toFixed(1)).join(", ");
+    }
     await refreshPoints();
     s3d.reload();        // ★ 刚改了示教点 → 3D 摆位必须重算（否则盒子/料还是旧位置）
   } catch (e) { pointMsg.value = "存点异常：" + ((e && e.message) || e); }
   finally { pointBusy.value = ""; }
 }
 
-/** 到点：移到该点位复核（★ 是运动）。 */
+/** 到点：移到该点位复核（★ 是运动）。
+ *  ★ 2026-10-11 用户口径：「测试点时不要限速，所有速度必须右上角滑轮同步」——
+ *    到点速度带上 `exec.speed`（右上角滑块），后端不再固定用 config 的 5%。 */
 async function goto(name) {
   pointBusy.value = name; pointMsg.value = "正在移到 " + name + " …";
   try {
     const r = await apiControl("/sorting/goto", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, speed_pct: exec.speed }),
     });
     const d = await r.json().catch(() => ({}));
-    pointMsg.value = r.ok ? ("已到 " + name) : ("到点失败：" + errText(d, r.status).base);
+    pointMsg.value = r.ok
+      ? (d.j6_only ? ("已在原地切到 " + name + "（仅 J6，J1~J5 未动）") : ("已到 " + name))
+      : ((d.j6_only ? "切面失败：" : "到点失败：") + errText(d, r.status).base);
   } catch (e) { pointMsg.value = "到点异常：" + ((e && e.message) || e); }
   finally { pointBusy.value = ""; }
 }
@@ -525,6 +537,13 @@ const confNow = computed(() => (st.value && st.value.conf) || 0);
 const targetNow = computed(() => (st.value && st.value.target) || "");
 const placement = computed(() => (st.value && st.value.placement) || []);
 const stopReason = computed(() => (st.value && st.value.error) || "");
+// ★★ 2026-10-11（方案 §A/§B）：当前"面"来自后端 state.face —— 由 `_move` 每次**如实**写
+//   front/back（"这一下发用的哪一面"）。★ 现场**没有"面"传感器**：它只是**流程推断**，
+//   界面必须标注；取不到（未运行 / 还没走到）→ 显示「—（未知）」，**绝不编**。
+const faceNow = computed(() => {
+  const f = st.value && st.value.face;
+  return f === "front" ? "正面" : f === "back" ? "反面" : "";
+});
 // ★ 空跑占位色：颜色不是相机判出来的，界面必须说清楚（否则会被误当成真实判色结果）
 const simColor = computed(() => !!(st.value && st.value.sim_color));
 // ★ 3D 提示：疑似没取到（失败停止时方块画回 A 格并标红）+ 3D 画不了的槽位原因
@@ -773,6 +792,14 @@ watch(() => rc.readyTick, (n) => {
           <span class="h3-sub">{{ piece }}/{{ total }} 件</span>
         </h3>
         <div class="row"><span class="k">阶段</span><span class="v">{{ stage }}</span></div>
+        <!-- ★★ 2026-10-11（方案 §A）：如实显示"当前面"——数据取自后端 `state.face`（真实字段），
+             标注为**流程推断**（现场没有"面"传感器）；取不到就显示「—（未知）」，绝不编。 -->
+        <div class="row"><span class="k">当前面</span>
+          <span class="v">
+            <template v-if="faceNow">{{ faceNow }}<span class="muted">（流程推断·现场无面传感器）</span></template>
+            <template v-else>—<span class="muted">（未知）</span></template>
+          </span>
+        </div>
         <div class="row"><span class="k">进度</span>
           <span class="v">{{ piece }}/{{ total }} 件{{ dryRun ? "（空跑）" : "" }}</span>
         </div>
@@ -925,8 +952,10 @@ watch(() => rc.readyTick, (n) => {
             <Icon name="check" :size="12" /> 存点
           </button>
           <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
-                  title="移到该点位复核" @click="goto(sl.name)">
-            <Icon name="target" :size="12" /> 到点
+                  :title="sl.j6Only ? '原地切面：只在当前位置转 J6（J1~J5 不动）'
+                                    : '移到该点位复核'"
+                  @click="goto(sl.name)">
+            <Icon name="target" :size="12" /> {{ sl.j6Only ? "切面" : "到点" }}
           </button>
           <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
                   title="删除该点位" @click="clearPoint(sl.name)">

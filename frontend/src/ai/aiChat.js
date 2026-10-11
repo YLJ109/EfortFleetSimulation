@@ -42,7 +42,14 @@ export function planSteps(plan) {
   if (a === "move_quota") return ["循环：取料", "判色", "需要则放料／不需要放回原位", "回起点"];
   if (a === "inventory") return ["循环：取料", "送 C 判色", "原格放回", "汇总统计"];
   if (a === "goto_start") return ["移动到开始/结束点"];
-  if (a === "sorting") return ["分拣流程：" + ((plan && plan.op) || "")];
+  if (a === "sorting") {
+    // ★ 2026-10-11（方案 §C）：计划卡**如实标注本次模式**（正常一面 / 快速双面·一趟两件）。
+    const op = (plan && plan.op) || "";
+    const mode = op === "start"
+      ? ((plan && plan.dual_face) ? " · 本次=快速（双面·一趟两件）" : " · 本次=正常（一面）")
+      : "";
+    return ["分拣流程：" + op + mode];
+  }
   if (a === "estop") return ["立即急停"];
   return [a || "执行"];
 }

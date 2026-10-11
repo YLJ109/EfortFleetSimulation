@@ -25,6 +25,17 @@ import { useLinkStore } from "./link.js";
  */
 export const RC_POLL_MS = 4000;
 
+/**
+ * ★ 2026-10-11 统一"未就绪"提示（用户口径：「如果没有上电，执行点到点、移到什么的，
+ *   全部提醒机器人没有就绪」）。
+ *   与后端 motion.SERVO_NOT_READY_MSG（"机器人没有就绪：伺服未上电，请先点「一键就绪」"）
+ *   **同一句开场白**，便于现场一眼识别 —— 后端拒绝时返回的 message 用的就是这句。
+ *   前端各入口"未就绪时不许动"的旁注/提示都引用本常量（不各写一遍，避免口径分叉）。
+ *   为什么前端这里不写"伺服未上电"：本页判据是完整就绪（rc.ready = 伺服 + 程序运行 +
+ *   档位 + 无报警），只知道"没就绪"、不一定只是伺服 —— 写死"伺服未上电"会与实际不符。
+ */
+export const NOT_READY_HINT = "机器人没有就绪：请先在「真机链路」点「一键就绪」";
+
 export const useRcReadyStore = defineStore("rcReady", {
   state: () => ({
     snap: null,        // rc_status 原始快照（来自 WS 或种子 load）

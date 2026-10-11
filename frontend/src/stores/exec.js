@@ -24,7 +24,7 @@ import { apiControl } from "../net/control.js";
 import { useAuthStore } from "./auth.js";
 import { useRobotStore } from "./robot.js";
 import { useSafetyStore } from "./safety.js";
-import { useRcReadyStore } from "./rcReady.js";
+import { useRcReadyStore, NOT_READY_HINT } from "./rcReady.js";
 import { setGhostPose, setGhostPoseB, showGhost, showGhostB, highlightJoint,
          evalSafety } from "../three/manager.js";
 import { STATE_RANK } from "../three/safety.js";
@@ -40,6 +40,11 @@ let keepAliveTimer = null;
 let pollTimer = null;
 let pressTimer = null;
 let pressInfo = null;
+// ★ 残影预演"世代"令牌（A 与 B 各一个）：残影目标现在要**向后端要**（同源解算，是异步的），
+//   快速划过点位列表时旧请求可能后返回 → 会盖掉新点位的残影。每次发起/收起都 +1，
+//   返回时若世代对不上就丢弃（与点动的 pressToken 同一手法）。
+let ghostSeq = 0;
+let ghostSeqB = 0;
 // ★ 全维度审查 F-01：按压"世代"令牌。每按一次 +1、松手 +1。
 //   startJog 是异步的，返回时用户可能早已松手 —— 没有这个令牌，
 //   松手后仍会把连续点动跑起来（机器人在按钮已松开时继续运动）。
@@ -114,11 +119,13 @@ export const useExecStore = defineStore("exec", {
     estopBusy: false,
     execState: null,
 
-    // ---- 真空吸放（Web 触发 40135.Bit1/Bit2 → 控制器常驻服务程序 200 执行，不移动机器人）----
-    //   ★ 与 jog 同真实下发双闸；控制器须 AUTO/远程且常驻程序(200)运行中才生效。
-    //   ★ 2026-09-29：吸放与点动共用 200（不再有 210）；吸气为**电平保持**，状态锁存。
-    //   idle = 真空已关断（默认态）；suck = 吸气保持中。无 release 中间态。
-    vacuumState: "idle",   // idle | suck
+    // ---- 真空吸放（Web 触发 40135 触发位 → 控制器常驻服务程序 210 执行，不移动机器人）----
+    //   ★ 与 jog 同真实下发双闸；控制器须 AUTO/远程且常驻程序运行中才生效。
+    //   ★★ 2026-10-11：动作集扩到 **8 个**（用户权威位表），两面**各自独立气路**：
+    //     下板/正面 = 1~4 位（suck/release/blow/unblow）；反面/上板 = 5~8 位（…_back）。
+    //     故**分面锁存**两路阀状态；idle = 该路已关断，suck/blow = 保持中。
+    vacuumState: "idle",       // 下板/正面：idle | suck | blow
+    vacuumStateBack: "idle",   // 反面/上板：idle | suck | blow
     // ---- 序列编辑（程序执行页）----
     //   seqItems 元素恒为四类之一：
     //     {type:"point",  point_id:N}
@@ -232,7 +239,7 @@ export const useExecStore = defineStore("exec", {
       const s = useSafetyStore();
       if (this.ghostUnsafe) return `残影预演的目标位姿处于 ${s.lastState}，已禁止下发`;
       if (!useAuthStore().controlActive) return "未获得控制权限，无法下发";
-      if (!this.readyGate) return "控制器未就绪：请先在「真机链路」点「一键就绪」（伺服上电 + 程序运行 + 无报警）";
+      if (!this.readyGate) return NOT_READY_HINT + "（伺服上电 + 程序运行 + 无报警）";
       return "";
     },
     jogActive: (s) => !!(s.jogState && s.jogState.active),
@@ -684,31 +691,78 @@ export const useExecStore = defineStore("exec", {
       if (info) this.stepJog(info.joint, info.dir);       // 短按 → 走一格
     },
     // ================= 残影预演 =================
+    /**
+     * ★★ 同源（2026-10-11，用户反馈「现在残影对不上」）：
+     *   残影目标**一律向后端要**（只读接口 `/control/point-target`，与实际下发同一个
+     *   后端函数 `resolve_target_joints`）—— 前端**不再自己用点位自带的 6 轴拼姿态**。
+     *   根因：`J6正面`/`J6反面` 实发是"原地切面"（当前实时基姿态只覆盖第 6 轴），
+     *   而旧残影直接摆点位自带的整姿态（录点在起点）→ 两者不同源 → 对不上。
+     *   返回 `{target:number[]|null, j6Only:boolean, error:string}`；不会抛。
+     */
+    async fetchPointTarget(p) {
+      try {
+        const body = (p && p.id != null) ? { point_id: p.id } : { name: p && p.name };
+        const r = await apiControl("/control/point-target", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (d && d.ok && Array.isArray(d.target) && d.target.length === 6) {
+          return { target: d.target.map(Number), j6Only: !!d.j6_only, error: "" };
+        }
+        return { target: null, j6Only: !!(d && d.j6_only),
+                 error: (d && (d.error || d.message)) || "解算失败" };
+      } catch (e) {
+        return { target: null, j6Only: false, error: "解算失败：" + ((e && e.message) || e) };
+      }
+    },
+    /**
+     * 把残影摆到该点位**将要下发的目标位姿**（同源）。which="a"（默认）或 "b"（对比用）。
+     *   · 普通点位：后端原样返回点位自带 6 值 → 与旧行为**逐字一致**；
+     *   · J6 正/反面：后端返回"原地切面"目标 → 残影 == 实发；
+     *   · 后端**明确拒绝**（J6 正/反面但无实时基姿态）→ 收起残影（不摆错姿态），并如实记原因；
+     *   · 后端**不可用**（网络异常等）→ 回退到点位自带 6 值（**保持旧行为**，不新增拦截）。
+     */
+    async ghostFromPoint(p, which = "a") {
+      const setPose = which === "b" ? setGhostPoseB : setGhostPose;
+      const setVis = which === "b" ? showGhostB : showGhost;
+      if (!p || !p.joints || p.joints.length !== 6) { setVis(false); return; }
+      const seq = which === "b" ? (++ghostSeqB) : (++ghostSeq);
+      const r = await this.fetchPointTarget(p);
+      // 已被后来的 hover/pin/收起覆盖 → 丢弃（避免快速划过时残影乱跳）
+      if (which === "b" ? seq !== ghostSeqB : seq !== ghostSeq) return;
+      if (r.target) { setPose(r.target); setVis(true); return; }
+      if (r.j6Only) {                      // J6 正/反面但后端拒绝 → 不摆"录点时的整姿态"
+        setVis(false);
+        if (r.error) this.logLine("warn", `点位「${p.name}」残影预演：${r.error}`);
+        return;
+      }
+      setPose(p.joints); setVis(true);      // 普通点位兜底：旧行为
+    },
     /** 把残影摆到某个点位（按 point_id 在已加载点位里找关节角）。 */
     previewPointGhost(pointId) {
       const p = this.points.find((x) => x.id === pointId);
-      if (p && p.joints && p.joints.length === 6) setGhostPose(p.joints);
-      else showGhost(false);
+      if (p) return this.ghostFromPoint(p, "a");
+      showGhost(false);
     },
     /** 在点位列表上悬停 → 残影预演该点位。 */
     hoverPoint(p) {
-      if (p && p.joints && p.joints.length === 6) setGhostPose(p.joints);
+      if (p && p.joints && p.joints.length === 6) return this.ghostFromPoint(p, "a");
     },
-    unhoverPoint() { if (!this.runBusy) showGhost(false); },
-    hideGhost() { showGhost(false); highlightJoint(-1); },
+    unhoverPoint() { ghostSeq++; if (!this.runBusy) showGhost(false); },
+    hideGhost() { ghostSeq++; showGhost(false); highlightJoint(-1); },
     /** ★ 点选（选中）某点位：残影**常驻**跟随该点位姿，直到点别的点或离开页面。
      *  与 hoverPoint（悬停临时预演）的区别：pin 是持久化选中态，鼠标移开不消失。 */
     pinPoint(p) {
       if (p && p.joints && p.joints.length === 6) {
-        setGhostPose(p.joints);
-        showGhost(true);
         this.pinnedPointId = p.id;
-      } else {
-        this.pinnedPointId = null;
-        showGhost(false);
+        return this.ghostFromPoint(p, "a");
       }
+      this.pinnedPointId = null;
+      ghostSeq++;
+      showGhost(false);
     },
-    unpinPoint() { this.pinnedPointId = null; },
+    unpinPoint() { this.pinnedPointId = null; ghostSeq++; },
 
     /**
      * ★ 残影 B（对比用）：把第二个残影摆到另一个点位，与 A 同屏对比。
@@ -717,17 +771,17 @@ export const useExecStore = defineStore("exec", {
      */
     pinPointB(p) {
       if (p && p.joints && p.joints.length === 6) {
-        setGhostPoseB(p.joints);
-        showGhostB(true);
         this.pinnedPointIdB = p.id;
-      } else {
-        this.pinnedPointIdB = null;
-        showGhostB(false);
+        return this.ghostFromPoint(p, "b");
       }
+      this.pinnedPointIdB = null;
+      ghostSeqB++;
+      showGhostB(false);
     },
-    unpinPointB() { this.pinnedPointIdB = null; showGhostB(false); },
+    unpinPointB() { this.pinnedPointIdB = null; ghostSeqB++; showGhostB(false); },
     /** 两个残影一起收掉（离页/切视图时用）。 */
     hideGhosts() {
+      ghostSeq++; ghostSeqB++;
       showGhost(false); showGhostB(false); highlightJoint(-1);
       this.pinnedPointId = null; this.pinnedPointIdB = null;
     },
@@ -860,8 +914,16 @@ export const useExecStore = defineStore("exec", {
     },
     async execPoint(p) {
       if (this.needAuth()) return;
-      // ★ 残影门控：先把残影摆到该点位量一次，不撞才发（替代原先"按实体机位姿拦"）。
-      const gate = this.gateAt(p && p.joints);
+      // ★ 残影门控：先把残影摆到该点位**将要下发的目标位姿**（同源），不撞才发
+      //   （替代原先"按实体机位姿拦"）。J6 正/反面：目标 = 后端"原地切面"结果。
+      const r = p ? await this.fetchPointTarget(p) : { target: null, j6Only: false };
+      if (r.j6Only && !r.target) {          // 后端明确拒绝（拿不到实时基姿态）→ 不下发
+        const why = r.error || "无法解算切面目标";
+        this.execState = { ok: false, error: why };
+        this.logLine("err", `点位「${p.name}」残影预演：${why}`);
+        return;
+      }
+      const gate = this.gateAt(r.target || (p && p.joints));
       if (!gate.ok) { this.execState = { ok: false, error: gate.reason }; return; }
       this.runBusy = true;
       this.execState = null;
@@ -920,9 +982,17 @@ export const useExecStore = defineStore("exec", {
           const it = items[i];
           this.runStep = i + 1;
           // ★ 逐步门控：每一步都先按"这一步的目标位姿"量一次残影，不撞才发。
+          //   ★ 同源：目标向后端要（J6 正/反面 = 原地切面，普通点位 = 点位自带 6 值）。
           //   某一步过不去 → 就地中断，绝不"带病"往下跑。
-          const pj = (this.points.find((x) => x.id === it.point_id) || {}).joints;
-          const gate = this.gateAt(pj);
+          const pstep = this.points.find((x) => x.id === it.point_id);
+          const rstep = pstep ? await this.fetchPointTarget(pstep) : null;
+          if (rstep && rstep.j6Only && !rstep.target) {
+            failed = `第 ${i + 1} 步残影预演：${rstep.error || "无法解算切面目标"}`;
+            this.execState = { ok: false, error: rstep.error || "无法解算切面目标" };
+            this.logLine("err", failed);
+            break;
+          }
+          const gate = this.gateAt((rstep && rstep.target) || (pstep && pstep.joints));
           if (!gate.ok) {
             failed = `第 ${i + 1} 步${gate.reason}`;
             this.execState = { ok: false, error: gate.reason };
@@ -1200,55 +1270,72 @@ export const useExecStore = defineStore("exec", {
       }
     },
     /**
-     * 吸气 / 停止吸气（不移动机器人）：写 40135.Bit1/Bit2 触发位 → 控制器常驻服务程序(200)执行。
-     * ★ 与 jog 同真实下发双闸；控制器须 AUTO/远程且常驻程序(200)运行中才生效。
-     *   action: "suck"（吸真空，**电平保持**，不自动停）| "release"（立即关断真空）。
-     * ★ 2026-09-29：吸气取消 0.5s 自动停 → 状态必须**锁存**（latch）。
-     *   旧实现 2s 后自动回 idle；保持型语义下阀还开着、界面却显示"空闲"，
-     *   操作员会误判 → 属安全隐患。现在只有 release 成功才回 idle。
+     * 吸气 / 停止吸气 / 放气 / 停止放气（**8 个动作，含"反面"那一路**，不移动机器人）：
+     * 写 40135 对应触发位 → 控制器常驻服务程序 210 执行。
+     * ★ 与 jog 同真实下发双闸；控制器须 AUTO/远程且常驻程序运行中才生效。
+     * ★★ 2026-10-11（用户权威位表）：两面**各自独立气路** ——
+     *   下板/正面 = suck(1)/release(2)/blow(3)/unblow(4)；
+     *   反面/上板 = suck_back(5)/release_back(6)/blow_back(7)/unblow_back(8)。
+     *   故**分面锁存**阀状态（vacuumState / vacuumStateBack）。
+     * ★ 状态必须**锁存**（latch）：保持型语义下"吸/放"开了就一直保持，
+     *   只有对应的"停止"成功才回 idle（否则操作员会误判阀状态 → 安全隐患）。
      */
     async vacuum(action) {
-      if (!["suck", "release", "blow", "unblow"].includes(action)) return;
+      const ACTIONS = ["suck", "release", "blow", "unblow",
+                       "suck_back", "release_back", "blow_back", "unblow_back"];
+      if (!ACTIONS.includes(action)) return;
       if (this.needAuth()) return;
+
+      // 动作名后缀 _back = 反面/上板那一路；base = 四个基础动作之一
+      const isBack = action.endsWith("_back");
+      const base = isBack ? action.slice(0, -5) : action;
+      const key = isBack ? "vacuumStateBack" : "vacuumState";   // 分面锁存
 
       // ★★ 安全优先：**停止吸气 / 放气请求绝不丢弃** ★★
       //   上一发（通常是吸气）还在飞时，后端 rc_vacuum 的前置守卫会以
       //   「吸触发位仍为 1（上一发未收尾），已拒绝」回 502 ——
       //   操作员慌乱中按"停止吸气/放气"，看到的是"按了没反应还报错"，而阀其实还开着。
       //   这里记下意图，等上一发收尾后立刻补发，保证"脱件"的语义最终一定生效。
-      //   四种气路动作（吸/停止吸/放/停止放）里，后三种都是"让状态往安全/脱件方向走"的，
+      //   八个气路动作里，除 "suck"/"suck_back"（建立真空）外都是让状态往安全/脱件方向走的，
       //   一律排队不丢弃。
-      if (action !== "suck" && this.vacuumBusy) {
+      if (base !== "suck" && this.vacuumBusy) {
         this.vacuumPending = action;
         this.logLine("info", "已排队：等上一发收尾后立即执行");
         return;
       }
 
-      const prev = this.vacuumState;   // 失败时回退，绝不谎报阀状态
-      const LABEL = { suck: "吸", release: "停止吸", blow: "放", unblow: "停止放" };
-      const BIT = { suck: 1, release: 2, blow: 3, unblow: 4 };
+      const prev = this[key];   // 失败时回退，绝不谎报阀状态
+      const LABEL = { suck: "吸", release: "停止吸", blow: "放", unblow: "停止放",
+                      suck_back: "反面吸", release_back: "反面停止吸",
+                      blow_back: "反面放", unblow_back: "反面停止放" };
+      const BIT = { suck: 1, release: 2, blow: 3, unblow: 4,
+                    suck_back: 5, release_back: 6, blow_back: 7, unblow_back: 8 };
       this.vacuumBusy = true;
       this.vacuumErr = null;
-      this.vacuumState = action;
+      this[key] = base;
       this.logLine("info", "Web 触发" + LABEL[action] + "（40135.Bit" + BIT[action] + "）"
-        + (action === "suck" || action === "blow" ? "，电平保持，需手动停止" : ""));
+        + ((base === "suck" || base === "blow") ? "，电平保持，需手动停止" : ""));
       try {
         const r = await apiControl("/control/vacuum", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action }),
         });
-        if (r.status === 401 || r.status === 403) { this.vacuumState = prev; this.needAuth(); return; }
+        if (r.status === 401 || r.status === 403) { this[key] = prev; this.needAuth(); return; }
         if (r.ok) {
           // ★ 保持型语义：吸/放 都是"开了就一直保持"，直到对应的"停止"动作；
-          //   停止吸/停止放 → 回到 idle（两者都关掉了）。
-          if (action === "suck") this.vacuumState = "suck";
-          else if (action === "blow") this.vacuumState = "blow";
-          else this.vacuumState = "idle";
+          //   停止吸/停止放 → 回到 idle（该路阀关断）。
+          if (base === "suck") this[key] = "suck";
+          else if (base === "blow") this[key] = "blow";
+          else this[key] = "idle";
           this.logLine("ok", {
             suck: "吸已开启（保持中）",
             release: "已停止吸（真空阀关断）",
             blow: "放已开启（吹气保持中）",
             unblow: "已停止放（吹气阀关断）",
+            suck_back: "反面吸已开启（保持中）",
+            release_back: "已停止反面吸（反面真空阀关断）",
+            blow_back: "反面放已开启（吹气保持中）",
+            unblow_back: "已停止反面放（反面吹气阀关断）",
           }[action] || (LABEL[action] + "完成"));
         } else {
           let msg = "吸放触发失败";
@@ -1259,12 +1346,12 @@ export const useExecStore = defineStore("exec", {
               || (typeof d.detail === "string" ? d.detail : "") || ("HTTP " + r.status);
           } catch (e) { msg = "HTTP " + r.status; }
           this.vacuumErr = String(msg);
-          this.vacuumState = prev;
+          this[key] = prev;
           this.logLine("err", LABEL[action] + "失败：" + msg);
         }
       } catch (e) {
         this.vacuumErr = e && e.message ? String(e.message) : String(e);
-        this.vacuumState = prev;
+        this[key] = prev;
         this.logLine("err", "吸放触发异常：" + this.vacuumErr);
       } finally {
         this.vacuumBusy = false;
@@ -1614,9 +1701,12 @@ export const useExecStore = defineStore("exec", {
      *    demo 只有 RealMonitor 能设，exec 无权也不需要碰它。 */
     leaveView() {
       this.stopTimers();
+      ghostSeq++; ghostSeqB++;          // 作废在飞的残影请求，避免离页后残影又"冒出来"
       showGhost(false);
+      showGhostB(false);
       highlightJoint(-1);
       this.pinnedPointId = null;
+      this.pinnedPointIdB = null;
     },
     dispose() {
       this.stopTimers();

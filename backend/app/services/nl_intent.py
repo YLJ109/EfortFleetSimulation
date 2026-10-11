@@ -36,6 +36,19 @@ INTENTS = ("look_color", "move_one", "move_all", "move_quota", "sorting", "estop
 # 不支持/需要拒绝的模糊词（速度只认右上角那一份）
 VAGUE_SPEED = ("快一点", "快点", "慢一点", "慢点", "加速", "减速", "全速", "高速", "低速")
 
+# ★★ 2026-10-11（方案 §C）「快速完成」→ 双面（一趟两件）触发词：
+#   ① 「双面 / 一趟两件 / 两面一起 / 一次拿两个」—— **本身就是语境**，命中即双面；
+#   ② 「快速」**必须带语境**（快速完成 / 快速分拣 / 快速搞定…）才算双面 —— 与用户口径一致：
+#      **只说"快速"不算**（防误触发，如"快速看一下"）。
+#   ⇒ 命中 → plan 加 `"dual_face": True`（**不新增 op / action**，复用 sorting+start，
+#      与后端 `StartIn.dual_face` 字段对齐）。
+_DUAL_FACE_RE = re.compile(
+    r"双面|一趟两件|一趟兩件|两面(都|各|一起|一块)"
+    r"|一次(拿|取|抓|吸)两(个|件|块)|两(个|件|块)一起(拿|取|抓|吸)"
+    r"|快速(完成|分拣|拣|搞定|干完|做完)")
+# 只出现"快速"、但**没有**上面的双面语境 → 不臆测：仍按正常一面 + 回显如实说明。
+_QUICK_ONLY_RE = re.compile(r"快速")
+
 # ★ 2026-10-10：急停的**安全直达**判据（见 ai._parse_to_plan 第 0 步）。
 #   用户要求"每句话必须大模型推理"，但**急停不能等网络** —— 这是唯一被允许绕过
 #   大模型的例外，且会在回显里**显式标注**"安全直达"，不冒名成"大模型解析"。
@@ -417,8 +430,22 @@ def parse(text: str) -> Dict:
     if not _has_move_phrase and re.search(r"继续|接着|恢复", raw):
         out.update(ok=True, intent="sorting", plan={"action": "sorting", "op": "resume"})
         return out
+    # ★★ 2026-10-11（方案 §C）「快速完成 / 双面 / 一趟两件」→ 双面（一趟两件）：
+    #   **需带语境**（见 _DUAL_FACE_RE）；命中即"开始分拣 + dual_face"。
+    #   放在"开始分拣"之前：这样"快速完成"（不含"开始分拣"字样）也能起分拣。
+    if not _has_move_phrase and _DUAL_FACE_RE.search(raw):
+        out.update(ok=True, intent="sorting",
+                   plan={"action": "sorting", "op": "start", "dual_face": True})
+        out["warnings"].append(
+            "本次 = 快速（双面 · 一趟两件）：第 1 件用正面、第 2 件用反面，一趟取两件。")
+        return out
     if not _has_move_phrase and re.search(r"开始分拣|执行分拣|分拣一下|开始拣|跑分拣", raw):
         out.update(ok=True, intent="sorting", plan={"action": "sorting", "op": "start"})
+        if _QUICK_ONLY_RE.search(raw):
+            # ★ 说了"快速"却没有"完成/分拣/双面/一趟两件"这类语境 → **不臆测**，按正常一面，
+            #   并如实告诉用户"怎么才能要双面"。与"没提到 = 一面"一致。
+            out["warnings"].append(
+                "没听清是否要双面，本次 = 正常（一面）；要双面请说「快速完成」。")
         return out
 
     # ---- 看颜色 ----

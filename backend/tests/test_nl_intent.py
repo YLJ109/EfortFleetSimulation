@@ -128,6 +128,44 @@ def test_sorting_control(text, action):
     assert r["plan"]["op"] == action
 
 
+# ---------------------------------------------------------------- 双面（快速完成）→ dual_face
+# ★★ 2026-10-11（方案 §C）：先说「快速完成/双面/一趟两件…」（**需带语境**）→ 双面（一趟两件）；
+#   没提到 = 一面；只说"快速"二字不算。全部纯解析，离线可测。
+@pytest.mark.parametrize("text", [
+    "快速完成", "快速分拣", "双面", "双面分拣", "一趟两件",
+    "两面一起拿", "一次拿两个", "开始分拣，快速完成", "双面完成",
+])
+def test_dual_face_trigger_sets_dual_face(text):
+    r = N.parse(text)
+    assert r["ok"] is True and r["intent"] == "sorting", r
+    assert r["plan"] == {"action": "sorting", "op": "start", "dual_face": True}, r
+    assert any(("快速" in w) or ("双面" in w) for w in r["warnings"]), r["warnings"]
+
+
+@pytest.mark.parametrize("text", ["开始分拣", "执行分拣", "跑分拣"])
+def test_plain_sorting_start_is_one_face(text):
+    """★ 没提到双面 → **默认一面**（plan 里不带 dual_face）。"""
+    r = N.parse(text)
+    assert r["ok"] is True and r["intent"] == "sorting"
+    assert not r["plan"].get("dual_face"), "没提到双面却带上了 dual_face"
+
+
+def test_quick_without_context_is_normal_and_explains():
+    """★ 只说"快速"、没有"完成/分拣/双面/一趟两件"语境 → **不臆测**：
+    本次=正常一面，并如实说明"要双面请说「快速完成」"。
+    """
+    r = N.parse("快速开始分拣")
+    assert r["ok"] is True and r["intent"] == "sorting"
+    assert not r["plan"].get("dual_face"), "只说'快速'不该被判成双面"
+    assert any("本次 = 正常" in w for w in r["warnings"]), r["warnings"]
+
+
+def test_vague_speed_still_rejected_not_stolen_by_dual_face():
+    """★ 「快点开始分拣」含模糊速度词 → 仍走**模糊速度拒绝**，不被双面逻辑抢走。"""
+    r = N.parse("快点开始分拣")
+    assert r["ok"] is False and "模糊速度" in r["error"], r
+
+
 def test_sorting_control_not_hijacked_by_move_clause():
     """★ 2026-10-10 现场事故：一句正常的**配额搬运**指令，末尾带了从句"…放回原位继续！"，
     结果"继续"被当成"继续分拣" → 整句变成 sorting/resume → 回显 "?"。

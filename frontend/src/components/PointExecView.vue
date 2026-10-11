@@ -21,7 +21,7 @@ import { useAuthStore } from "../stores/auth.js";
 import { useRobotStore } from "../stores/robot.js";
 import { useSafetyStore } from "../stores/safety.js";
 import { useExecStore, JOG_STEPS } from "../stores/exec.js";
-import { useRcReadyStore } from "../stores/rcReady.js";
+import { useRcReadyStore, NOT_READY_HINT } from "../stores/rcReady.js";
 import { apiUrl } from "../config.js";
 import { apiControl } from "../net/control.js";
 import { highlightJoint } from "../three/manager.js";
@@ -119,6 +119,14 @@ function onLeavePoint(p) {
 /** 是否「标记当前点」生成的标记点（用于显示「已标记」徽标）。 */
 function isMarked(p) { return !!(p && p.name && p.name.startsWith("标记点")); }
 
+// ★★ 2026-10-11：`J6正面`/`J6反面` = "只看 J6" 的两点（名字与后端
+//   services/sorting.py 的 OPTIONAL_EXTRA_POINTS / api/sorting.py 的 DUAL_FACE_FLIP_POINT 一致）。
+//   · 后端已把这两点的下发一律转成**原地切面**（基姿态=当前实时关节，只覆盖第 6 轴），
+//     禁止整姿态 → 界面这里**只显示第 6 轴**，并把按钮标成「切面」，
+//     不再把"其余 5 轴写 0"当成坐标列出来（否则会让人误以为那 5 轴也参与）。
+const J6_FACE_POINTS = new Set(["J6正面", "J6反面"]);
+const isJ6Face = (p) => !!(p && J6_FACE_POINTS.has(p.name));
+
 function triggerImport() { fileInput.value && fileInput.value.click(); }
 async function onImport(e) {
   const f = e.target.files && e.target.files[0];
@@ -184,7 +192,7 @@ watch(() => auth.controlActive, (v) => {
       </h3>
       <!-- ★ 需求：所有组件在"未就绪"时一律不可修改/不可点 -->
       <p v-if="!readyOk" class="lock-hint">
-        <Icon name="lock" :size="13" /> 需先在「真机链路」点「一键就绪」（伺服上电 + 程序运行）后，才可点动。
+        <Icon name="lock" :size="13" /> {{ NOT_READY_HINT }}（伺服上电 + 程序运行）后，才可点动。
       </p>
 
       <!-- 步长 + 残影预演（同一行：步长靠左，残影预演由全局 margin-left:auto 推到行尾） -->
@@ -333,14 +341,22 @@ watch(() => auth.controlActive, (v) => {
             </div>
           </div>
           <div class="pt-coords">
-            <span class="coord" v-for="(jv, ji) in p.joints" :key="ji">
-              <b>J{{ ji + 1 }}</b>{{ Number(jv).toFixed(3) }}
-            </span>
+            <!-- ★ J6 正/反面：只显示第 6 轴（其余轴不参与切面），不把"其余轴为 0"当坐标列出 -->
+            <template v-if="isJ6Face(p)">
+              <span class="coord"><b>J6</b>{{ Number((p.joints || [])[5]).toFixed(3) }}</span>
+              <span class="coord j6-only">仅 J6 有效 · 其余轴不使用</span>
+            </template>
+            <template v-else>
+              <span class="coord" v-for="(jv, ji) in p.joints" :key="ji">
+                <b>J{{ ji + 1 }}</b>{{ Number(jv).toFixed(3) }}
+              </span>
+            </template>
           </div>
           <div v-if="p.note" class="pt-note"><Icon name="note" :size="12" /> {{ p.note }}</div>
           <div class="pt-ops" @click.stop>
-            <button :disabled="!exec.canExec || exec.runBusy" @click="exec.execPoint(p)">
-              <Icon name="target" :size="13" /> 执行
+            <button :disabled="!exec.canExec || exec.runBusy" @click="exec.execPoint(p)"
+                    :title="isJ6Face(p) ? '原地切面：只在当前位置转 J6（J1~J5 不动）' : '移到该点位'">
+              <Icon name="target" :size="13" /> {{ isJ6Face(p) ? "切面" : "执行" }}
             </button>
             <button :disabled="!canControl" title="把残影摆到该点位预演"
                     @click="exec.previewPointGhost(p.id)">
@@ -424,6 +440,8 @@ watch(() => auth.controlActive, (v) => {
   background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px;
 }
 .coord b { color: var(--accent); font-weight: 600; margin-right: 3px; }
+/* ★ J6 正/反面：坐标区只挂"仅 J6 有效"这句说明（区别于普通数值块） */
+.coord.j6-only { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
 .pt-note {
   display: flex; align-items: center; gap: 5px;
   margin: 5px 2px 2px; font-size: 11px; color: var(--muted); line-height: 1.4;

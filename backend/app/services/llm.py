@@ -50,6 +50,8 @@ SYSTEM_PROMPT = """你是工业机器人分拣系统的**指令解析器**。把
 3. "move_all"    把某区**全部**搬走 —— {"action":"move_all","from":{"zone":"A"},"to":{loc},"on_invalid":"continue|stop"}
 4. "move_quota"  按颜色各取几件 —— {"action":"move_quota","to":{"zone":"B"},"quotas":{"蓝":3,"绿":2,"红":1},"pattern":"...","on_invalid":"continue|stop"}
 5. "sorting"     流程控制 —— {"action":"sorting","op":"start|stop|pause|resume"}
+   ★ 要「快速完成 / 双面 / 一趟两件」→ 开始分拣时**加** "dual_face":true
+     （如 {"action":"sorting","op":"start","dual_face":true}）；**没提到 / 只说"快速"二字 → 不加**（默认一面）。
 6. "estop"       只有用户**明确说「急停」**才用 —— {"action":"estop"}
    ★「停下/停止」是软停 → 用 sorting+stop，不要用 estop。
 7. "goto_start"  回开始/结束点 —— {"action":"goto_start"}
@@ -381,7 +383,12 @@ def sanitize(plan: Dict) -> Dict:
         op = str(plan.get("op") or plan.get("action2") or "").strip().lower()
         if op not in ALLOWED_SORTING:
             return {"ok": False, "error": "大模型给的流程操作不在白名单内（%s）" % (op or "空")}
-        return {"ok": True, "plan": {"action": "sorting", "op": op}, "source": src}
+        out = {"action": "sorting", "op": op}
+        # ★★ 2026-10-11（方案 §C）双面（快速完成）透传：**只认真正的布尔 True** ——
+        #   非 bool（含 "true" 字符串）一律**忽略**（回落一面）。大模型降级/没解析出 → 一面。
+        if op == "start" and plan.get("dual_face") is True:
+            out["dual_face"] = True
+        return {"ok": True, "plan": out, "source": src}
 
     opts = _opts(plan)
     if action == "look_color":

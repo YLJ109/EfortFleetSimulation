@@ -10,7 +10,10 @@
 //   · 全部控制走 store（带令牌）；未授权时按钮禁用，不发请求。
 //   · 暂停⇄继续**复用** SortingView 的琥珀色 .pause-btn 样式与 togglePause 语义：
 //     暂停=原地冻结可续；停止=作废本局（棋子留在棋盘，可点「复位」搬回 A 区）。
-//   · 复盘**只放 2D**，不动机器人（方案 §9）。
+//   · ★★ 2026-10-11 用户口径：「机器人复盘要真实复盘，机器人要动起来，每一个棋子放到原位」——
+//     **「复盘」= 真实复盘**：机器人真的动，逐个把棋子搬回**原位**（来源 A 格，落子逆序），
+//     完成后棋盘清空/复位到初始（与 2D/3D 同源）。真实局要**二次确认**（会真动机器人）。
+//   · 「回放」是**只读的棋谱查看**（逐手回看，不动机器人），与真实复盘分开、互不混淆。
 // =====================================================================
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import Icon from "./Icon.vue";
@@ -78,18 +81,30 @@ async function doReset(force = false) {
   await ttt.reset();
 }
 
-async function doReplay() {
+/** ★ 复盘 = **真实复盘**：机器人真的动，逐个把棋子搬回原位（来源 A 格）。
+ *  force=true 跳过弹窗（手柄走"二次确认"）。空跑局不动机器人，无需确认。 */
+async function doReplay(force = false) {
+  if (running.value || !canReplay.value) return;
+  if (!force && !st.value.dry_run
+      && !window.confirm("真实复盘：机器人会逐个把棋子搬回 A 区原位（落子逆序，跟顶栏速度）。\n确认开始？")) return;
+  await ttt.startReplay();
+}
+
+/** 回放 = **只读棋谱查看**（逐手回看，不动机器人）；与真实复盘分开。 */
+function doViewReplay() {
   if (ttt.inReplay) ttt.stopReplay();
-  else await ttt.loadReplay();
+  else ttt.loadReplay();
 }
 
 // ---------------------------------------------------------------- 手柄（Xbox）
 // ★ 与棋盘组件**分工不重叠**：棋盘接「方向 + A 落子」；本卡片接
-//   「Start 开始 / X 暂停⇄继续 / B 停止 / Y 复盘 / View 复位」。
-// ★ 复位会真动机器人：手柄没法点 window.confirm 弹窗，所以改成**二次确认** ——
-//   第一次按 View 只提示"再按一次"，3 秒内再按才真的复位（等效于弹窗的确认动作）。
+//   「Start 开始 / X 暂停⇄继续 / B 停止 / Y 复盘(真实) / View 复位」。
+// ★ 复盘/复位都会真动机器人：手柄没法点 window.confirm 弹窗，所以改成**二次确认** ——
+//   第一次按只提示"再按一次"，3 秒内再按才真的执行（等效于弹窗的确认动作）。
+//   （空跑局不动机器人 → 复盘无需二次确认。）
 const padOn = ref(false);
 let padResetArm = 0;
+let padReplayArm = 0;
 
 function onPad(action) {
   if (robot.activeView !== "sort") return;      // 只在分拣页响应，别把全局手柄劫走
@@ -97,7 +112,14 @@ function onPad(action) {
   if (action === "start") { if (!running.value) doStart(); return; }
   if (action === "pause") { if (running.value || paused.value) ttt.togglePause(); return; }
   if (action === "stop") { if (running.value || paused.value) ttt.stop(); return; }
-  if (action === "replay") { if (ttt.inReplay || canReplay.value) doReplay(); return; }
+  if (action === "replay") {
+    if (!canReplay.value) return;
+    if (st.value.dry_run) { doReplay(true); return; }   // 空跑：不动机器人，直接复盘
+    const now = Date.now();
+    if (now - padReplayArm < 3000) { padReplayArm = 0; doReplay(true); }
+    else { padReplayArm = now; ttt.msg = "手柄复盘（真实）：请再按一次 Y 确认（3 秒内）"; }
+    return;
+  }
   if (action === "reset") {
     if (running.value || !hasMoves.value) return;
     const now = Date.now();
@@ -145,6 +167,27 @@ onBeforeUnmount(() => {
                 @click="ttt.verifyColor = true">拍照自证</button>
       </span>
     </div>
+    <!-- ★★ 2026-10-11（方案 §D）「正常 / 快速」两档（界面开关）：快速 = 一趟两子
+         （先手随机；机器人先手时先提前显示其落子，再等你落子后合并一趟完成） -->
+    <div class="ttt-row">
+      <span class="k">节奏</span>
+      <span class="seg">
+        <button :class="{ on: !ttt.fast }" :disabled="locked"
+                title="一趟一子：与之前一样（机器人子、你的子各搬一趟）"
+                @click="ttt.fast = false">正常</button>
+        <button :class="{ on: ttt.fast }" :disabled="locked"
+                title="一趟两子（机器人子用正面、你的子用反面，J6 双面）：先手随机；机器人先手时先提前显示它的落子，再等你落子后合并一趟完成"
+                @click="ttt.fast = true">快速</button>
+      </span>
+    </div>
+    <div v-if="ttt.fast" class="ttt-hint">
+      快速模式：<b>先手随机</b>（不再强制你先下）；机器人先手时<b>先把它的落子显示在 2D/3D</b>
+      （提示「机器人已下棋完成·已显示，待搬子」），再<b>等你落子</b> → <b>一趟两子</b>
+      （机器人子用正面、你落的那子用反面，靠 J6 翻转）。
+      需先录入 <b>J6正面</b>/<b>J6反面</b> 两个姿态；本轮<b>不与「拍照自证」合并</b>（请二选一）；
+      「只剩一个空位」时<b>免等待、直接完成</b>（空跑不动机器人）。
+    </div>
+
     <!-- ★ 自证约定的**编辑组件**：圆/叉各一个颜色下拉（红/绿/蓝），开局后锁定 -->
     <div v-if="ttt.verifyColor" class="ttt-hint">
       自证约定（可改）：
@@ -184,9 +227,15 @@ onBeforeUnmount(() => {
               @click="doReset">
         <Icon name="refresh" :size="13" /> 复位
       </button>
-      <button class="mini-btn" :disabled="!canCtrl || !canReplay" title="逐手回放（只放 2D，不动机器人）"
+      <button class="mini-btn" :disabled="!canCtrl || !canReplay"
+              title="★ 真实复盘：机器人真的动，逐个把棋子搬回 A 区原位（落子逆序，跟顶栏速度）；空跑则只更新棋盘、不动机器人"
               @click="doReplay">
-        <Icon name="history" :size="13" /> {{ ttt.inReplay ? "退出复盘" : "复盘" }}
+        <Icon name="history" :size="13" /> 复盘
+      </button>
+      <button class="mini-btn" :disabled="!canCtrl || !canReplay"
+              title="回放：只按棋谱逐手回看（只查看、不动机器人）"
+              @click="doViewReplay">
+        <Icon name="rotateLeft" :size="13" /> {{ ttt.inReplay ? "退出回放" : "回放" }}
       </button>
     </div>
 

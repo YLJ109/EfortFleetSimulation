@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -21,12 +22,31 @@ from app.db.crud import create_point, delete_point, list_points
 from app.db.database import SessionLocal
 from app.services import sorting as S
 from app.services import tictactoe as TT
+from app.services.motion import SERVO_NOT_READY_MSG
 
 
 def _token(c) -> str:
     r = c.post("/api/auth/login", json={"password": "test1234"})
     assert r.status_code == 200, r.text
     return r.json()["token"]
+
+
+def _set_job(state=None, thread=None):
+    """直接摆弄模块级运行登记（内存态）—— 让"复盘"用例可确定地构造局面。"""
+    with ttt_api._gate:
+        ttt_api._job.update({"thread": thread, "ctx": None, "state": state,
+                             "q": None, "started_at": 0.0})
+
+
+def _ctx_cls():
+    """最小 RunContext 替身：不暂停、可取消、sleep 立即返回。"""
+    class _Ctx:
+        def cancelled(self): return False
+        def wait_pause(self): return False
+        def sleep(self, s): return False
+        def finish(self, phase): self.phase = phase
+        def set_thread(self, th): pass
+    return _Ctx()
 
 
 def _seed_points():
@@ -61,6 +81,7 @@ def test_all_endpoints_require_token(client):
     assert client.post("/api/tictactoe/stop").status_code == 401
     assert client.post("/api/tictactoe/reset").status_code == 401
     assert client.get("/api/tictactoe/replay").status_code == 401
+    assert client.post("/api/tictactoe/replay").status_code == 401   # ★ 真实复盘也要令牌
 
 
 # ---------------------------------------------------------------- 空态
@@ -174,9 +195,10 @@ def test_carry_uses_global_speed(monkeypatch):
     `_carry` 里每一段运动都必须用 `st["speed_pct"]`，不许再写死 5。"""
     speeds = []
     monkeypatch.setattr(ttt_api, "_move",
-                        lambda ctx, pmap, name, sp, dry, stage, st=None: speeds.append(sp))
+                        lambda ctx, pmap, name, sp, dry, stage, st=None, face=None:
+                        speeds.append(sp))
     monkeypatch.setattr(ttt_api, "_air",
-                        lambda ctx, action, dry, stage, st=None: None)
+                        lambda ctx, action, dry, stage, st=None, face=None: None)
     monkeypatch.setattr(ttt_api, "SUCK_HOLD_MS", 0)
     monkeypatch.setattr(ttt_api, "BLOW_MS", 0)
 
@@ -229,9 +251,10 @@ def _patch_carry(monkeypatch, cap):
     """把 _carry 的运动/吸放/放回全部换成记录器（不动机器人）。"""
     calls = {"move": [], "air": [], "put": []}
     monkeypatch.setattr(ttt_api, "_move",
-                        lambda ctx, pmap, name, sp, dry, stage, st=None: calls["move"].append(name))
+                        lambda ctx, pmap, name, sp, dry, stage, st=None, face=None:
+                        calls["move"].append(name))
     monkeypatch.setattr(ttt_api, "_air",
-                        lambda ctx, act, dry, stage, st=None: calls["air"].append(act))
+                        lambda ctx, act, dry, stage, st=None, face=None: calls["air"].append(act))
     monkeypatch.setattr(ttt_api, "_capture", lambda ctx, n, mc, stage, st=None: cap)
     monkeypatch.setattr(ttt_api, "_put_back",
                         lambda ctx, pmap, src, sp, dry, **kw: calls["put"].append(src))
@@ -314,9 +337,10 @@ def test_carry_sends_play_via_start(monkeypatch):
     """
     calls = []
     monkeypatch.setattr(ttt_api, "_move",
-                        lambda ctx, pmap, name, sp, dry, stage, st=None: calls.append(name))
+                        lambda ctx, pmap, name, sp, dry, stage, st=None, face=None:
+                        calls.append(name))
     monkeypatch.setattr(ttt_api, "_air",
-                        lambda ctx, action, dry, stage, st=None: None)
+                        lambda ctx, action, dry, stage, st=None, face=None: None)
     monkeypatch.setattr(ttt_api, "SUCK_HOLD_MS", 0)
     monkeypatch.setattr(ttt_api, "BLOW_MS", 0)
 
@@ -334,3 +358,350 @@ def test_carry_sends_play_via_start(monkeypatch):
     calls.clear()
     ttt_api._carry(_Ctx(), {}, st, True, "B5", "A1", "复位", via_start=False)
     assert calls == ["B5上", "B5", "B5上", "A1上", S.START_POINT], calls
+
+
+# ================================================================================
+# ★★ 2026-10-11（方案 §D）井字棋「正常 / 快速」两模式 + 「只剩一个空位免等待」
+#   全部离线：纯函数 / 源码位置断言 / fake ctx，不连真机、不真下发。
+# ================================================================================
+def test_fast_defaults_off():
+    """★ 铁律：快速模式必须显式打开，**默认正常**（一趟一子，零回归）。"""
+    assert ttt_api.StartIn().fast is False
+    assert ttt_api.StartIn(fast=True).fast is True
+    assert ttt_api._new_state(True, "normal", TT.O, TT.X, "user", 40)["fast"] is False
+
+
+def test_fast_mode_needs_j6_face_points():
+    """★ 快速模式比正常模式**多要 J6正面/J6反面** 两个姿态（缺了不让开局）。"""
+    base = ttt_api._needed_points(False)
+    assert "J6正面" not in base and "J6反面" not in base
+    fast = ttt_api._needed_points(False, fast=True)
+    assert "J6正面" in fast and "J6反面" in fast
+
+
+def test_fast_start_rejects_verify_combo(client):
+    """★ 本轮**明确拒绝**「快速 + 拍照自证」的组合（不悄悄忽略其一）。"""
+    h = {"X-Control-Token": _token(client)}
+    ids = _seed_points()
+    try:
+        r = client.post("/api/tictactoe/start",
+                        json={"dry_run": True, "fast": True, "verify_color": True}, headers=h)
+        assert r.status_code == 400, r.text
+        assert "二选一" in r.json().get("message", ""), r.text
+    finally:
+        _drop(ids)
+
+
+def test_fast_mode_source_pins():
+    """★★ 源码钉：快速模式一趟取两子 + 用面（机器人子正面、用户子反面）+ 免等待。"""
+    import inspect
+
+    src = inspect.getsource(ttt_api._play_two)
+    assert "_move_flip_j6" in src, "快速模式必须复用 J6 翻转原语"
+    assert "S.FACE_FRONT" in src and "S.FACE_BACK" in src, "两子必须用不同面（正面/反面）"
+    assert "_dual_drop" in src, "必须复用双面放件原语"
+    run = inspect.getsource(ttt_api._run)
+    assert "一趟取两子" in run and "_play_two(" in run
+    assert "免等待" in run, "缺少「只剩一个空位免等待」分支"
+
+
+def test_fast_mode_does_not_force_user_first():
+    """★★（本轮）快速模式**不再强制用户先行** —— 先手按**原有逻辑**随机（用户口径）。
+
+    上一轮为了"先等你落子"把快速模式的先手硬改成 user；本轮取消：
+    正常/快速都 `random.choice(["user","robot"])`。机器人先手时改走"提前显示 + 等用户 + 一趟两子"。
+    """
+    import inspect
+
+    src = inspect.getsource(ttt_api.api_start)
+    assert '"user" if fast' not in src and "'user' if fast" not in src, \
+        "快速模式仍被强制成用户先行（本轮应取消）"
+    assert "random.choice" in src, "先手必须按原有逻辑随机"
+
+
+def test_fast_mode_robot_first_pre_displays_then_one_trip(monkeypatch):
+    """★★（本轮）快速 + **机器人先手**：
+      ① 机器人**先决定并提前把落子显示出来**（后端棋盘先写上 → 2D/3D 与棋盘同源）；
+      ② 然后**等用户落子**（等待时棋盘上已能看到机器人那一手，文案如实标「已显示，待搬子」）；
+      ③ 用户落子到位后 **一趟两子**（机器人子 + 用户子）一次完成。
+    全部离线：`_move/_air/_play/_play_two/_wait_move` 全打桩，不连真机、不真下发。
+    """
+    calls = {"two": [], "play": [], "waits": []}
+    monkeypatch.setattr(ttt_api, "_move", lambda *a, **k: None)
+    monkeypatch.setattr(ttt_api, "_air", lambda *a, **k: None)
+
+    def _fake_play(ctx, pmap, st_, dry, sym, cell):
+        st_["board"][cell] = sym                       # 与真实 _play 同源：落子进棋盘
+        st_["moves"].append({"cell": int(cell), "sym": sym, "src": "A?"})
+        calls["play"].append((sym, cell))
+
+    def _fake_two(ctx, pmap, st_, dry, rc, uc):
+        st_["board"][rc] = st_["robot_sym"]
+        st_["board"][uc] = st_["user_sym"]
+        st_["moves"].append({"cell": int(rc), "sym": st_["robot_sym"], "src": "A?"})
+        st_["moves"].append({"cell": int(uc), "sym": st_["user_sym"], "src": "A?"})
+        calls["two"].append((rc, uc))
+
+    monkeypatch.setattr(ttt_api, "_play", _fake_play)
+    monkeypatch.setattr(ttt_api, "_play_two", _fake_two)
+
+    st = ttt_api._new_state(True, "hard", TT.X, TT.O, "robot", 40, fast=True)
+    board = st["board"]
+
+    def _wait(ctx, q):
+        calls["waits"].append([v for v in board])      # 记录"等待时"的棋盘
+        empt = [i for i in range(9) if board[i] is None]
+        return empt[0] if empt else None
+
+    monkeypatch.setattr(ttt_api, "_wait_move", _wait)
+
+    class _Ctx:
+        def cancelled(self): return False
+        def wait_pause(self): return False
+        def finish(self, phase): self.phase = phase
+        def set_thread(self, th): pass
+
+    ttt_api._run(_Ctx(), None, st, True, {})
+
+    assert calls["waits"], "机器人先手快速模式却从没等过用户"
+    pre = calls["waits"][0]
+    assert sum(1 for v in pre if v == TT.O) == 1, \
+        "等用户时棋盘上应已「提前显示」机器人那一手（后端棋盘与 2D/3D 同源）"
+    assert calls["two"], "用户落子后应走「一趟两子」"
+    assert st.get("finished") is True
+    assert st.get("result") in ("user_win", "robot_win", "draw")
+
+
+def test_fast_mode_robot_first_source_pins():
+    """★★ 源码钉：机器人先手必须**提前显示**并**如实标注**时间差（不许含糊）。"""
+    import inspect
+
+    run = inspect.getsource(ttt_api._run)
+    assert "机器人已下棋完成" in run, "缺少「机器人已下棋完成」提示"
+    assert "待搬子" in run, "必须如实标注「已显示，待搬子」（提前显示与真搬子有时间差）"
+    assert "board[cell_r] = robot_sym" in run, "提前显示：必须先写进后端棋盘（与 2D/3D 同源）"
+
+
+def test_run_last_empty_no_wait(monkeypatch):
+    """★★ 「只剩一个空位」→ **不管轮到谁都免等待、直接完成**（不调 `_wait_move`）。
+
+    棋盘只留 cell 8、轮到用户：`_run` 应**直接**落该格，绝不阻塞等用户。
+    """
+    calls = {"play": [], "wait": 0}
+    monkeypatch.setattr(ttt_api, "_move", lambda *a, **k: None)
+    monkeypatch.setattr(ttt_api, "_air", lambda *a, **k: None)
+    monkeypatch.setattr(ttt_api, "_play",
+                        lambda ctx, pmap, st_, dry, sym, cell: calls["play"].append((sym, cell)))
+    monkeypatch.setattr(ttt_api, "_wait_move",
+                        lambda ctx, q: (calls.__setitem__("wait", calls["wait"] + 1) or 0))
+    st = ttt_api._new_state(True, "normal", TT.O, TT.X, "user", 40)
+    st["board"] = ["X", "O", "X", "X", "O", "O", "O", "X", None]   # 只剩 cell 8
+    st["turn"] = "user"
+
+    class _Ctx:
+        def cancelled(self): return False
+        def wait_pause(self): return False
+        def finish(self, phase): self.phase = phase
+        def set_thread(self, th): pass
+
+    ttt_api._run(_Ctx(), None, st, True, {})
+    assert calls["wait"] == 0, "只剩一个空位却还在等用户落子（免等待失效）"
+    assert calls["play"] == [(TT.O, 8)], calls["play"]
+    assert st.get("finished") is True
+
+
+# ================================================================================
+# ★★ 2026-10-11（本轮）**真实复盘**：机器人真的动，逐子把棋子搬回原位（来源 A 格）。
+#   全部离线：`_carry`/`_move` 打桩 / 假 ctx / 假 pmap，不连真机、不真下发。
+# ================================================================================
+def test_replay_moves_each_piece_back_in_reverse_order(monkeypatch):
+    """★ 复盘**真的逐子搬回**：搬子调用次数 = 已落子数，且**按落子逆序**，
+    每个目标 = 该子的**原位**（来源 A 格）。
+
+    顺序固定为 **逆序（LIFO）** —— 与既有 `_reset_run`（复位）同一口径，
+    语义 = "把整局倒着撤销"（最后一手先回）。
+    """
+    moves = [
+        {"cell": 0, "sym": "O", "by": "user", "src": "A1"},
+        {"cell": 4, "sym": "X", "by": "robot", "src": "A6"},
+        {"cell": 8, "sym": "O", "by": "user", "src": "A2"},
+    ]
+    st = ttt_api._new_state(True, "normal", TT.O, TT.X, "user", 40)
+    st["moves"] = list(moves)
+    st["board"] = [None] * 9
+    for m in moves:
+        st["board"][m["cell"]] = m["sym"]
+    st["used"] = [m["src"] for m in moves]
+    st["finished"] = True
+
+    got = {"carry": [], "move": []}
+    monkeypatch.setattr(ttt_api, "_carry",
+                        lambda ctx, pmap, s, dry, a, b, who, **k:
+                        got["carry"].append((a, b, dry, who)))
+    monkeypatch.setattr(ttt_api, "_move",
+                        lambda ctx, pmap, name, sp, dry, stage, st=None, **k:
+                        got["move"].append(name))
+
+    ttt_api._replay_run(_ctx_cls(), st, {})
+
+    assert len(got["carry"]) == len(moves), got["carry"]        # 每子一趟
+    assert got["move"] and got["move"][0] == S.START_POINT      # 先回开始/结束点
+    exp = list(reversed(moves))                                 # 逆序：最后一手先搬
+    for (a, b, dry, who), mv in zip(got["carry"], exp):
+        assert a == TT.cell_to_slot(mv["cell"]), (a, mv)        # 从棋盘 B{i+1} 取
+        assert b == mv["src"], (b, mv)                          # 搬回**原位**（来源 A 格）
+        assert dry is True                                      # 空跑局：不下发真实运动
+        assert who == "复盘"
+    # 终态如实：子都回原位 → 棋盘清空 / 复位到初始
+    assert st["board"] == [None] * 9 and st["moves"] == [] and st["used"] == []
+    assert st["result"] == "" and st["win_line"] == [] and st["piece_no"] == 0
+    assert st["finished"] is True and st.get("ok") is True
+
+
+def test_replay_dry_never_dispatches_real_motion(monkeypatch):
+    """★ 空跑复盘：**只走预演路径、不下发任何真实运动**（但流程/终态与真实一致）。
+
+    用真 `_carry`/`_move`/`_air` + 假 pmap，把 `motion.command` 换成记录器：
+    空跑时它**一次都不该被调用**（若 dry 没透传下去，这里立刻红）。
+    """
+    import types as _types
+
+    import app.services.motion as M
+
+    names = ([s for s in S.A_SLOTS] + [s + "上" for s in S.A_SLOTS]
+             + [s for s in S.B_SLOTS] + [s + "上" for s in S.B_SLOTS] + [S.START_POINT])
+    pmap = {n: _types.SimpleNamespace(joints="[0,0,0,0,0,0]") for n in names}
+    cmds = []
+    monkeypatch.setattr(M.motion, "command",
+                        lambda *a, **k: (cmds.append(a), {"ok": True})[1])
+
+    st = ttt_api._new_state(True, "normal", TT.O, TT.X, "user", 40)   # dry_run=True
+    st["moves"] = [{"cell": 0, "sym": "O", "by": "user", "src": "A1"},
+                   {"cell": 4, "sym": "X", "by": "robot", "src": "A6"}]
+    st["board"] = ["O", None, None, None, "X", None, None, None, None]
+
+    ttt_api._replay_run(_ctx_cls(), st, pmap)
+    assert cmds == [], "空跑复盘竟下发了真实运动：%r" % cmds
+    assert st["moves"] == [] and st["board"] == [None] * 9   # 终态照样清空
+
+
+def test_replay_real_uses_live_dry_flag(monkeypatch):
+    """★ 真实局（dry_run=False）→ `_carry` 收到 dry=False（会真下发）；
+    空跑局 → dry=True。复盘**继承本局的 dry 口径**（绝不把真实局当空跑跑掉、
+    否则界面说"已搬回"而实物还在棋盘上 —— 那就是编故事）。"""
+    seen = []
+    monkeypatch.setattr(ttt_api, "_carry",
+                        lambda ctx, pmap, s, dry, a, b, who, **k: seen.append(dry))
+    monkeypatch.setattr(ttt_api, "_move", lambda *a, **k: None)
+    for dry in (False, True):
+        seen.clear()
+        st = ttt_api._new_state(dry, "normal", TT.O, TT.X, "user", 40)
+        st["moves"] = [{"cell": 0, "sym": "O", "by": "user", "src": "A1"}]
+        st["board"] = ["O", None, None, None, None, None, None, None, None]
+        ttt_api._replay_run(_ctx_cls(), st, {})
+        assert seen == [dry], (dry, seen)
+
+
+def test_replay_without_moves_400(client):
+    """没有可复盘的棋子 → 400（不是"跑了但没得复"）。"""
+    _set_job(None)
+    h = {"X-Control-Token": _token(client)}
+    assert client.post("/api/tictactoe/replay", headers=h).status_code == 400
+
+
+def test_replay_running_409(client):
+    """对局/复盘进行中 → 409（共用 40135，不许交错下发）。"""
+    th = threading.Thread(target=lambda: time.sleep(0.4))
+    th.start()
+    st = ttt_api._new_state(True, "normal", TT.O, TT.X, "user", 40)
+    st["moves"] = [{"cell": 0, "sym": "O", "by": "user", "src": "A1"}]
+    _set_job(st, thread=th)
+    h = {"X-Control-Token": _token(client)}
+    try:
+        assert client.post("/api/tictactoe/replay", headers=h).status_code == 409
+    finally:
+        th.join()
+        _set_job(None)
+
+
+def _msg(r):
+    try:
+        return (r.json() or {}).get("message", "") or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def test_replay_rejected_when_servo_off(client, monkeypatch):
+    """★ 未就绪闸门：真实复盘（非空跑）时伺服未上电 → 409 + **统一文案**
+    （与 /start、/sorting/* 同一句，绝不各写一份）。空跑复盘不受拦（另测）。"""
+    import app.services.motion as M
+    from app.services import collector as C
+
+    class _MB0:
+        def rc_snapshot(self):
+            return {"bits": {"servo": 0, "alarm": 0, "estop": 0}}, None
+
+    monkeypatch.setattr(M, "real_write_enabled", lambda: True)
+    monkeypatch.setattr(M.motion, "modbus", _MB0(), raising=False)
+    monkeypatch.setattr(C.collector, "simulated", False)
+    monkeypatch.setenv("EFORT_SIMULATE", "auto")
+
+    st = ttt_api._new_state(False, "normal", TT.O, TT.X, "user", 5)     # 真实局
+    st["moves"] = [{"cell": 0, "sym": "O", "by": "user", "src": "A1"}]
+    st["board"] = ["O", None, None, None, None, None, None, None, None]
+    _set_job(st)
+    h = {"X-Control-Token": _token(client)}
+    try:
+        r = client.post("/api/tictactoe/replay", headers=h)
+        assert r.status_code == 409, r.text
+        assert _msg(r) == SERVO_NOT_READY_MSG, _msg(r)
+    finally:
+        _set_job(None)
+
+
+def test_replay_dry_not_blocked_by_gate(client, monkeypatch):
+    """★ 空跑复盘不被"未就绪"闸门拦（否则没法预演/排练流程）。"""
+    import app.services.motion as M
+    from app.services import collector as C
+
+    class _MB0:
+        def rc_snapshot(self):
+            return {"bits": {"servo": 0, "alarm": 0, "estop": 0}}, None
+
+    monkeypatch.setattr(M, "real_write_enabled", lambda: True)
+    monkeypatch.setattr(M.motion, "modbus", _MB0(), raising=False)
+    monkeypatch.setattr(C.collector, "simulated", False)
+    monkeypatch.setenv("EFORT_SIMULATE", "auto")
+    # 空跑复盘的 pmap 需要点位可解算 → 用离线打桩的 _carry，避免真运动
+    monkeypatch.setattr(ttt_api, "_carry", lambda *a, **k: None)
+    monkeypatch.setattr(ttt_api, "_move", lambda *a, **k: None)
+
+    st = ttt_api._new_state(True, "normal", TT.O, TT.X, "user", 5)      # 空跑局
+    st["moves"] = [{"cell": 0, "sym": "O", "by": "user", "src": "A1"}]
+    _set_job(st)
+    h = {"X-Control-Token": _token(client)}
+    try:
+        r = client.post("/api/tictactoe/replay", headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json().get("dry_run") is True
+    finally:
+        # ★ 等复盘线程收工（否则打桩撤掉后后台线程会用真函数跑，干扰后续用例）
+        with ttt_api._gate:
+            th = ttt_api._job.get("thread")
+        if th is not None:
+            th.join(2.0)
+        _set_job(None)
+
+
+def test_replay_endpoint_reuses_existing_primitives():
+    """★ 源码钉：真实复盘**复用既有搬子原语**（`_carry`），不新造下发通道。"""
+    import inspect
+
+    src = inspect.getsource(ttt_api._replay_run)
+    assert "_carry(" in src, "复盘必须复用 _carry（= 分拣同一套 _move/_air）"
+    assert "motion.command(" not in src, "复盘不得绕过 _move/_air 直接调 motion.command 下发"
+    assert "reversed(moves)" in src, "复盘必须按落子逆序（LIFO）搬回（与复位同口径）"
+    assert "复盘：搬回第" in src, "缺少逐子回执（第几个子 / 去向）"
+    # 端点必须过统一闸门
+    api = inspect.getsource(ttt_api.api_replay_run)
+    assert "reject_if_not_ready(" in api, "真实复盘未接统一未就绪闸门"

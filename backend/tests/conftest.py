@@ -158,3 +158,41 @@ def _pin_joint_lock_off(monkeypatch):
     monkeypatch.setattr(sc, "joint_lock_enabled", lambda: False, raising=False)
     monkeypatch.setattr(motion_mod, "joint_lock_enabled", lambda: False, raising=False)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _pin_collector_simulated():
+    """★★ 跨用例隔离：采集器单例的 `simulated` 是**运行期可变**的全局状态。
+
+    事故现象（2026-10-11 · 全量套件偶发 3 连红）：
+      `test_audit_p0` / `test_not_ready_gate` 里会用 `EFORT_SIMULATE=auto` +
+      `collector.simulated=False` 把链路**假装成真机**去验证"链路真实性守卫"。
+      采集后台线程每 2s 重读一次 simulate 开关；若恰在窗口内看到 `auto` 且
+      `modbus.reachable()` 为真，会把单例 `simulated` **翻成 False**；而它要等真实读
+      连续失败 30 次（≈3s）才翻回模拟 —— 于是紧随其后的
+      `test_ops::test_system_health_shape`（健康断言 simulated 必为真）、
+      `test_runmode`、`test_sim_robot` 会在这 ~3s 窗口里偶发失败，
+      且**单独跑那几条又全绿**（典型的跨用例竞态，不是被测代码的缺陷）。
+
+    做法：每个用例前后把单例 `simulated` 钉回**强制模拟**（`EFORT_SIMULATE=always`
+    本就是测试环境的既定状态），把这个 ~3s 窗口收口，消除跨用例串味。
+    ★ 只动测试环境里的单例状态，**绝不改生产逻辑、绝不连真机**。
+    """
+    try:
+        from app.services import collector as cmod
+        c = getattr(cmod, "collector", None)
+    except Exception:  # noqa: BLE001
+        c = None
+
+    def _pin():
+        if c is None:
+            return
+        try:
+            c.simulated = True
+            c.connected = False
+        except Exception:  # noqa: BLE001
+            pass
+
+    _pin()
+    yield
+    _pin()

@@ -121,5 +121,29 @@ ok("D2. 结果从 /control/run-state 的 state.result 取",
 ok("D3. 等结果有超时且如实回报（不假装成功）",
   /等待执行结果超时/.test(execStore));
 
+// ---- E. 双面（8 气路动作）：点位执行页 4 个"反面"按钮 + store 支持 8 动作（2026-10-11）----
+//   用户权威位表：下板 1~4 位、反面/上板 5~8 位；两面**各自独立气路**。
+//   判据：① store 的 vacuum 放行 8 个动作、分面锁存（vacuumState / vacuumStateBack）；
+//         ② 控制权限卡片（PointExecView 与程序执行页共用）确有这 4 个反面按钮、
+//            且**走同一套控制接口**（exec.vacuum），不另造接口。
+const execCard = read("src/components/ExecControlCard.vue");
+const pointView = read("src/components/PointExecView.vue");
+ok("E1. store 放行 8 个气路动作（含 …_back）",
+  /"suck_back", "release_back", "blow_back", "unblow_back"/.test(execStore));
+ok("E2. store 分面锁存阀状态（vacuumStateBack）",
+  /vacuumStateBack: "idle"/.test(execStore) && /vacuumStateBack/.test(execStore));
+ok("E3. 控制权限卡片有 4 个「反面」按钮（反面吸气/停止吸气/放气/停止放气）",
+  /exec\.vacuum\('suck_back'\)/.test(execCard)
+  && /exec\.vacuum\('release_back'\)/.test(execCard)
+  && /exec\.vacuum\('blow_back'\)/.test(execCard)
+  && /exec\.vacuum\('unblow_back'\)/.test(execCard)
+  && /反面吸气/.test(execCard) && /反面停止吸气/.test(execCard)
+  && /反面放气/.test(execCard) && /反面停止放气/.test(execCard));
+ok("E4. 4 个反面按钮走**统一控制接口**（exec.vacuum → /control/vacuum，store 内）",
+  /\/control\/vacuum/.test(execStore) && /vacuum\(action\)/.test(execStore)
+  && !/suck_back/.test(pointView));   // 页面不另造下发通道
+ok("E5. 点位执行页复用该控制权限卡片（同一份按钮实现）",
+  /ExecControlCard/.test(pointView));
+
 console.log(`\n== store 回归: ${pass} passed, ${fail} failed ==`);
 process.exit(fail ? 1 : 0);

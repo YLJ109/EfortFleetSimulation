@@ -105,7 +105,8 @@ def test_finish_is_first_statement_of_finally_in_every_executor():
     targets = [(A._run, "ai._run"),
                (S._run_sorting, "sorting._run_sorting"),
                (T._run, "tictactoe._run"),
-               (T._reset_run, "tictactoe._reset_run")]
+               (T._reset_run, "tictactoe._reset_run"),
+               (T._replay_run, "tictactoe._replay_run")]
     for fn, label in targets:
         src = inspect.getsource(fn)
         body = src[src.index("finally:"):]

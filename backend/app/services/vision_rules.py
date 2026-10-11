@@ -33,9 +33,13 @@ from app.services.kinematics import fk_matrix, ikine, rpy_to_matrix, tcp_of
 #   原实现的兜底限位是 ±360（其它三处都是 ±180），且 `_in_limits` 按 range(6)
 #   硬索引、不查长度也不查 NaN —— 自动执行这条路上的校验曾经是四份里最松的。
 from app.services.limits import in_limits, load_limits
-from app.services.motion import motion, real_write_enabled
+from app.services.motion import (motion, real_write_enabled,
+                                 servo_not_ready_reason)
 from app.services.runmode import runmode
 from app.services.safety_guard import check as guard_check
+# ★ J6 正/反面的"只用 J6"唯一判定口（`is_j6_face_point` / `compose_j6_only`）。
+#   视觉规则自动执行同样是"按点名下发"的一条链路 —— 必须与 /control/move、/sorting/goto 同口径。
+from app.services import sorting as S
 
 log = get_logger("vision_rules")
 
@@ -267,6 +271,22 @@ def execute_rule(rule: dict, *, color: str = "", seq: int = 0,
                     break
                 target = r["joints"]
 
+            # ★★ 2026-10-11 护栏：规则程序步骤里若点名 `J6正面`/`J6反面` → 同样"原地只改 J6"。
+            #   这两个点"只有 J6 不同"、且是**在起点录的**，整姿态下发会把录点当时的 J1~J5
+            #   一起带过去（= 跑回起点）；也与 /control/move 按 point_id、/sorting/goto 同口径。
+            #   基姿态取 `motion.last_target`（本模块本来就用它作 IK 基姿态）；拿不到 → 拒绝该步。
+            #   ★ 决策收敛到唯一入口 `S.resolve_target_joints`（与"残影预演"同源）。
+            #   ★★ 统一口径（2026-10-11 用户原话「我在正上位反面，去原料区是变成了正面」）：
+            #     规则步骤点名若为**原料位**（A1…A9/B1…B9）→ face 归一成 `keep`（保持当前面、绝不翻面）；
+            #     其余点位照旧（缺省正面 → 整姿态，零回归）。
+            target, _j6_only, _j6_reason = S.resolve_target_joints(
+                st.get("name"), target, lambda: list(motion.last_target or []),
+                face=S.face_for_target(st.get("name"), S.FACE_FRONT))
+            if _j6_reason:
+                run.append({"index": st["index"], "ok": False, "error": _j6_reason})
+                ok_all = False
+                break
+
             # ★ 全维度审查 B-05：补档位检查。原链路完全不查档位，
             #   T1/T2 下照样写寄存器（"写成功但不动"），运维难以察觉。
             if real_write_enabled():
@@ -278,6 +298,16 @@ def execute_rule(rule: dict, *, color: str = "", seq: int = 0,
                     res["note"] = "档位不允许下发：" + mwhy
                     ok_all = False
                     break
+            # ★ 统一"未就绪"闸门：这是**无人值守**的视觉规则自动执行，伺服未上电时
+            #   更不能下发（否则悄悄写寄存器、机器人不动）。与用户点击入口同一句文案。
+            _nready = servo_not_ready_reason()
+            if _nready:
+                run.append({"index": st["index"], "ok": False, "blocked": True,
+                            "reason": _nready})
+                res["outcome"] = "blocked"
+                res["note"] = _nready
+                ok_all = False
+                break
             # ★ 运行中关闭 auto_execute 开关也能立即停，不必等这一发走完
             rr = motion.command([float(x) for x in target], sp, dw,
                                 abort_check=lambda: not auto_execute_enabled())

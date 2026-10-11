@@ -55,6 +55,67 @@ def real_write_enabled() -> bool:
     )
 
 
+# ======================================================================
+# ★★ 2026-10-11 统一"未就绪"闸门（用户口径）：
+#   「如果没有上电，执行点到点、移到什么的，全部提醒机器人没有就绪，所有的。」
+#
+#   覆盖 = **所有会让机器人动的真实下发入口**（见各 api 的调用点）：
+#     /control/move · /control/run-file(非空跑) · /control/jog/step · /control/jog/start ·
+#     /control/vacuum · /sorting/start(非空跑) · /sorting/goto · /ai/exec(非空跑) ·
+#     /tictactoe/start(非空跑) · 以及后台视觉规则自动执行 vision_rules.execute_rule。
+#
+#   判据（唯一权威）= 控制器"伺服上电位" bits.servo —— 与 /api/rc-status 的
+#     snap.bits.servo、前端 stores/rcReady.js 的 servoOn 同源。读不到状态 → 按
+#     "未就绪"拒绝（fail-safe，宁可拒绝不蒙）。
+#
+#   ★ 为什么**不**把闸门直接塞进 motion.command()：
+#     1) 点动（jog._loop）每 ~100ms 调一次 command —— 在此逐拍 rc_snapshot（3 次 FC3）
+#        会把点动链路拖慢近一倍；本闸门放在**接口层**，每请求只查一次。
+#     2) motion.command() 是大量单测的"纯逻辑出口"（test_audit_p0 的假 modbus 没有
+#        rc_snapshot）—— 塞进去会整片打断，也违背"不改下发时序/互锁"的硬约束。
+#     3) 就绪流程**不走** motion.command（rc_ready 直接用 mb.rc_command），本就不存在
+#        "把自己拦死"的死锁；接口层收口更清晰、也便于逐条回归。
+#
+#   豁免（必须放行）：空跑 dry=True、模拟模式（双闸未开）、强制模拟链路；以及**就绪流程
+#     本身**（/ready、/ready/cancel、/control/clear-error）与急停/停止类接口（它们不调用本函数）。
+# ======================================================================
+SERVO_NOT_READY_MSG = "机器人没有就绪：伺服未上电，请先点「一键就绪」"
+
+
+def servo_not_ready_reason(dry: bool = False) -> Optional[str]:
+    """真实下发前的统一"未就绪"闸门：返回 None = 放行；否则返回统一的拒绝文案。
+
+    - dry=True（空跑/预演）→ 放行（不下发真实运动）。
+    - 双闸未开（模拟模式）→ 放行（由 motion.command 播放仿真，不写控制器）。
+    - 强制模拟链路（simulate=always / 采集器已降级）→ 放行（交给 motion.command 的
+      "模拟链路"分支给更准确的原因，本闸门不抢答）。
+    - 伺服未上电 / 读不到控制器状态 → 返回拒绝文案（fail-safe）。
+    """
+    if dry:
+        return None
+    if not real_write_enabled():
+        return None
+    # 强制模拟/离线链路：不做真实读（rc_snapshot 会开 TCP，失败会阻塞），
+    # 也不抢答 —— 那是 motion.command 的"模拟链路"分支职责。
+    try:
+        from app.services.collector import collector   # 延迟导入防环
+        if collector.simulated:
+            return None
+    except Exception:                                  # noqa: BLE001
+        pass
+    try:
+        snap, err = motion.modbus.rc_snapshot()
+    except Exception as e:                             # noqa: BLE001 —— 通讯异常按未就绪
+        return ("机器人没有就绪：读不到控制器伺服状态（%s），请先点「一键就绪」"
+                % str(e)[:120])
+    if snap is None:
+        return ("机器人没有就绪：读不到控制器伺服状态（%s），请先点「一键就绪」"
+                % (err or "无响应"))
+    if not bool((snap.get("bits") or {}).get("servo")):
+        return SERVO_NOT_READY_MSG
+    return None
+
+
 class MotionService:
     def __init__(self) -> None:
         # 真实下发开关: 环境变量 + 配置双重确认, 默认 False(安全模拟)

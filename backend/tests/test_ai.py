@@ -538,6 +538,77 @@ def test_run_quota_reports_shortfall_honestly():
     assert "for s in srcs:" in src
 
 
+# ================================================================================
+# ★★ 2026-10-11（方案 §C）「快速完成」→ 双面：回显如实标注 + 透传 dual_face
+#   全部离线/接口级（conftest 已关真实下发），不连真机、不真下发。
+# ================================================================================
+def test_echo_marks_normal_and_fast_sorting():
+    """★ 计划卡回显**如实标注** 本次=正常（一面）/ 快速（双面·一趟两件）。"""
+    e1 = AI._echo("sorting", {"action": "sorting", "op": "start"})
+    assert "本次 = 正常" in e1["detail"] and "一面" in e1["detail"]
+    e2 = AI._echo("sorting", {"action": "sorting", "op": "start", "dual_face": True})
+    assert "本次 = 快速" in e2["detail"] and "双面" in e2["detail"]
+    # 停止/暂停不受影响（仍逐字回显软停文案）
+    assert "停止" in AI._echo("sorting", {"action": "sorting", "op": "stop"})["detail"]
+
+
+def test_llm_sanitize_passes_dual_face_boolean_only():
+    """★★ 大模型给的 dual_face：**只认布尔 True**；缺失 / 字符串 / 非 start → 一律忽略（回落一面）。"""
+    p = llm.sanitize({"action": "sorting", "op": "start", "dual_face": True})["plan"]
+    assert p.get("dual_face") is True
+    assert "dual_face" not in llm.sanitize({"action": "sorting", "op": "start"})["plan"]
+    assert "dual_face" not in llm.sanitize(
+        {"action": "sorting", "op": "start", "dual_face": "true"})["plan"]
+    assert "dual_face" not in llm.sanitize(
+        {"action": "sorting", "op": "stop", "dual_face": True})["plan"]
+
+
+def _login(client):
+    r = client.post("/api/auth/login", json={"password": "test1234"})
+    assert r.status_code == 200, r.text
+    return {"X-Control-Token": r.json()["token"]}
+
+
+def _exec_sorting(client, headers, pid, plan):
+    import time as _t
+    AI._plans[pid] = {"plan": plan, "at": _t.time(), "raw": "分拣"}
+    try:
+        return client.post("/api/ai/exec",
+                           json={"plan_id": pid, "confirm": True, "dry_run": True},
+                           headers=headers)
+    finally:
+        AI._plans.pop(pid, None)
+
+
+def test_ai_exec_start_forwards_dual_face(client, monkeypatch):
+    """★★ `/ai/exec` 把 plan 里的 `dual_face` **真正传下去**（改前恒 False）。"""
+    from app.api import sorting as SORT
+    cap = {}
+    monkeypatch.setattr(SORT, "api_start",
+                        lambda body, tok=None: (cap.update(dual_face=body.dual_face)
+                                                or {"ok": True, "state": {}}))
+    h = _login(client)
+    r = _exec_sorting(client, h, "unit-dual-" + "a" * 8,
+                      {"action": "sorting", "op": "start", "dual_face": True})
+    assert r.status_code == 200, r.text
+    assert cap.get("dual_face") is True, "dual_face 没传下去"
+    assert r.json().get("dual_face") is True
+
+
+def test_ai_exec_start_defaults_one_face(client, monkeypatch):
+    """★ 没提双面 → `api_start` 收到 dual_face=False（默认一面，零回归）。"""
+    from app.api import sorting as SORT
+    cap = {}
+    monkeypatch.setattr(SORT, "api_start",
+                        lambda body, tok=None: (cap.update(dual_face=body.dual_face)
+                                                or {"ok": True, "state": {}}))
+    h = _login(client)
+    r = _exec_sorting(client, h, "unit-one-" + "b" * 8,
+                      {"action": "sorting", "op": "start"})
+    assert r.status_code == 200, r.text
+    assert cap.get("dual_face") is False
+
+
 # ---------------------------------------------------------------- 按颜色配额搬运
 def test_parse_quota_basic():
     """★ 用户口径（2026-10-09）："全部要学会解析" —— "3个红色，2个蓝色，1个绿色"。

@@ -16,7 +16,7 @@ import CameraPanel from "./CameraPanel.vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useRobotStore } from "../stores/robot.js";
 import { useSafetyStore } from "../stores/safety.js";
-import { useRcReadyStore } from "../stores/rcReady.js";
+import { useRcReadyStore, NOT_READY_HINT } from "../stores/rcReady.js";
 import { useExecStore } from "../stores/exec.js";
 import { apiUrl } from "../config.js";
 
@@ -31,7 +31,7 @@ const exec = useExecStore();
 const isReady = computed(() => robot.connected && rc.ready && auth.controlActive);
 const readyText = computed(() => {
   if (!robot.connected) return "机器人未连接，请先在底部「机器人链路」重连";
-  if (!rc.ready) return "控制器未就绪（伺服 / 档位 / 报警 / 急停待检查）";
+  if (!rc.ready) return NOT_READY_HINT + "（伺服 / 档位 / 报警 / 急停待检查）";
   return "未获得控制权限，无法下发";
 });
 

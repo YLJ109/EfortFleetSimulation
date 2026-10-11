@@ -26,6 +26,7 @@ from app.core.config import get_config, project_root
 from app.db.crud import get_point, list_points, list_programs
 from app.db.database import SessionLocal
 from app.services import jog_frames as jf
+from app.services import sorting as S
 from app.services.collector import collector
 from app.services.events import emit as emit_event
 from app.services.jog import jog
@@ -40,7 +41,9 @@ from app.services.limits import in_limits as _check_in_limits
 from app.services.limits import load_limits as _load_limits
 from app.services.limits import violations as _violations_of
 from app.core.safety_const import clamp_speed
-from app.services.motion import motion, real_write_enabled
+from app.services.motion import (
+    motion, real_write_enabled, servo_not_ready_reason, SERVO_NOT_READY_MSG,
+)
 from app.services.rc_ready import ReadinessService
 from app.services.runmode import MODES as RUN_MODES
 from app.services.runmode import runmode
@@ -73,6 +76,23 @@ def _actor(tok: str) -> str:
     return token_role(tok) or "unknown"
 
 
+def reject_if_not_ready(dry: bool = False) -> None:
+    """统一"未就绪"闸门（真实下发前置校验，单一实现）。
+
+    ★ 用户口径（2026-10-11）：伺服未上电时，**所有会让机器人动的真实下发**都必须
+      拒绝并明确提示"机器人没有就绪"。
+    判定/文案的唯一来源是 `motion.servo_not_ready_reason()`（同一个函数被所有入口
+    共用，避免各写一遍导致口径分叉）。dry=True（空跑）与模拟模式在这里直接放行，
+    就绪流程不调用本函数 → 不会被自己拦死（无死锁）。
+
+    拒绝用 HTTP 409：全局异常处理器把它转成 {code:"HTTP_ERROR", message:<原因>}，
+    前端各入口读 `message` 显示（绝不出现 undefined）；409 也不触发"需要登录"分支。
+    """
+    reason = servo_not_ready_reason(dry=dry)
+    if reason:
+        raise HTTPException(409, detail=reason)
+
+
 # ---------- 工具 ----------
 def _limits() -> List[dict]:
     # ★ 审计修复 P1-E1：统一由 limits.load_limits() 给出 —— 长度恒为 6、缺项补默认、
@@ -93,6 +113,30 @@ def _start_joints(current: Optional[List[float]]) -> List[float]:
     if p:
         return [float(p[f"j{i}"]) for i in range(1, 7)]
     return [0.0] * 6
+
+
+def _live_joints_or_none() -> Optional[List[float]]:
+    """取**当前实时关节角**（= "切面"的基姿态）；采集不可用时回退执行引擎最近目标；都没有 → None。
+
+    ★ 为什么单独一个函数：`J6正面`/`J6反面` 的"原地切面"必须用**当前实时姿态**作基，
+      只覆盖第 6 轴。取不到基姿态时**宁可拒绝**下发，也绝不退回点位自带的 5 轴整姿态下发
+      （那正是用户报的"只翻 J6 却跑回起点"）。
+    ★ 与 `api/sorting.py::_live_joints` 同源（collector.get_latest → motion.state().last_target）；
+      这里不抛异常、返回 None，由调用方决定给什么明确原因。
+    """
+    snap = collector.get_latest()
+    if snap:
+        try:
+            return [round(float(snap["j%d" % i]), 3) for i in range(1, 7)]
+        except Exception:  # noqa: BLE001 —— 采集快照缺字段时退回 last_target
+            pass
+    st = motion.state()
+    if st.get("last_target"):
+        try:
+            return [round(float(v), 3) for v in st["last_target"]]
+        except Exception:  # noqa: BLE001
+            pass
+    return None
 
 
 def _ik_best(target, q0: List[float], limits: List[dict], rot_weight: float) -> dict:
@@ -313,6 +357,79 @@ def api_ik(body: IkIn):
     }
 
 
+class PointTargetIn(BaseModel):
+    """只读：给定点位 id / 名字，求"该点位**将要下发的目标关节角**"。"""
+    point_id: Optional[int] = None
+    name: Optional[str] = None
+    # 基姿态（缺省 = 当前实时姿态）；**只有 J6 正/反面用得上**，普通点位忽略它。
+    base: Optional[List[float]] = None
+    # ★★ 2026-10-11「面」语义：可指定用该点自身的**正面/反面**（只动 J6）。
+    #   缺省 "front" → 与旧行为逐字一致（零回归）。残影与实发同源（都走 resolve_target_joints）。
+    face: Optional[str] = "front"
+
+
+@router_ro.post("/point-target")
+def api_point_target(body: PointTargetIn):
+    """**只读**：返回该点位**将要下发的目标关节角**（与实际下发同源；只算不发）。
+
+    ★★ 2026-10-11 用户反馈（原话）「现在残影对不上」——本接口就是那条根因的根治：
+      · 残影预演（ghost）过去用**点位自带的 6 轴**摆残影，而实际下发对 `J6正面`/`J6反面`
+        用的是**"原地切面"**（当前实时基姿态只覆盖第 6 轴）→ 两者**不同源** → 对不上。
+      · 现在残影**只画本接口返回的目标**，前端不再自己拼姿态；本接口与实际下发
+        （`/move`、`/sorting/goto`、run-file 步骤、视觉规则）**共用同一个**
+        `S.resolve_target_joints` → 结构上不可能再分叉。
+    ★ 普通点位：原样返回点位自带 6 值（与现状逐字一致）。
+    ★ 不挂 require_control：与 /preview、/ik 同类 —— 纯解算、零风险、**不向机器人写任何数据**
+      （响应带 readonly=True）。拿不到基姿态时 `ok=False` 并给明确原因（调用方据此收起残影）。
+    """
+    name = (body.name or "").strip() or None
+    joints = None
+    if body.point_id is not None:
+        s = SessionLocal()
+        try:
+            p = get_point(s, body.point_id)
+            if p is not None:
+                name = p.name
+                try:
+                    joints = parse_joints(p.joints, where=f"点位「{p.name}」")
+                except ValueError as e:
+                    return {"ok": False, "readonly": True, "error": str(e)}
+        finally:
+            s.close()
+        if name is None:
+            return {"ok": False, "readonly": True, "error": "点位不存在"}
+    elif name is not None:
+        s = SessionLocal()
+        try:
+            row = next((p for p in list_points(s) if p.name == name), None)
+        finally:
+            s.close()
+        if row is None:
+            return {"ok": False, "readonly": True, "error": "点位「%s」尚未示教" % name}
+        try:
+            joints = parse_joints(row.joints, where=f"点位「{name}」")
+        except ValueError as e:
+            return {"ok": False, "readonly": True, "error": str(e)}
+    else:
+        return {"ok": False, "readonly": True, "error": "必须提供 point_id 或 name"}
+
+    def _base():
+        if body.base and len(body.base) == 6:
+            return [float(v) for v in body.base]
+        return _live_joints_or_none()
+
+    # ★★ 统一口径（2026-10-11 用户原话「我在正上位反面，去原料区是变成了正面」）：
+    #   **目标点是原料位（A1…A9/B1…B9）→ 一律 `keep`（保持当前面、绝不翻面）**。
+    #   残影预读必须与实发**同源**（实发见 api/goto、api/move、run-file 步骤）——
+    #   否则残影会停在该点默认正面、而实发保持当前面 → 又对不上（见 services/sorting.py::face_for_target）。
+    target, j6_only, reason = S.resolve_target_joints(name, joints, _base,
+                                                      face=S.face_for_target(name, body.face))
+    if reason:
+        return {"ok": False, "j6_only": j6_only, "readonly": True, "error": reason}
+    return {"ok": True, "j6_only": j6_only, "readonly": True,
+            "target": [round(float(v), 3) for v in target]}
+
+
 @router_ro.get("/programs")
 def api_programs_ro():
     """只读：programs 目录下的可执行程序文件名（模拟仿真页用来选 XPL）。
@@ -361,6 +478,9 @@ class MoveIn(BaseModel):
     #   杜绝"很快"的误发。默认也取 5，没传 speed 时就按最慢执行。
     speed_pct: int = Field(default=SPEED_MIN, ge=SPEED_MIN, le=SPEED_MAX)
     dwell_ms: int = Field(default=0, ge=0, le=60000)
+    # ★★ 2026-10-11「面」语义：按 point_id 到点时可用该点自身的**正面/反面**（只动 J6）；
+    #   缺省 "front" → 与旧行为逐字一致（零回归）。见 S.resolve_target_joints。
+    face: Optional[str] = "front"
 
     @model_validator(mode="after")
     def _must_have_target(self):
@@ -377,6 +497,7 @@ class MoveIn(BaseModel):
 @router.post("/move")
 def api_move(body: MoveIn, tok: str = Depends(require_control)):
     target = body.joints
+    point_name: Optional[str] = None
     if target is None and body.point_id is not None:
         s = SessionLocal()
         try:
@@ -391,6 +512,20 @@ def api_move(body: MoveIn, tok: str = Depends(require_control)):
             target = parse_joints(p.joints, where=f"点位「{p.name}」")
         except ValueError as e:
             raise HTTPException(400, str(e) + "，已拒绝下发")
+        point_name = p.name
+    # ★★ 2026-10-11 护栏（用户反馈「正反面没有在原地、每次回去起点」）：
+    #   `J6正面`/`J6反面` **禁止整姿态下发** —— 它们是"同一姿态、只有 J6 不同"，
+    #   且是**在起点录的**，整姿态会把录点当时的 J1~J5 一起带过去（= 跑回起点）。
+    #   这里（点位执行页的"执行"、序列程序步骤等所有按 point_id 的入口）统一转成
+    #   **原地切面**：基姿态 = **当前实时关节**，只覆盖第 6 轴；拿不到基姿态 → **拒绝**。
+    #   ★ 决策收敛到唯一入口 `S.resolve_target_joints`（与"残影预演"同源，见 /point-target）。
+    #   ★★ 统一口径（2026-10-11 用户原话「我在正上位反面，去原料区是变成了正面」）：
+    #     `point_name` 若为**原料位**（A1…A9/B1…B9）→ face 归一成 `keep`（保持当前面、绝不翻面）。
+    target, _j6_only, _j6_reason = S.resolve_target_joints(
+        point_name, target, _live_joints_or_none,
+        face=S.face_for_target(point_name, body.face))
+    if _j6_reason:
+        raise HTTPException(409, detail=_j6_reason)
     # ---------- 围栏互锁（阶段 4）----------
     # 前端会在 SafetyPanel 里实时算余量并上报；这里做"服务端兜底"，
     # 就算有人绕过界面直接调 API，危险状态下也发不下去。
@@ -417,6 +552,9 @@ def api_move(body: MoveIn, tok: str = Depends(require_control)):
                        f"档位不允许下发：{mwhy}",
                        {"target": target}, actor=_actor(tok))
             raise HTTPException(409, detail=f"档位不允许下发：{mwhy}")
+
+    # ★ 统一"未就绪"闸门：伺服未上电 → 拒绝并明确提示（详见 reject_if_not_ready）。
+    reject_if_not_ready()
 
     res = motion.command([float(x) for x in target], clamp_speed(body.speed_pct),
                          body.dwell_ms)
@@ -1490,6 +1628,10 @@ def api_run_file(body: RunFileIn, tok: str = Depends(require_control)):
     finally:
         db0.close()
 
+    # ★ 统一"未就绪"闸门：真实执行（非空跑）前先校验伺服是否上电 —— 未就绪直接拒绝
+    #   （空跑 dry_run=true 放行：它只做预演，不下发真实运动）。
+    reject_if_not_ready(dry=bool(body.dry_run))
+
     # ② 后台线程执行（登记/注销由 RunContext 负责；进度与结果写进 _RUN_PROGRESS）
     ctx = RunContext(run_id, disp_name, kind="file")
     th = threading.Thread(target=_run_file_job, args=(ctx, body, tok, run_id, disp_name),
@@ -1696,6 +1838,22 @@ def _run_file_job(ctx, body: RunFileIn, tok: str, run_id: str, disp_name: str) -
                     ok_all = False
                     break
                 target = [float(v) for v in q]
+
+            # ★★ 2026-10-11 护栏：程序步骤里若点名 `J6正面`/`J6反面` → 同样"原地只改 J6"。
+            #   （序列编辑器的"标记点"可以是任意点位名 —— 与 `/control/move` 按 point_id
+            #    是同一类旁路，必须一并堵死，否则程序里带上这两个点会整姿态跑回起点。）
+            #   ★ 决策收敛到唯一入口 `S.resolve_target_joints`（与"残影预演"同源）。
+            #   ★★ 统一口径（2026-10-11 用户原话「我在正上位反面，去原料区是变成了正面」）：
+            #     步骤点名若为**原料位**（A1…A9/B1…B9）→ face 归一成 `keep`（保持当前面、绝不翻面）；
+            #     其余点位照旧（缺省正面 → 整姿态，零回归）。
+            target, _j6_only, _j6_reason = S.resolve_target_joints(
+                st.get("name"), target, _live_joints_or_none,
+                face=S.face_for_target(st.get("name"), S.FACE_FRONT))
+            if _j6_reason:
+                results.append({"index": st["index"], "name": st.get("name"),
+                                "ok": False, "readonly": False, "error": _j6_reason})
+                ok_all = False
+                break
 
             # ★ P0-7：真实下发前再查一次（guard_check 本身可能耗时）
             if _is_cancelled(run_id):
@@ -2190,26 +2348,33 @@ def api_jog_state():
 
 
 class VacuumIn(BaseModel):
-    # ★ 2026-09-29：新增 blow（放气/吹气破真空）。三种动作对应常驻程序 210 的
-    #   Bit1（吸气保持）/ Bit2（只关真空阀）/ Bit3（关真空 + 吹气脉冲）。
-    action: str = Field(..., pattern="^(suck|release|blow|unblow)$")
+    # ★★ 2026-10-11：动作集扩到 **8 个**（严格按用户 210 位表，见 modbus.VAC_ACTIONS）：
+    #   suck/release/blow/unblow         = 下板/正面（40135.Bit1~4）
+    #   suck_back/release_back/blow_back/unblow_back = 反面/上板（40135.Bit5~8）
+    #   ★ 两面板**各自独立气路**（此前"两面共用一路真空"的前提已被现场纠正）。
+    #   ★ 正则必须同步放行这 4 个新动作，否则前端按钮点了就 422（历史坑，见 test_seq_editor）。
+    action: str = Field(
+        ...,
+        pattern="^(suck|release|blow|unblow|suck_back|release_back|blow_back|unblow_back)$")
     timeout: float = Field(default=6.0, gt=0.0, le=30.0)
 
 
 @router.post("/vacuum")
 def api_vacuum(body: VacuumIn, tok: str = Depends(require_control)):
-    """吸气 / 停止吸气 / 放气（不移动机器人关节）：写 40135.Bit1/Bit2/Bit3 触发位 → 常驻服务程序执行。
+    """吸气 / 停止吸气 / 放气 / 停止放气（8 个动作，含反面）：写 40135 对应触发位 → 常驻服务程序 210 执行。
 
     ★ 走与 jog 相同的真实下发双闸（real_write_enabled：EFORT_REAL_MOTION=1 + motion.real_write=true）。
       控制器须在 AUTO/远程模式且常驻服务程序在运行，否则触发位无人响应 → 502。
       此接口只驱动电磁阀输出（真空阀 / 吹气阀），不写任何运动指令 → 不会移动机器人。
-      ★ 放气（blow）= 关真空 + 吹气脉冲 = **破真空脱件**：只关阀时工件会被残余负压吸住不掉。
-    ★ 2026-09-29：吸放与点动**共用同一个常驻程序 200**（见 config motion.jog/vacuum.service_program）。
+      ★ 放气（blow）= 关真空 + 吹气 = **破真空脱件**：只关阀时工件会被残余负压吸住不掉。
+    ★ 动作→位号见 `modbus.VAC_ACTIONS`（唯一映射口）；`xxx_back` = 反面/上板那一路（Bit5~8）。
       吸气=电平保持（不自动停），停止吸气需显式按「停止吸气」。
     """
     if not real_write_enabled():
         raise HTTPException(
             403, detail="真实下发未开启（需 EFORT_REAL_MOTION=1 且 motion.real_write=true）")
+    # ★ 统一"未就绪"闸门：伺服未上电时吸放同样拒绝（用户口径：全部提醒"机器人没有就绪"）。
+    reject_if_not_ready()
     # ★ 2026-09-29：序列/文件执行期间拒绝手动吸放 —— 两者共用 40135.Bit1/Bit2，
     #   交错下发会互相清触发位（界面显示"吸气完成"而实际被序列的停止吸气关掉）。
     _reject_if_run_active("吸放")
@@ -2234,8 +2399,11 @@ def api_vacuum(body: VacuumIn, tok: str = Depends(require_control)):
         motion._exec_lock.release()
     if not ok:
         raise HTTPException(502, detail=err or "吸放触发失败")
+    # 事件文案用动作表里的中文标签（8 个动作都自证，别再只分"吸气/放气"两类）
+    from app.services.modbus import VAC_ACTIONS as _VAC_ACTIONS
+    _label = (_VAC_ACTIONS.get(body.action) or (0, body.action))[1]
     emit_event("control", "info", "control.vacuum",
-               "%s完成" % ("吸气" if body.action == "suck" else "放气"),
+               "%s完成" % _label,
                {"action": body.action, **(detail or {})}, actor=_actor(tok))
     return {"ok": True, "action": body.action, "detail": detail}
 
@@ -2251,6 +2419,8 @@ def api_jog_step(body: JogStepIn, tok: str = Depends(require_control)):
     # ★ 2026-09-29：序列/文件执行期间拒绝手动点动（共用 40135.Bit0 触发位）。
     #   注意只拦"下发"，不拦 /jog/stop —— 停永远要能停。
     _reject_if_run_active("点动")
+    # ★ 统一"未就绪"闸门：伺服未上电 → 拒绝增量点动（明确提示"机器人没有就绪"）。
+    reject_if_not_ready()
     frame, ferr = jf.norm_frame(body.frame)
     if ferr:
         raise HTTPException(400, detail=ferr)
@@ -2283,6 +2453,8 @@ def api_jog_start(body: JogStartIn, tok: str = Depends(require_control)):
     if ferr:
         raise HTTPException(400, detail=ferr)
     _reject_if_run_active("连续点动")
+    # ★ 统一"未就绪"闸门：伺服未上电 → 拒绝连续点动（明确提示"机器人没有就绪"）。
+    reject_if_not_ready()
     res = jog.start(body.joint, body.dir, _jog_speed_pct(body),
                     frame=frame, user_frame=body.user_frame, slow=body.slow)
     unit = jf.unit_of(frame, body.joint)

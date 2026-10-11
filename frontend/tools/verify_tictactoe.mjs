@@ -239,8 +239,8 @@ console.log("== H. 前端输入路径（键盘 ↑↓←→ + Enter / 鼠标点�
     /恭喜你赢了/.test(store) && /speak\(/.test(store));
   ok("落子/停止/复位/暂停后立刻刷新一次 state（await this.poll(false)）",
     (store.match(/await this\.poll\(false\)/g) || []).length >= 4);
-  ok("复盘只放 2D：replay 来自 GET /tictactoe/replay",
-    /\/tictactoe\/replay/.test(store));
+  ok("回放（只查看）：棋谱来自 GET /tictactoe/replay",
+    /apiControl\("\/tictactoe\/replay"\)/.test(store));
   // ★★ 防回归钉（2026-10-10 现场事故）：apiUrl() 会自己拼 `/api`，
   //   若调用方再写 `apiControl("/api/...")`，真实请求会变成 `/api/api/...` → 全部 404。
   //   这条断言把"路径不带 /api 前缀"钉死。
@@ -518,6 +518,72 @@ console.log("== M. 后端来源（Windows XInput 直读兜底） ==");
   ok("自证约定用户可改（圆/叉各一个颜色下拉 + store 透传 colors）",
     /selfColor/.test(tttStore) && /colors: \{ O: this\.selfColor\.O/.test(tttStore)
     && /v-model="ttt\.selfColor\.O"/.test(tttCard));
+
+  // ★★ 2026-10-11（方案 §D）「正常 / 快速」两模式 + 「只剩一个空位免等待」
+  ok("卡片有「节奏」正常/快速开关（默认正常）",
+    /ttt\.fast/.test(tttCard) && /正常/.test(tttCard) && /快速/.test(tttCard));
+  ok("快速模式有如实提示（需 J6正面/J6反面、不与自证合并、免等待）",
+    /J6正面/.test(tttCard) && /J6反面/.test(tttCard)
+    && /免等待/.test(tttCard) && /不与「拍照自证」合并/.test(tttCard));
+  ok("store 开局透传 fast",
+    /fast: this\.fast/.test(tttStore));
+  ok("后端 StartIn.fast 默认 false（正常=零回归）",
+    /fast: bool = Field\(default=False/.test(gpApiTtt));
+  ok("后端快速模式需要 J6正面/J6反面（_needed_points 带 fast）",
+    /def _needed_points\(verify: bool = False, fast: bool = False\)/.test(gpApiTtt)
+    && /OPTIONAL_EXTRA_POINTS/.test(gpApiTtt));
+  ok("后端快速模式 = 一趟取两子（_play_two 复用翻转 + 双面放件）",
+    /def _play_two\(/.test(gpApiTtt) && /_move_flip_j6\(/.test(gpApiTtt)
+    && /_dual_drop\(/.test(gpApiTtt));
+  ok("后端「只剩一个空位」免等待（谁轮到都直接完成）",
+    /只剩一个空位，直接完成（免等待）/.test(gpApiTtt));
+  // ★★ 2026-10-11（本轮）：快速模式**不再强制用户先行**；机器人先手时**提前显示**其落子。
+  ok("★ 后端快速模式不再强制用户先行（先手按原有逻辑随机）",
+    !/"user" if fast/.test(gpApiTtt) && /random\.choice\(\["user", "robot"\]\)/.test(gpApiTtt));
+  ok("★ 后端机器人先手：提前把落子写进棋盘（与 2D/3D 同源）并如实标注「待搬子」",
+    /board\[cell_r\] = robot_sym/.test(gpApiTtt)
+    && /机器人已下棋完成/.test(gpApiTtt) && /待搬子/.test(gpApiTtt));
+  ok("★ 卡片如实说明：先手随机 + 机器人先手先显示其落子",
+    /先手随机/.test(tttCard) && /先把它的落子显示在 2D\/3D/.test(tttCard));
+}
+
+console.log("");
+console.log("== N. 真实复盘（机器人真的动 · 逐子搬回原位） ==");
+{
+  const store = read("src/stores/tictactoe.js");
+  const cardVue = read("src/components/TicTacToeCard.vue");
+  const boardVue = read("src/components/TicTacToeBoard.vue");
+  const pyApi = read("../backend/app/api/tictactoe.py");
+
+  // ---- 后端：终点/顺序/闸门/终态 ----
+  ok("★ 后端：真实复盘端点 POST /tictactoe/replay（复用 _carry，不新造下发通道）",
+    /@router\.post\("\/replay"\)/.test(pyApi)
+    && /def _replay_run\(/.test(pyApi)
+    && /_carry\(ctx, pmap, st, dry, TT\.cell_to_slot\(cell\), src, "复盘"\)/.test(pyApi));
+  ok("★ 后端：复盘按落子**逆序**（LIFO）搬回 + 逐子回执（第几个子 / 去向）",
+    /reversed\(moves\)/.test(pyApi) && /复盘：搬回第/.test(pyApi));
+  ok("★ 后端：复盘接统一未就绪闸门（dry 继承本局口径）",
+    /reject_if_not_ready\(dry=dry\)/.test(pyApi));
+  ok("★ 后端：复盘终态清空棋盘（子回原位 → 复位到初始）",
+    /st\.update\(\{"board": TT\.new_board\(\), "moves": \[\], "used": \[\]/.test(pyApi));
+
+  // ---- 前端 store ----
+  ok("★ 前端 store：startReplay 发 POST /tictactoe/replay",
+    /async startReplay\(/.test(store)
+    && /apiControl\("\/tictactoe\/replay",\s*\{\s*method:\s*"POST"/.test(store));
+  ok("前端 store：回放（只查看）仍走 GET /tictactoe/replay",
+    /apiControl\("\/tictactoe\/replay"\)/.test(store) && /async loadReplay\(/.test(store));
+
+  // ---- 前端卡片 ----
+  ok("★ 卡片：「复盘」按钮 → 真实复盘（真实局二次确认）",
+    /复盘/.test(cardVue) && /doReplay/.test(cardVue) && /ttt\.startReplay\(\)/.test(cardVue)
+    && /window\.confirm/.test(cardVue) && /真实复盘/.test(cardVue));
+  ok("★ 卡片：「回放」按钮 → 只读回放（不动机器人）",
+    /回放/.test(cardVue) && /doViewReplay/.test(cardVue) && /ttt\.loadReplay\(\)/.test(cardVue));
+  ok("★ 卡片：手柄复盘也二次确认（真实局，无弹窗可用）",
+    /padReplayArm/.test(cardVue) && /请再按一次 Y/.test(cardVue));
+  ok("★ 棋盘标签如实：回放=只查看（不再把复盘说成\"不动机器人\"）",
+    /回放（棋谱记录 · 只查看不动机器人）/.test(boardVue));
 }
 
 console.log("");

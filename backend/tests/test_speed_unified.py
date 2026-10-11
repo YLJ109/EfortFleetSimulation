@@ -139,3 +139,35 @@ def test_steps_from_ignores_item_speed():
             "步骤速度必须留空（None）→ 由请求级 speed_pct 决定：%s" % st)
     # 反向钉子：真带了 item 速度也照样被忽略（这正是"不再覆盖"的判据）
     assert C._steps_from([{"joints": [0] * 6, "speed_pct": 99}], None)[0]["speed_pct"] is None
+
+
+# ---------------------------------------------------------------- 4. 到点（测试点）读滑块
+def test_sorting_goto_uses_slider_speed_pct(client):
+    """★★ 2026-10-11 用户口径：「测试点时不要限速，所有的速度必须右上角的滑轮同步」。
+
+    `/sorting/goto`（到点/复核 = 测试点位）必须采用**请求体 speed_pct（= 右上角滑块）**；
+    原实现无条件取 config 的 `control.default_speed_pct`（默认 5%）→ 每次到点都被限到 5%。
+    只保留寄存器合法范围夹取（[5,100]），不再"额外压低"。
+    """
+    h = _h(client)
+    # 先示教一个合法点位（A1 在 38 点位白名单内）
+    r = client.post("/api/sorting/teach", json={"name": "A1", "joints": HOME}, headers=h)
+    assert r.status_code == 200, r.text
+    # 带滑块速度到点 → 必须原样采用
+    r = client.post("/api/sorting/goto", json={"name": "A1", "speed_pct": 42}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["speed_pct"] == 42, "到点速度必须跟随滑块，不得回落到 config 的 5%%：%s" % r.text
+    # 越界只被夹到寄存器合法范围（40103 物理范围），不是"额外限速"
+    r = client.post("/api/sorting/goto", json={"name": "A1", "speed_pct": 999}, headers=h)
+    assert r.status_code == 200 and r.json()["speed_pct"] == 100, r.text
+    r = client.post("/api/sorting/goto", json={"name": "A1", "speed_pct": 1}, headers=h)
+    assert r.status_code == 200 and r.json()["speed_pct"] == 5, r.text
+
+
+def test_sorting_goto_model_accepts_speed_pct():
+    """`NameIn` 必须带 `speed_pct` 字段（否则 Pydantic 会静默丢弃滑块的到点速度）。"""
+    from app.api import sorting as API
+
+    m = API.NameIn(name="A1", speed_pct=37)
+    assert m.speed_pct == 37
+    assert API.NameIn(name="A1").speed_pct is None      # 未带 → None（走兼容回落）

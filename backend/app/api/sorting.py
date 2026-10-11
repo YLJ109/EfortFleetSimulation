@@ -29,9 +29,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_control
-from app.api.control import new_run, register_scene_source, request_cancel
+from app.api.control import (new_run, register_scene_source, request_cancel,
+                            reject_if_not_ready)
 from app.core.config import get_config
 from app.core.logger import get_logger
+# ★ 2026-10-11：到点（测试点位）速度改用统一夹取（与右上角滑块同一口径）。
+from app.core.safety_const import clamp_speed
 from app.db.crud import (create_point, delete_point, list_points,
                         update_point)
 from app.db.database import SessionLocal
@@ -41,6 +44,9 @@ from app.services.events import emit as emit_event
 from app.services.collector import collector
 from app.services.kinematics import forward_kinematics as FK
 from app.services.motion import motion, real_write_enabled
+# ★★ 2026-10-11：气路动作 → 40135 位号的**唯一映射口**（用户 210 位表，见 modbus 顶部注释）。
+#   本文件不写死位号；`_air` 只把 (动作, 面) 解析成 `VAC_ACTIONS` 的键名再交给 rc_vacuum。
+from app.services.modbus import VAC_ACTIONS
 from app.services.safety_guard import check as guard_check
 from app.utils.joints import parse_joints
 
@@ -279,6 +285,9 @@ def api_start(body: StartIn, tok: str = Depends(require_control)):
             raise HTTPException(409, detail="已有分拣在进行，请先「停止」")
         if not body.dry_run and not real_write_enabled():
             raise HTTPException(403, detail="真实下发未开启（EFORT_REAL_MOTION=1 且 motion.real_write=true）")
+        # ★ 统一"未就绪"闸门：真实分拣（非空跑）前先校验伺服是否上电。
+        #   空跑 dry_run=true 放行（不下发真实运动）。
+        reject_if_not_ready(dry=bool(body.dry_run))
 
     # ★★ 2026-10-10：与**井字棋对局**互斥 —— 两者共用 40135 触发位，
     #   对局进行中开分拣会交错下发（机器人走一半、完成位对不上）。
@@ -363,30 +372,114 @@ def _joints_of(pmap: Dict[str, object], name: str) -> List[float]:
         raise _Stop(str(e))
 
 
-def _move(ctx, pmap, name, speed, dry, stage, st=None) -> None:
-    """走一个示教点位（写目标 + 触发位 → 常驻 210 执行 MJOINT）。"""
+def _live_joints_or_none() -> Optional[List[float]]:
+    """安全地取**当前实时关节**（6 值）；拿不到 → None（**不抛**）。
+
+    ★ 与 `_live_joints()`（示教用，拿不到就 503）刻意区分：这里只是"选面时参考当前 J6"
+      的可选输入，**读不到就走确定性规则、不影响下发**（见 `S.resolve_target_joints`）。
+    """
+    snap = collector.get_latest()
+    if snap:
+        try:
+            return [float(snap["j%d" % i]) for i in range(1, 7)]
+        except Exception:  # noqa: BLE001 —— 快照字段异常 → 当作拿不到
+            pass
+    try:
+        st = motion.state()
+        if st.get("last_target"):
+            return [float(v) for v in st["last_target"]]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _move(ctx, pmap, name, speed, dry, stage, st=None, face=S.FACE_FRONT) -> None:
+    """走一个示教点位（写目标 + 触发位 → 常驻 210 执行 MJOINT）。
+
+    ★★ 2026-10-11 **face-aware（本轮修根因）**：不再无条件把该点自带的 6 轴整姿态下发 ——
+      改由**唯一解算入口** `S.resolve_target_joints(name, joints, base, face)` 决定目标：
+        · `face="front"`（默认）→ **与旧行为逐字一致**（普通点位原样 6 值；J6 正/反面原地切面）；
+        · `face="back"`        → **普通点位**用**该点自身 J1~J5** + **该点自身 J6 ∓180 归一**。
+      ⇒ 这样"点到点移动"就不会再把 J6 拉回该点默认正面、把上一段的翻转顶掉
+        （用户报的"从反面切回正面"就是这条根因）。
+    ★ `J6正面`/`J6反面` 若"拿不到实时基姿态"→ 解算返回拒绝原因，这里**回退为该点自带整姿态**
+      （与 `_move_flip_j6` 的既有回退语义一致；普通点位不会命中这条）。
+    ★★ 2026-10-11 `face="keep"`（用户口径「如果正面保持正面，如果反面保持反面，
+      如果都不是调整接近哪个点就那个」）：去**原料位**时**保持当前面、不旋转** ——
+      J6 沿用当前面（正面=该点自身 J6 / 反面=该点自身 J6∓180 / 判不出→取更近的一面）。
+      `state.face` 如实记录**实际保持的面**（`S.resolve_face`），绝不把 keep 谎报成正面。
+    """
     if ctx.wait_pause():
         raise _Stop("已被停止", stage)
     j = _joints_of(pmap, name)
+    target, _j6_only, reason = S.resolve_target_joints(name, j, _live_joints_or_none,
+                                                       face=face)
+    if reason:
+        # 仅 J6 正/反面在"拿不到实时基姿态"时会走到这里 → 回退为该点自带 6 轴整姿态
+        # （调用方 `_move_flip_j6` 已用 warning 如实标注；普通点位 face 解算不会带原因）。
+        target = j
+    # ★ 如实记录"本次实际生效的面"：keep 时按当前实时 J6 判出实际保持的是正面还是反面
+    #   （`S.resolve_face` 只在 keep 时才需要当前姿态；front/back 与旧行为逐字一致、不多读）。
+    _cur = _live_joints_or_none() if S.is_keep_face(face) else None
+    face_rec = S.resolve_face(face, j[5], (_cur[5] if _cur else None))
     if dry:
-        _set(st, stage=stage, last_point=name)
+        _set(st, stage=stage, last_point=name, face=face_rec)
         return
     ok, reason, _snap = guard_check()
     if not ok:
         raise _Stop("安全围栏互锁：%s" % reason, stage)
-    r = motion.command([float(v) for v in j], int(speed), 0,
+    r = motion.command([float(v) for v in target], int(speed), 0,
                        abort_check=lambda: ctx.cancelled())
-    _set(st, stage=stage, last_point=name)
+    _set(st, stage=stage, last_point=name, face=face_rec)
     if not r.get("ok"):
         raise _Stop("运动到「%s」失败：%s" % (name, r.get("error")), stage)
 
 
-def _air(ctx, action: str, dry: bool, stage: str, st=None) -> None:
-    """吸/停止吸/放/停止放（40135.Bit1~Bit4 → 常驻 210 执行）。
+# ★★ 2026-10-11：动作 × 面 → 210 触发位动作名（**唯一映射口**）。
+#   用户权威位表：下板 = 1~4 位（suck/release/blow/unblow）；
+#                 反面/上板 = 5~8 位（suck_back/release_back/blow_back/unblow_back）。
+#   位号本身**只在** `modbus.VAC_ACTIONS` 里维护一处；这里只做"面 → 动作名"的解析。
+#   ★ 两面是**独立气路**（此前"两面共用一路真空、放一件会连累另一件"的前提已被现场纠正）。
+_AIR_FACE_ACTION = {
+    (S.FACE_FRONT, "suck"): "suck",
+    (S.FACE_FRONT, "release"): "release",
+    (S.FACE_FRONT, "blow"): "blow",
+    (S.FACE_FRONT, "unblow"): "unblow",
+    (S.FACE_BACK, "suck"): "suck_back",
+    (S.FACE_BACK, "release"): "release_back",
+    (S.FACE_BACK, "blow"): "blow_back",
+    (S.FACE_BACK, "unblow"): "unblow_back",
+}
 
+
+def _air_action(action: str, face: str = S.FACE_FRONT) -> str:
+    """(动作, 面) → `VAC_ACTIONS` 键名。
+
+    · 以 `_back` 结尾（已是"反面"完整动作名）→ 原样返回；
+    · 否则按 `face` 选面：front → 下板那路（suck/release/blow/unblow）；
+      back → 反面那路（suck_back/…）；
+    · 未知动作原样透传（交由 rc_vacuum 报"action 必须是…"）。
+    """
+    a = str(action or "").strip().lower()
+    if a.endswith("_back"):          # 已是"反面"完整动作名 → 原样返回（不再二次加后缀）
+        return a
+    return _AIR_FACE_ACTION.get((S.norm_face(face), a), a)
+
+
+def _air(ctx, action: str, dry: bool, stage: str, st=None,
+         face: str = S.FACE_FRONT) -> None:
+    """吸/停止吸/放/停止放（40135.Bit1~Bit8 → 常驻 210 执行）—— **face-aware**。
+
+    ★★ 2026-10-11（用户口径 · 权威位表）：气路动作集扩到 **8 个**（索引严格按用户表）：
+        suck=1 / release=2 / blow=3 / unblow=4（**下板/正面**）；
+        suck_back=5 / release_back=6 / blow_back=7 / unblow_back=8（**反面/上板**）。
+      `face="front"|"back"` 决定走哪一路；位号见 `modbus.VAC_ACTIONS`（单一映射口）。
+      **移动位仍是 0**（走点动通道），与本函数无关、不许改。
+    ★ 两面板**各自独立气路** —— 此前的"只发一路、两面共用"实现是错的（反面那一路从未被驱动）。
     ★ 与运动共用 40135 寄存器，必须取执行互斥（否则与在飞的点动互相清触发位）。
     """
-    label = {"suck": "吸", "release": "停止吸", "blow": "放", "unblow": "停止放"}.get(action, action)
+    act = _air_action(action, face)
+    label = (VAC_ACTIONS.get(act) or (0, act))[1]
     if dry:
         # ★★ 2026-10-09 修：空跑时原来写的是 `"%s(空跑)" % label` —— 把调用方传进来的
         #   **语义化阶段名丢了**，只剩「吸(空跑) / 放(空跑)」，而"吸"和"放"在流程里
@@ -407,7 +500,7 @@ def _air(ctx, action: str, dry: bool, stage: str, st=None) -> None:
         okp, perr = motion.modbus.rc_vacuum_prepare(svc)
         if not okp:
             raise _Stop("常驻服务程序未就绪：%s" % perr, stage)
-        ok, verr, _d = motion.modbus.rc_vacuum(action, timeout=10.0)
+        ok, verr, _d = motion.modbus.rc_vacuum(act, timeout=10.0)
     finally:
         motion._exec_lock.release()
     _set(st, stage=label)
@@ -469,19 +562,25 @@ DUAL_FACE_FLIP_POINT = "J6反面"
 #   与单面口径一样，帧跨度 = (N-1)×FRAME_GAP_S 必须 ≤ 0.5s（C 位停留窗口，回归钉）。
 DUAL_FRAMES_PER_FACE = 2
 
+# ★★ 2026-10-11：`J6正面`/`J6反面` 存点时的**固定 note**（用户口径"只留 J6、其余五轴移除"）。
+#   点位库格式强制 6 值（api/points.py::_norm_joints），故其余 5 轴写 0 —— 用这条 note
+#   明确标注"其余轴不使用"，避免界面上出现"另外 5 个轴为 0"却被误读成"这 5 轴也参与切面"。
+FACE_J6_NOTE = "仅 J6 有效，其余轴不使用（切面 = 原地只改 J6，J1~J5 保持当前实时姿态）"
+
 
 def _rotation_guard(name: str) -> None:
     """★ 方案 §6-1 回归钉（**2026-10-11 更新口径**）：**带 J6 翻转的下发只禁止落在原料位**。
 
-    口径（用户原话）：「J6 反正不能在**原位**进行旋转！其他的时候可以旋转」
-      —— 「原位」= **原料位（A 区格位本身，如 A1…A9）**。
+    口径（用户原话）：「J6 反正不能在**原位**进行旋转！其他的时候可以旋转」；
+                    「18 个正上位，摄像头点位，起点可以旋转……18 个原位不能旋转」。
+      —— 「原位」= **原料位（A 区 9 格 + B 区 9 格，共 18 个）**。
     判据是**黑名单**（见 `S.is_raw_material_slot`）：**只有原料位禁止，其余一切允许**
     （正上位 / J6正面 / J6反面 / C检测 / 摄像头位 / 开始/结束点 / 起点 / home … 都放行）。
 
-    在**原料位（A 区格位本身）**请求旋转 → `_Stop` 拒绝并写明原因（这条改不掉）。
+    在**原料位（A/B 区格位本身，共 18 个）**请求旋转 → `_Stop` 拒绝并写明原因（这条改不掉）。
     """
     if not S.rotation_point_allowed(name):
-        raise _Stop("拒绝 J6 翻转：点位「%s」为原料位（A 区格位）—— **原料位严禁旋转**（其余位置均可）" % name)
+        raise _Stop("拒绝 J6 翻转：点位「%s」为原料位（A/B 区格位）—— **原料位严禁旋转**（其余位置均可）" % name)
 
 
 def _move_flip(ctx, pmap, name, speed, dry, stage, st=None) -> None:
@@ -523,11 +622,24 @@ def _move_flip_j6(ctx, pmap, name, speed, dry, stage, st=None) -> None:
         log.warning("翻转「%s」：基姿态不可得（%s），改用点位自带姿态（J1~J5 不再保持当前值）",
                     name, e)
     if base is None:
-        # ★ 回退路径：日志已如实标注原因（上面那条 warning），再做整点下发。
-        _move(ctx, pmap, name, speed, dry, stage, st)
+        # ★ 回退路径：日志已如实标注原因（上面那条 warning）→ 直接按**该点自带 6 轴**整姿态下发。
+        #   刻意**不走 face-aware 的 `_move`**：那会把"拿不到基姿态"再算一遍（且用另一个读取口
+        #   `_live_joints_or_none`），与这里"回退整姿态"的语义不一致；此处就是要明确"整姿态"。
+        if dry:
+            _set(st, stage=stage, last_point=name)
+            return
+        ok, reason, _snap = guard_check()
+        if not ok:
+            raise _Stop("安全围栏互锁：%s" % reason, stage)
+        r = motion.command([float(v) for v in _joints_of(pmap, name)], int(speed), 0,
+                           abort_check=lambda: ctx.cancelled())
+        _set(st, stage=stage, last_point=name)
+        if not r.get("ok"):
+            raise _Stop("运动到「%s」失败：%s" % (name, r.get("error")), stage)
         return
-    target = [float(v) for v in base]
-    target[5] = float(j6)
+    # ★ 复用唯一实现 `S.compose_j6_only`（基姿态只覆盖第 6 轴）—— 不再本地手写一遍，
+    #   保证"原地切面"只此一处口径（`api_goto` / `/control/move` 的护栏也复用它）。
+    target = S.compose_j6_only(base, j6)
     if dry:
         _set(st, stage=stage, last_point=name)
         return
@@ -541,34 +653,58 @@ def _move_flip_j6(ctx, pmap, name, speed, dry, stage, st=None) -> None:
         raise _Stop("运动到「%s」失败：%s" % (name, r.get("error")), stage)
 
 
-def _dual_drop(ctx, dry: bool, st=None, keep: bool = False) -> None:
-    """★ 一趟两件的**原地放件四步**（方案 §5.2，顺序即工艺）：`停止吸 → 放 → 停止放 → 立刻吸`。
+# ---------------------------------------------------------------- 持件槽位 → 用面（B 块核心）
+# ★★ 2026-10-11（方案 §B）：**持件槽位 → 用面**的唯一映射口。
+#   用户口径（本轮已确认）：一趟两件**固定"第 1 件 = 正面、第 2 件 = 反面"**，由**持件槽位**判定。
+#     · lower（下板，先吸的第 1 件）→ **正面 front**（= 该点自身 J6）；
+#     · upper（上板，翻面后吸的第 2 件）→ **反面 back**（= 该点自身 J6 ∓180）。
+#   ⇒ 所有"带着这个件去移动 / 落料"的下发都用它取面 —— 这样第 2 件后续每步都**保持反面**，
+#     **不再被点位默认正面顶掉**（这正是 B 块要修的核心：过去 `_move` 恒按该点自带 J6 下发）。
+_SLOT_FACE = {S.FACE_SLOTS[0]: S.FACE_FRONT, S.FACE_SLOTS[1]: S.FACE_BACK}
 
-    ★ 为什么必须"立刻复吸"：全项目**只有一路真空**（io.DOut[8]），两面共用它 ——
-      `停止吸` + `放` 会让**两件一起失真空**；要放的那件被吹落在台面/料上
-      （用户："方块在物体上面不会掉落"），另一件只能靠残余负压 + 惯性吊着 →
-      所以**立刻 `吸`** 把它重新吸住。
-    ★ 窗口越短，悬挂那件越安全：这四步**原地连续**做完，**中间不加任何 dwell、
-      不插入任何移动**（回归钉；方案 §5.3 已如实写明"悬挂件可能掉"的风险）。
-    ★ `keep=False`（放最后一件）→ 不复吸（放完手上就没有悬挂件了）。
+
+def _face_of_slot(slot) -> str:
+    """持件槽位（"lower"/"upper"，或下标 0/1）→ 该件对应的**面**；未知 → 正面（保守，同旧行为）。"""
+    if isinstance(slot, int) and not isinstance(slot, bool):
+        slot = S.FACE_SLOTS[slot] if 0 <= slot < len(S.FACE_SLOTS) else None
+    return _SLOT_FACE.get(str(slot or ""), S.FACE_FRONT)
+
+
+def _dual_drop(ctx, dry: bool, face: str = S.FACE_FRONT, st=None) -> None:
+    """★ 一趟两件的**原地放件三步**（顺序即工艺）：`停止吸 → 放 → 停止放`。
+
+    ★★ 2026-10-11 **前提更正（用户权威位表）**：两面板**各自独立气路** ——
+      下板 = 40135.Bit1~4（索引 1~4），反面/上板 = Bit5~8（索引 5~8）。
+      **原设计基于"全项目只有一路真空（io.DOut[8]）、两面共用"这一前提，该前提已被现场纠正**：
+      放掉一件**不会**影响另一件 → 故原为"共用一路"而加的
+      「**瞬时复吸**四步（停止吸→放→停止放→立刻吸）」**已取消**（第 1 件瞬时失真空的风险随之消失，
+      这是安全上的净改善）。
+    ★ `face` 决定这一趟只动哪一路（`_air` 内按面取位，位号见 `modbus.VAC_ACTIONS`）：
+        front → 1~4 位；back → 5~8 位。**只碰该面那一路、不越界**。
     """
-    _air(ctx, "release", dry, "落料·停止吸", st)
-    _air(ctx, "blow", dry, "落料·放气", st)
-    _air(ctx, "unblow", dry, "落料·停止放气", st)
-    if keep:
-        _air(ctx, "suck", dry, "落料·复吸", st)
+    _air(ctx, "release", dry, "落料·停止吸", st, face=face)
+    _air(ctx, "blow", dry, "落料·放气", st, face=face)
+    _air(ctx, "unblow", dry, "落料·停止放气", st, face=face)
 
 
 def _capture_per_face(ctx, faces: Sequence[str], frames_per_face: int,
-                      min_conf: float, stage: str) -> List[Dict]:
+                      min_conf: float, stage: str, set_face=None) -> List[Dict]:
     """**按面**抓帧投票：每个面各抓 `frames_per_face` 帧 → `vote_color_per_face` 分组结论。
 
     ★ 判据**完全复用现有 `vote_color`**（经 `vote_color_per_face` 只做分组）——
       绝不新造第二套判色逻辑（那正是本项目最忌讳的分叉）。
     ★ 帧间隔沿用 `FRAME_GAP_S`：单面跨度 = (N-1)×0.15 ≤ 0.5s（与单面 `_capture` 同一约束）。
+    ★★ 2026-10-11（B 块 · 送检真翻面）：新增 `set_face(slot)` 回调 —— **每面拍照前**先把 J6
+      摆到该面对应的姿态（`_face_of_slot`：lower→正面 / upper→反面）。
+      为什么必须：机器人到 C 后若**不再翻 J6**，两组帧会取在**同一姿态** → 两块板拍成同一件，
+      与会话注释"正面 2 帧 → 翻面 → 反面 2 帧"不符（见方案 §B-5）。由调用方注入"怎么摆面"
+      （复用 `_move(..., face=...)`），本函数只负责"按面分组 + 组间摆面"，不自己造下发通道。
+      ★ `set_face=None` → 与旧行为逐字一致（不夹带任何运动）。
     """
     groups: List[List[Dict]] = []
     for _slot in list(faces):
+        if callable(set_face):
+            set_face(_slot)
         got: List[Dict] = []
         for i in range(int(frames_per_face)):
             if ctx.cancelled():
@@ -589,7 +725,8 @@ def _capture_per_face(ctx, faces: Sequence[str], frames_per_face: int,
 
 def _put_back(ctx, pmap, src_slot: str, speed: int, dry: bool,
               blow_ms: int = 500, prefix: str = "放回原位", st=None,
-              go_home: bool = True, keep: bool = False) -> None:
+              go_home: bool = True,
+              face: str = S.FACE_FRONT) -> None:
     """★ 2026-10-10 用户口径：**判不出色（或自证不符）→ 把件原路放回取料格**。
 
     调用前提：件正被吸着、机器人停在半路（分拣停在 C 检测位）。
@@ -600,26 +737,28 @@ def _put_back(ctx, pmap, src_slot: str, speed: int, dry: bool,
       位置随机 —— 现场得满地找件，而且下一次取料还会撞上它。
     ★ 两路气在**这里正常关断**（不靠异常收尾兜底），所以调用方随后要把
       suck_on/blow_on 置 False，免得收尾再关一次。
-
-    ★ 两个**双面（一趟两件）**专用开关（默认值 = 既有单件行为，**零回归**）：
-      · `keep=True`  → 手上还吊着另一件：放完**不再等待**，改走"停止放 → **立刻复吸**"
-        （四步窗口越短，悬挂那件越安全）；收尾 `holding` 也按 keep 记（仍为流程推断）。
-      · `go_home=False` → **不回起点**（双面"两件都放完才回起点"，件与件之间不能回起点）。
+    ★ `go_home=False` → **不回起点**（双面"两件都放完才回起点"，件与件之间不能回起点）。
+    ★★ 2026-10-11（前提更正 · 用户权威位表）：两面板**各自独立气路** →
+      **取消**原"共用一路真空"专用的 `keep`（复吸）参数：放这一面**只动这一面那一路**，
+      不影响另一面。`face` 决定用哪一路（front → 1~4 位 / back → 5~8 位），
+      "用哪面取的就用哪面放回"。默认 `front` → 单件路径 / 井字棋**逐字不变**（零回归）。
     """
-    _move(ctx, pmap, src_slot + "上", speed, dry, "%s·到原格上方" % prefix, st)
-    _move(ctx, pmap, src_slot, speed, dry, "%s·下落" % prefix, st)
-    _air(ctx, "release", dry, "%s·停止吸" % prefix, st)
-    _air(ctx, "blow", dry, "%s·放气" % prefix, st)
-    if keep:
-        # 还有件挂着 → 原地四步收尾：立刻停止放 + 复吸（不加 dwell）
-        _air(ctx, "unblow", dry, "%s·停止放气" % prefix, st)
-        _air(ctx, "suck", dry, "%s·复吸" % prefix, st)
-    else:
-        if int(blow_ms) > 0:
-            ctx.sleep(int(blow_ms) / 1000.0)
-        _air(ctx, "unblow", dry, "%s·停止放气" % prefix, st)
-    _set(st, holding=bool(keep), stage="%s·完成" % prefix)
-    _move(ctx, pmap, src_slot + "上", speed, dry, "%s·抬起" % prefix, st)
+    _move(ctx, pmap, src_slot + "上", speed, dry, "%s·到原格上方" % prefix, st, face=face)
+    # ★★ 2026-10-11 用户口径：「原位禁止旋转」+「如果正面保持正面，如果反面保持反面，
+    #   如果都不是调整接近哪个点就那个」——**去原料位（回原位那一步）保持当前面、不旋转**：
+    #   用 `face="keep"` 而不是该件的面（用件的面会把 J6 按"该点自身∓180"重算 = 在原料位翻面；
+    #   用 front 又会把反面件**翻回正面** → 正是用户报的"让它去反面位却总弄成正面"）。
+    #   `keep` = J6 沿用当前面（正面/反面/判不出取更近），**全程不主动翻面**，与"原料位严禁旋转"相容。
+    _move(ctx, pmap, src_slot, speed, dry, "%s·下落" % prefix, st, face=S.FACE_KEEP)
+    _air(ctx, "release", dry, "%s·停止吸" % prefix, st, face=face)
+    _air(ctx, "blow", dry, "%s·放气" % prefix, st, face=face)
+    if int(blow_ms) > 0:
+        ctx.sleep(int(blow_ms) / 1000.0)
+    _air(ctx, "unblow", dry, "%s·停止放气" % prefix, st, face=face)
+    # 这一面的件已放下 → 该面空槽。`st` 是双面 state 时，由调用方随后的 face_slot_take 刷新 holding；
+    # 单件路径 st 为 None → 不设 holding（异常分支会置 False）。
+    _set(st, stage="%s·完成" % prefix)
+    _move(ctx, pmap, src_slot + "上", speed, dry, "%s·抬起" % prefix, st, face=face)
     if go_home:
         _move(ctx, pmap, S.START_POINT, speed, dry, "%s·回起点" % prefix, st)
 
@@ -692,7 +831,13 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
                  frame_detail=[], best_frame=None, votes={})
             # 1) 取料：上方 → 槽位 → 吸
             _move(ctx, pmap, a_slot + "上", speed, dry, "取料·上方")
-            _move(ctx, pmap, a_slot, speed, dry, "取料·下落")
+            # ★★ 2026-10-11 统一口径：**去原料位（A{a_slot}）那一步一律 `keep`**（保持当前面、不旋转）——
+            #   用户原话「我在正上位反面，去原料区是变成了正面」。
+            #   单件路径此刻当前=正面（全程无翻面）→ 与旧的"正面"**行为等价**（零回归，见回归钉）；
+            #   但用 keep 后即使上游给了反面也能"保持着去原料位"、不被该点默认正面顶掉。
+            #   ★ 目标点必为原料位（A_SLOTS）→ `face_for_target` 恒返回 keep。
+            _move(ctx, pmap, a_slot, speed, dry, "取料·下落",
+                  face=S.face_for_target(a_slot, S.FACE_FRONT))
             _air(ctx, "suck", dry, "取料·吸")
             suck_on = True
             # ★ 2026-10-09（用户流程口径）："吸取 → **等待0.5秒** → 抬起"。
@@ -867,9 +1012,15 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
       ① 正上位 → 取 A{i}（**下板**吸住）→ 抬起；
       ② 在**正上位**把 J6 转到用户示教的「J6反面」点（`_move_flip_j6` 过旋转白名单，
          且**只覆盖第 6 轴**、J1~J5 保持当前实时姿态 —— 见 `_move_flip_j6` 的说明）；
-      ③ → 取 A{j}（**上板**吸住）：★ 这一步**绝不断真空**（一断第 1 件就掉，方案 §5.2）；
-      ④ 到 C 检测位：**正面 N 帧 → 投票**，J6 转到反面 → **反面 N 帧 → 投票**（两个独立结论）；
-      ⑤ **先放有效的那件**（按色落 B 槽）；无效件 → **原路放回它自己的 A 原位**（不消耗配额）；
+      ③ → 取 A{j}（**上板**吸住）：★ **发「吸反面的气」(Bit5) 吸住上板那一路** ——
+         项目此前按"两面共用一路真空"实现，故把「吸气」(Bit1，下板那路) 当成通用吸气，
+         **反面的那一路从未被驱动** → 现场"反面吸不到"。现已按用户权威位表改用 Bit5。
+         （上一轮误判为"没有 off→on 边沿"、据此加的"停止吸→立刻吸"**已删除**：两面独立。）
+      ④ 到 C 检测位：**先反面 N 帧 → 投票**，切到正面 → **正面 N 帧 → 投票**（两个独立结论）；
+         ★ 到达 C 时已停在**首个采集面**（省掉一次多余翻面）；
+      ⑤ **先送正面那件、再送反面那件**（固定次序，唯一口径 `S.order_for_drop`）；
+         有效件按色落 B 槽，无效件 → **原路放回它自己的 A 原位**（不消耗配额）——
+         有效/无效只决定"放哪"，**不改变先后**；
       ⑥ **两件都放完才回起点**（件与件之间不回起点）。
     节拍：9 件 = 4 趟×2 + 最后 1 趟×1（见 `S.plan_trips`）。
     """
@@ -884,8 +1035,39 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
                    % ("空跑模式" if dry else "双闸未开，运动仅仿真"),
                    {"dry_run": dry, "real_write": real, "dual_face": True}, actor="control")
     # ★ 气路是电平保持型（写一次就保持）→ 异常/取消/收尾都必须主动关掉（同默认路径口径）。
+    # ★★ 2026-10-11：两面板**各自独立气路** → **分面记账**（下板前阀 = suck_on/blow_on；
+    #   反面后阀 = suck_back_on/blow_back_on），异常收尾时"哪面有件就关哪面"。
     blow_on = False
     suck_on = False
+    blow_back_on = False
+    suck_back_on = False
+
+    def _close_air(why: str) -> None:
+        """异常/取消/收尾按**分面记账**收气：哪面那一路开着就关哪面（best-effort）。
+
+        ★★ 2026-10-11：两面**独立气路** —— 下板用 1~4 位（release/unblow），
+          反面/上板用 5~8 位（release_back/unblow_back）。**不许有件悬空失真空**：
+          手臂上还挂着哪一面的件，就把那一面的吸气/吹气阀关掉。
+        不吹气（在半空吹会把件吹飞、落到哪儿不知道），只"停止吸 + 停止放"。
+        """
+        nonlocal blow_on, suck_on, blow_back_on, suck_back_on
+        if dry:
+            return
+        faces = ((S.FACE_FRONT, blow_on or suck_on, ""),
+                 (S.FACE_BACK, blow_back_on or suck_back_on, "反面"))
+        for face, opened, tag in faces:
+            if not opened:
+                continue
+            for act, lab in (("unblow", "停止放"), ("release", "停止吸")):
+                try:
+                    _air(ctx, act, False, "%s·%s" % (why, lab), face=face)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("%s关气（%s%s）失败：%s", why, tag, lab, exc)
+        blow_on = False
+        suck_on = False
+        blow_back_on = False
+        suck_back_on = False
+
     start = S.START_POINT
     cam = S.CAMERA_POINT
     placement = S.new_placement()
@@ -911,7 +1093,10 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
 
             # ① 取第 1 件（下板）：上方 → 下落 → 吸 → 等吸牢 → 抬起
             _move(ctx, pmap, first + "上", speed, dry, "取料·上方")
-            _move(ctx, pmap, first, speed, dry, "取料·下落")
+            # ★★ 2026-10-11 用户口径：「原位禁止旋转」—— **去原料位那一步用 `keep`
+            #   （保持当前面、不旋转）**：J1~J5 用该点自身，J6 沿用当前面（此处当前=正面，
+            #   故等价于正面），**绝不主动翻面**。详见 services/sorting.py::keep_j6。
+            _move(ctx, pmap, first, speed, dry, "取料·下落", face=S.FACE_KEEP)
             _air(ctx, "suck", dry, "取料·吸")
             suck_on = True
             if int(body.suck_hold_ms) > 0:
@@ -926,24 +1111,54 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
                 _move_flip_j6(ctx, pmap, DUAL_FACE_FLIP_POINT, speed, dry,
                               "翻转·J6反面（仅J6）")
 
-            # ③ 取第 2 件（上板）：★ 保持吸气，不碰气路（一断真空第 1 件就掉）
+            # ③ 取第 2 件（上板/反面）：上方 → 下落 → **吸反面的气(Bit5)** → 等吸牢 → 抬起
+            #   ★★ 2026-10-11 用户口径（原话 · 权威位表）：「5 是吸反面的气，6 停止吸反面，
+            #      7 是放气反面的，8 是停止放气了」—— 即第 2 件必须发**反面那一路的吸气**。
+            #   根因（本次已证实）：项目此前按"两面共用一路真空（io.DOut[8]）"实现 —— 我们发
+            #      「吸气」驱动的是**下板那一路**，**反面的那一路从未被驱动**，这才是"反面吸不到"的
+            #      真正原因。（上一轮误判为"没有 off→on 边沿"，据此加的"停止吸→立刻吸"是**不准确**的，
+            #      现已删除：两面独立、放一件不影响另一件，不需要造边沿、也不会让第 1 件失真空。）
+            #   ★ 第 2 件=上板=**反面**：**正上位**那几步走 `face=FACE_BACK`（保持反面），
+            #     **去原料位那一步走 `face=keep`**（保持当前面、在原料位不旋转）；
+            #     两者都不是"该点默认正面" —— 否则 `_move` 会把 J6 拉回正面、把 ② 的翻转顶掉
+            #     （用户报的"从反面切回正面 / 去原料位总弄成正面"就是这条根因）。
             if len(trip) >= 2:
                 second = trip[1]
-                _move(ctx, pmap, second + "上", speed, dry, "取料·上方")
-                _move(ctx, pmap, second, speed, dry, "取料·下落")
-                _air(ctx, "suck", dry, "取料·吸")
-                suck_on = True
+                _move(ctx, pmap, second + "上", speed, dry, "取料·上方", face=S.FACE_BACK)
+                # ★★ 去**原料位**（A{second}）那一步：`keep`（保持当前面、不旋转）——
+                #   此刻已在②翻到反面 → J6 沿用反面，**不会把面翻回该点默认正面**
+                #   （用户报的"让它去原料位却总给我弄成正面"就是这里）。J1~J5 仍用该点自身。
+                _move(ctx, pmap, second, speed, dry, "取料·下落", face=S.FACE_KEEP)
+                # ★ 只发**反面那一路**吸气（Bit5）：两面独立 → 不碰下板那一路、第 1 件不受影响。
+                _air(ctx, "suck", dry, "取第2件·吸反面", face=S.FACE_BACK)
+                suck_back_on = True
                 if int(body.suck_hold_ms) > 0:
                     ctx.sleep(int(body.suck_hold_ms) / 1000.0)
                 S.face_slot_put(state, "upper", piece=second, ok=True)
-                _move(ctx, pmap, second + "上", speed, dry, "抬起")
+                _move(ctx, pmap, second + "上", speed, dry, "抬起", face=S.FACE_BACK)
 
-            # ④ 送检 → 正/反各 N 帧、分组投票（两个独立结论）
-            _move(ctx, pmap, cam, speed, dry, "送检")
+            # ④ 送检 → **先反面 N 帧 → 切到正面 → 正面 N 帧**、分组投票（两个独立结论）
+            #   ★ 2026-10-11 用户需求 2（「取完两个件之后、去 C 检测之前先经过"统一的正上位"」）：
+            #     **查证结果 = 点位库里没有名为"正上位"的统一点位**（`S.expected_points()` 的
+            #     正上位是**每格各自**的 `A{i}上`/`B{i}上`，共 36 个；`/api/points` 里也无"正上位"）。
+            #     ⇒ 按用户口径**不猜、不臆造点名** → **保持现状**：只保留"各料自己的正上方"
+            #       （①/③ 的 `A{i}上`），**不新增**一个"统一正上位"点。待用户给出点名后再接。
+            #   ★★ 2026-10-11（本轮优化）：到 C 时的**到达面 = 首个采集面**
+            #      （`faces_for_capture` 首槽对应的面，经唯一映射口 `_face_of_slot`）——
+            #      即"到达即开拍"：到达面与首组帧的面一致 → 首组帧**不需要额外翻面**。
+            #      · 两件趟：首组帧 = 反面(upper) → **到达即在反面**；旧实现到 C 停在**正面**，
+            #        得先翻到反面拍、再翻回正面拍 = **2 次原地翻面**；本实现 = **1 次**
+            #        （只在"从反面切回正面"时翻），**省掉那一次多余翻面**。
+            #      · 单件趟（len(trip)==1）：首组帧 = 正面(lower) → 到达仍在**正面**，
+            #        与旧实现**逐字一致**（零回归；单件趟本就无反面件，不该多翻）。
+            #   ★ 拍照面序仍**唯一口径** `S.faces_for_capture`（先反面、后正面，用户"顺序不能乱"）。
+            #   ★ `_set_cam_face`（见下）依旧"面变了才摆 J6"：到达面 == 首组帧面 → 首组帧不重复下发。
+            faces = S.faces_for_capture(len(trip))
+            arrival_face = _face_of_slot(faces[0]) if faces else S.FACE_FRONT
+            _move(ctx, pmap, cam, speed, dry, "送检", face=arrival_face)
             _set(stage="停顿")
             if ctx.sleep(int(body.dwell_ms) / 1000.0):
                 stop_reason = "已被停止"; phase = "cancelled"; break
-            faces = list(S.FACE_SLOTS[: len(trip)])
             if not judge:
                 # 空跑 / 双闸未开：不调相机、不判色，用轮换占位色把选槽+落料逻辑走通
                 ph = _DRY_PLACEHOLDER_COLORS
@@ -960,32 +1175,55 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
                     raise _Stop("未到达 C 检测点（实际偏差 %.1f° > %.1f°），不判色"
                                 % (dev, CAM_ARRIVE_TOL_DEG), "判色", done + 1)
                 _set(stage="判色")
+                _cur = {"face": arrival_face}   # 到 C 时 J6 已停在**到达面**（= 首个采集面，上面那次 _move 已摆好）
+
+                def _set_cam_face(slot):
+                    """每面拍照前把 J6 摆到该面对应姿态（lower→正面 / upper→反面）。
+
+                    ★ 只在"面变了"时才下发（同姿态不重复写，省一次下发）；
+                      仍是**同一点位、只改 J6**（`_move` + `face`），不是整姿态平移。
+                    """
+                    f = _face_of_slot(slot)
+                    if S.norm_face(f) == _cur["face"]:
+                        return
+                    _move(ctx, pmap, cam, speed, dry, "送检·%s面" % S.face_zh(f), face=f)
+                    _cur["face"] = S.norm_face(f)
+
                 verdicts = _capture_per_face(ctx, faces, DUAL_FRAMES_PER_FACE,
-                                             min_conf, "判色")
+                                             min_conf, "判色", set_face=_set_cam_face)
                 if verdicts:
                     _set(frame_detail=verdicts[0].get("frame_detail") or [],
                          best_frame=verdicts[0].get("best_frame"),
                          votes=verdicts[0].get("votes") or {})
             _set(color=",".join(str(v.get("color") or "") for v in verdicts))
 
-            # ⑤ 落料：先放有效件（B 槽），再放无效件（原路回自己 A 原位）
-            ordered = ([v for v in verdicts if v.get("ok")]
-                       + [v for v in verdicts if not v.get("ok")])
+            # ⑤ 落料：先正面那件、再反面那件（★ 本轮用户口径：「先送正面，然后送反面……顺序不能混乱」）。
+            #   ★ 顺序**只由面决定**（`S.order_for_drop`：lower=正面 在前）——
+            #     有效/无效只决定"放到哪"（B 槽 / 原路回自己 A 原位），**不改先后**。
+            #   ★ 用哪面取的就用哪面放（`_face_of_slot(slot)`），移动时 J6 保持该面、不被目标点默认正面顶掉。
+            ordered = S.order_for_drop(verdicts)
             for k, v in enumerate(ordered):
-                keep = (k < len(ordered) - 1)      # 后面还有件挂着 → 立即复吸
                 slot = v.get("slot")
                 idx = S.FACE_SLOTS.index(slot) if slot in S.FACE_SLOTS else 0
                 src = trip[min(idx, len(trip) - 1)]
+                face = _face_of_slot(slot)
+                back = (S.norm_face(face) == S.FACE_BACK)
                 if v.get("ok"):
                     plan = S.build_piece_plan(placement, v.get("color"))
                     if not plan["ok"]:
                         raise _Stop("%s" % plan["detail"], "选槽", done + 1)
                     tgt = plan["slot"]
                     _set(target=tgt)
-                    _move(ctx, pmap, tgt + "上", speed, dry, "放料·正上方")
-                    _dual_drop(ctx, dry, state, keep)
-                    suck_on = keep
-                    blow_on = False
+                    _move(ctx, pmap, tgt + "上", speed, dry, "放料·正上方", face=face)
+                    # ★★ 只放**这一面那一路**（front→1~4 位 / back→5~8 位）——
+                    #   两面独立：放下板不碰反面、放反面不碰下板（独立钉，test_double_face.py）。
+                    _dual_drop(ctx, dry, face=face, st=state)
+                    if back:
+                        suck_back_on = False
+                        blow_back_on = False
+                    else:
+                        suck_on = False
+                        blow_on = False
                     S.place(placement, v.get("color"), tgt)
                     _set(placement=S.placement_summary(placement))
                     emit_event("sorting", "info", "sorting.piece",
@@ -1001,9 +1239,13 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
                     _put_back(ctx, pmap, src, speed, dry,
                               blow_ms=int(body.blow_ms),
                               prefix="放回原位 %s" % src, st=state,
-                              go_home=False, keep=keep)
-                    suck_on = keep
-                    blow_on = False
+                              go_home=False, face=face)
+                    if back:
+                        suck_back_on = False
+                        blow_back_on = False
+                    else:
+                        suck_on = False
+                        blow_on = False
                 S.face_slot_take(state, slot)
                 done += 1
 
@@ -1014,17 +1256,8 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
             _set(stage="收尾·回开始/结束点")
             _move(ctx, pmap, start, speed, dry, "收尾回原点")
     except _Stop as e:
-        if not dry and (blow_on or suck_on):
-            try:
-                _air(ctx, "unblow", False, "异常·停止放气")
-            except Exception as exc:  # noqa: BLE001
-                log.warning("异常收气（停止放）失败：%s", exc)
-            try:
-                _air(ctx, "release", False, "异常·停止吸")
-            except Exception as exc:  # noqa: BLE001
-                log.warning("异常收气（停止吸）失败：%s", exc)
-            blow_on = False
-            suck_on = False
+        # 停止/异常 → 按面收气（下板 1~4 位 / 反面 5~8 位，哪面有件关哪面）
+        _close_air("异常")
         stop_reason = e.reason
         stop_piece = e.piece or int((_job.get("state") or {}).get("piece") or 0)
         if "停止" in e.reason:
@@ -1043,23 +1276,11 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
         log.exception("双面分拣异常")
         stop_reason = "内部异常：%s" % str(e)[:150]
         phase = "error"
-        if not dry and (blow_on or suck_on):
-            for act, lab in (("unblow", "停止放"), ("release", "停止吸")):
-                try:
-                    _air(ctx, act, False, "内部异常·%s" % lab)
-                except Exception:  # noqa: BLE001
-                    pass
-            blow_on = False
-            suck_on = False
+        _close_air("内部异常")
     finally:
         ctx.finish(phase)
         try:
-            if not dry and (blow_on or suck_on):
-                for act, lab in (("unblow", "停止放"), ("release", "停止吸")):
-                    try:
-                        _air(ctx, act, False, "收尾·%s" % lab)
-                    except Exception as exc:  # noqa: BLE001
-                        log.warning("收尾关气（%s）失败：%s", lab, exc)
+            _close_air("收尾")
             _set(stage="结束", error=stop_reason, finished=True,
                  ok=(phase == "done"), phase=phase, piece=stop_piece or None)
             emit_event("sorting", "info" if phase == "done" else "warn", "sorting.stop",
@@ -1091,6 +1312,15 @@ class TeachIn(BaseModel):
 
 class NameIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
+    # ★ 2026-10-11 用户口径：「测试点时不要限速，所有的速度必须右上角的滑轮同步」——
+    #   「到点/复核」是**测试点位**的运动，速度必须来自右上角滑块（请求体 speed_pct），
+    #   不再回落到 config 里那个固定的 default_speed_pct（它恒为 5%，等于把测试点限速到 5%）。
+    #   旧前端/脚本没带该字段时仍兼容（None → 回落 config 默认）。
+    speed_pct: Optional[int] = None
+    # ★★ 2026-10-11「面」语义（本轮）：到点可指定用**该点自身**的正面 / 反面（只动 J6）。
+    #   缺省 "front" → 与旧行为逐字一致（零回归）。见 S.resolve_target_joints。
+    face: Optional[str] = Field(default="front", max_length=8,
+                                description="front=正面(默认) / back=反面（只动 J6）")
 
 
 def _require_sorted_name(name: str) -> str:
@@ -1128,29 +1358,51 @@ def api_teach(body: TeachIn, tok: str = Depends(require_control)):
     j = [round(float(v), 3) for v in (body.joints or _live_joints())]
     if len(j) != 6:
         raise HTTPException(400, detail="关节角必须是 6 个数值")
+    # ★★ 2026-10-11 用户口径：「正面和反面的别的五个（轴）移除掉，只 J6 就行了」。
+    #   `J6正面`/`J6反面` **只存第 6 轴**：其余 5 轴写 0（点位库格式强制 6 值，见 _norm_joints），
+    #   并用固定 note 明确标注"仅 J6 有效、其余轴不使用"。消费方一律**只读 joints[5]**
+    #   （见 S.compose_j6_only 与各处"切面"护栏），这 5 个 0 **永远不会被下发**。
+    #   ★ 兼容旧数据：读入侧本就只取 joints[5]，所以**已录过**的这两个点（带着当时的 J1~J5）
+    #     即使不重录也安全 —— 重录一次即归一化成"只写 J6"。
+    face = S.is_j6_face_point(name)
+    if face:
+        j = [0.0, 0.0, 0.0, 0.0, 0.0, round(float(j[5]), 3)]
     payload = json.dumps(j, ensure_ascii=False)
     db = SessionLocal()
     try:
         row = next((p for p in list_points(db) if p.name == name), None)
         if row is None:
             row = create_point(db, name=name, group="分拣", kind="joint",
-                               joints_json=payload, note=body.note or "分拣示教")
+                               joints_json=payload,
+                               note=(FACE_J6_NOTE if face else (body.note or "分拣示教")))
             action = "created"
         else:
             update_point(db, row.id, group="分拣", kind="joint",
-                         joints_json=payload, note=body.note or row.note)
+                         joints_json=payload,
+                         note=(FACE_J6_NOTE if face else (body.note or row.note)))
             action = "updated"
     finally:
         db.close()
     emit_event("sorting", "info", "sorting.teach",
-               "示教点位 %s（%s）" % (name, "新建" if action == "created" else "覆盖"),
-               {"name": name, "joints": j, "action": action}, actor="control")
-    return {"ok": True, "name": name, "joints": j, "action": action}
+               "示教点位 %s（%s%s）" % (name, "新建" if action == "created" else "覆盖",
+                                       "·仅J6" if face else ""),
+               {"name": name, "joints": j, "action": action, "j6_only": face}, actor="control")
+    return {"ok": True, "name": name, "joints": j, "action": action, "j6_only": face}
 
 
 @router.post("/goto")
 def api_goto(body: NameIn, tok: str = Depends(require_control)):
     """移动到该示教点位（复核示教用）。★ 这是**运动**：走围栏互锁 + 轴锁 + 速度夹取。
+
+    ★ 速度（2026-10-11 用户口径：「测试点时不要限速，所有速度必须右上角滑块同步」）：
+      取**请求体 speed_pct（= 右上角滑块）**，只夹到寄存器合法范围 [5,100]；不再固定用 config 的
+      `default_speed_pct`（那会把测试点强行限到 5%）。
+
+    ★★ 2026-10-11 护栏（用户反馈「正反面没有在原地、每次回去起点」）：
+      `J6正面`/`J6反面` **禁止整姿态到点** —— 它们"只有 J6 不同"、且是**在起点录的**，
+      整姿态下发会把录点当时的 J1~J5 一起带过去（= 跑回起点）。故这两点一律转成
+      **原地切面**：基姿态 = **当前实时关节**，只覆盖第 6 轴（`S.compose_j6_only`）；
+      拿不到实时基姿态 → **拒绝**（绝不用点位自带的 5 轴偷偷整姿态下发）。
 
     分拣运行期间禁止（与手动点动同一套互锁理由：抢同一个 40135 触发位）。
     """
@@ -1158,6 +1410,9 @@ def api_goto(body: NameIn, tok: str = Depends(require_control)):
     with _gate:
         if _job.get("thread") and _job["thread"].is_alive():
             raise HTTPException(409, detail="分拣正在运行，先「停止」再手动到点")
+    # ★ 统一"未就绪"闸门：到点是真实运动，伺服未上电 → 拒绝并明确提示
+    #   （放在点位查询之前：伺服没上电时先给"机器人没有就绪"，而不是先纠结点位）。
+    reject_if_not_ready()
     db = SessionLocal()
     try:
         row = next((p for p in list_points(db) if p.name == name), None)
@@ -1172,17 +1427,37 @@ def api_goto(body: NameIn, tok: str = Depends(require_control)):
         j = parse_joints(row.joints, where="点位「%s」" % name)
     except ValueError as e:
         raise HTTPException(400, detail=str(e))
-    try:
-        sp = int(get_config().get("control", "default_speed_pct", default=5) or 5)
-    except Exception:
-        sp = 5
-    sp = max(5, min(100, sp))
-    r = motion.command([float(v) for v in j], sp, 0)
+    # ★★ 护栏：J6 正/反面**禁止整姿态到点** → 转成"原地只改 J6"（基姿态=当前实时关节）。
+    #   这是"切面"与"到点"的**语义分水岭**：只有这两个点走原地切面，其余点位照旧整姿态。
+    #   ★ 决策收敛到唯一入口 `S.resolve_target_joints`（与"残影预演"同源，见
+    #     /control/point-target）—— 残影与实际下发共用同一函数，结构上不可能分叉。
+    # ★★ 统一口径（2026-10-11 用户原话「我在正上位反面，去原料区是变成了正面」）：
+    #   **目标是原料位（A1…A9/B1…B9）→ 一律 `keep`（保持当前面、绝不翻面）**。
+    #   故先把调用方给的 face 归一化：非原料位原样（正面/反面），原料位强制成 keep。
+    #   要某个面请在"允许旋转的位置"先翻好，再保持着去原料位（见 services/sorting.py::face_for_target）。
+    target, _j6_only, _j6_reason = S.resolve_target_joints(
+        name, j, _live_joints, face=S.face_for_target(name, body.face))
+    if _j6_reason:
+        raise HTTPException(409, detail=_j6_reason)
+    # ★ 2026-10-11 用户口径：「测试点时不要限速，所有的速度必须右上角的滑轮同步」。
+    #   原实现取 config 的 `control.default_speed_pct`（默认 5%）——**与右上角滑块无关**，
+    #   等于每次到点都强行 5%：这就是"测试点被限速"的根因。
+    #   现在：**请求体带了 speed_pct（= 滑块值）就用它**；只有旧前端/脚本没带时才回落到
+    #   config 默认（向后兼容）。两者都仍夹到寄存器合法范围 [5,100]（40103 物理范围 + 滑块下限）。
+    if body.speed_pct is not None:
+        sp = clamp_speed(int(body.speed_pct))
+    else:
+        try:
+            sp = clamp_speed(int(get_config().get("control", "default_speed_pct", default=5) or 5))
+        except Exception:
+            sp = clamp_speed(5)
+    r = motion.command(target, sp, 0)
     if not r.get("ok"):
         raise HTTPException(502, detail="移动到「%s」失败：%s" % (name, r.get("error")))
-    emit_event("sorting", "info", "sorting.goto", "手动到点：%s" % name,
-               {"name": name, "speed_pct": sp}, actor="control")
-    return {"ok": True, "name": name, "speed_pct": sp}
+    emit_event("sorting", "info", "sorting.goto",
+               ("原地切面：%s（仅 J6）" % name) if _j6_only else ("手动到点：%s" % name),
+               {"name": name, "speed_pct": sp, "j6_only": _j6_only}, actor="control")
+    return {"ok": True, "name": name, "speed_pct": sp, "j6_only": _j6_only}
 
 
 @router.delete("/point")

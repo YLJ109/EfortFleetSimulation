@@ -1,32 +1,42 @@
 ﻿<script setup>
 // =====================================================================
-// 底部状态区（五选一片条）：运行日志 / 机器人 / 摄像头 / 示教器 / 真机链路。
+// 底部状态区（状态片条）：运行日志 / 摄像头 / 示教器 / 真机链路。
 //
 // ★ 2026-10-11 用户口径（以这次为准）：
 //   「底部的真机链路能不能跟机器人/摄像头/示教器那样样式…还有运行日志也放进去，
 //     五个样式、状态，五选一显示，点别的地方自己隐藏，默认运行日志开启状态，
 //     绿色/黄色/红色点要亮起来，运行日志放在最左侧。」
+// ★★ 2026-10-11 第二轮用户口径（以这次为准）：
+//   「底部有两个真机链路两个合并掉」—— 底部原来同时有「机器人 真实链路」片与
+//   「真机链路 就绪」片**两个都是"真机链路"的入口**，合并为**一个**。
+//   · 保留**内容更全**的那一份 = 「真机链路」片（`RcReadyCard`：双闸/档位/伺服/报警/
+//     急停/程序/点动 + 一键就绪·取消就绪·清除报错）；
+//   · 把原「机器人」片的**机器人链路内容**（真实链路/强制模拟/掉线降级 + 地址 +
+//     simulate + 重新连接）**迁入「真机链路」片的面板**（不许丢功能）；
+//   · 「真机链路」片的灯与文案**兼顾机器人链路**（链路坏了先报链路，链通才报就绪链）。
 //
 // 结构：
-//   · 五个片（tab）从左到右： log(运行日志) · robot · camera · run_mode · link(真机链路)
-//   · 五选一：点某片 → 只显示该片面板；**再点同一片收起**（toggle）
+//   · 片（tab）从左到右： log(运行日志) · camera(摄像头) · run_mode(示教器) · link(真机链路)
+//   · 多选一：点某片 → 只显示该片面板；**再点同一片收起**（toggle）
 //   · 点面板/状态区以外的任何地方 → 自动收起（document 监听，**非阻塞**，不铺全屏遮罩）
 //   · 默认开「运行日志」；**运行中（分拣/程序/AI 任一 running）自动开日志且不允许整体隐藏**
 //
 // 复用：
-//   · 机器人/摄像头/示教器三片沿用 linkview.js → link.pills 的既有样式与判据（一字未改）；
-//   · 真机链路片的面板内容 = **原样复用 RcReadyCard**（双闸/档位/伺服/报警/急停/程序/点动 +
-//     一键就绪·取消就绪·清除报错）—— 原来独立浮窗 LinkPanel 的内容整体迁入这里。
+//   · 摄像头/示教器两片沿用 linkview.js → link.pills 的既有样式与判据（一字未改）；
+//   · 真机链路片的面板内容 = **原样复用 RcReadyCard**（就绪链）+ 机器人链路块。
 //
 // 灯的判据（全部取自真实字段，取不到就是灰，绝不兜底成绿）见 docs 方案文档 B.3。
-// 状态 → 外观的映射：三片走 src/linkview.js（纯函数，node 可断言）；
-//   日志片走最新一条日志级别；真机链路片走 stores/rcReady.js 的寄存器快照。
+// 状态 → 外观的映射：摄像头/示教器走 src/linkview.js（纯函数，node 可断言）；
+//   日志片走最新一条日志级别；真机链路片走 stores/rcReady.js 的寄存器快照（+ 机器人链路灯）。
 // 数据来自 stores/link.js（唯一 /system/guide 轮询者）等既有 store，不新增轮询者。
 // =====================================================================
 import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from "vue";
 import Icon from "./Icon.vue";
 import RcReadyCard from "./RcReadyCard.vue";
 import { useLinkStore } from "../stores/link.js";
+// ★ 2026-10-11：底部「机器人」片并入「真机链路」片后，真机链路片的灯要**兼顾机器人链路** ——
+//   复用 linkview.js 的 toneOf（与摄像头/示教器同一套"未知绝不回退成绿"的取色口径）。
+import { toneOf } from "../linkview.js";
 import { useCameraStore } from "../stores/camera.js";
 import { useUiStore } from "../stores/ui.js";
 import { useExecStore } from "../stores/exec.js";
@@ -71,11 +81,26 @@ const logTab = computed(() => {
 });
 
 // ---------------------------------------------------------------------
-// 真机链路片：灯 = **就绪链状态**（取自 stores/rcReady.js 的寄存器快照）。
-//   红 = 读不到快照(模拟/离线) / 报警 / 急停 / **非 AUTO·远程档**；
-//   绿 = 完整就绪（伺服+程序+运行+AUTO/远程+无报警+非急停）；
-//   黄 = 其余（有快照、无故障，但伺服未上电或程序未加载 = 中间态）。
+// 真机链路片：灯 = **机器人与就绪链的综合状态**。
+//   ★ 2026-10-11「两个真机链路合并」后，本片要**同时**代表**机器人链路**（原来的
+//     「机器人」片）与**控制器就绪链**（RcReadyCard）—— 取两者里**最差**的那一档：
+//     · 机器人链路（来自 stores/link.js 的 /system/guide）：真实链路=绿；
+//       强制模拟=黄；掉线降级/未连接=红；拿不到=灰。
+//     · 就绪链（来自 stores/rcReady.js 的寄存器快照，原来的判据）：
+//       红 = 读不到快照 / 报警 / 急停 / 非 AUTO·远程档；
+//       绿 = 完整就绪（伺服+程序+运行+AUTO/远程+无报警+非急停）；
+//       黄 = 其余（有快照、无故障，但伺服未上电或程序未加载 = 中间态）。
+//   value：**链路不通先报链路**（链断了谈不上就绪），链路正常才报就绪链结论。
 // ---------------------------------------------------------------------
+const TONE_RANK = { off: 0, ok: 1, warn: 2, err: 3 };
+function worseTone(a, b) { return TONE_RANK[a] >= TONE_RANK[b] ? a : b; }
+
+/** 机器人链路灯（原「机器人」片的取色口径，一字未改）。 */
+function robotTone() {
+  const r = link.robot;
+  if (!r || !r.state) return "off";         // 拿不到链路状态 → 灰（不假装正常）
+  return toneOf(r.level);                    // ok/warn/err/off 由 linkview 统一映射
+}
 function rcTone() {
   if (!rc.ok) return "err";                 // ★ 读不到控制器寄存器快照（模拟/离线/未连接）
   const b = rc.bits || {};
@@ -85,24 +110,38 @@ function rcTone() {
   return "warn";                            // 中间态（正在就绪 / 条件未满足）
 }
 const linkTab = computed(() => {
-  const t = rcTone();
-  const value = !rc.ok ? "读不到"
+  const rt = robotTone();                    // 机器人链路档
+  const ct = rcTone();                       // 控制器就绪链档
+  const t = worseTone(rt, ct);               // 取最差（链路坏了照样能报出来，不丢"机器人灯"）
+  const robot = link.robot || null;
+  const rlab = (robot && robot.label) || "未知";
+  const robotBad = (rt === "err" || rt === "warn");   // 机器人链路不正常 → 先报链路
+  const readyValue = !rc.ok ? "读不到"
     : rc.ready ? "就绪"
       : (rc.servoOn ? "未就绪" : "未上电");
+  const value = robotBad ? rlab : readyValue;
+  const bits = ["机器人 " + rlab, "就绪链 " + readyValue];
   return {
     key: "link", icon: "plug", label: "真机链路",
     value,
     tone: t,
-    // ★ B4：片 value 是"一句话结论"，展开面板（RcReadyCard）里是逐项就绪链 —— 在 title 里点明关系。
-    title: "真机链路 —— " + value + "（展开面板为详细就绪链）" + (rc.error ? "\n" + rc.error : ""),
+    // ★ B4：片 value 是"一句话结论"，展开面板里是「机器人链路 + 逐项就绪链」—— 在 title 里点明关系。
+    title: "真机链路（含机器人链路）—— " + bits.join(" · ")
+      + "\n展开面板：机器人链路（地址/重连）+ 详细就绪链"
+      + (rc.error ? "\n" + rc.error : ""),
   };
 });
 
-/** 五个片：运行日志（最左）→ 机器人/摄像头/示教器（link.pills）→ 真机链路（最右）。 */
-const tabs = computed(() => [logTab.value, ...link.pills, linkTab.value]);
+/** 状态片：运行日志（最左）→ 摄像头/示教器（link.pills，剔除已并入真机链路的「机器人」片）
+ *  → 真机链路（最右）。 */
+const tabs = computed(() => [
+  logTab.value,
+  ...link.pills.filter((p) => p.key !== "robot"),   // ★ 机器人片已并入真机链路片（2026-10-11）
+  linkTab.value,
+]);
 
 // ---------------------------------------------------------------------
-// 五选一：切换 / 收起。
+// 多选一：切换 / 收起。
 // ---------------------------------------------------------------------
 function toggle(k) {
   const next = open.value === k ? "" : k;
@@ -232,35 +271,36 @@ async function claim(id) {
           </div>
         </template>
 
-        <!-- ---------- 真机链路：完整复用 RcReadyCard（内容一字未删） ---------- -->
+        <!-- ---------- 真机链路：机器人链路（原「机器人」片）+ 完整 RcReadyCard ---------- -->
         <template v-else-if="p.key === 'link'">
           <button class="pop-x lp-rc-close" @click="close" aria-label="收起">
             <Icon name="close" :size="13" />
           </button>
+          <!-- ★ 2026-10-11「两个真机链路合并」：原「机器人」片的面板内容**整体迁到这里**，
+               不再单独占一个片（不丢功能：真实链路/强制模拟/掉线降级 + 控制器地址 + 重连）。 -->
+          <div class="lp-robot" :class="robotTone()">
+            <div class="lp-robot-head">
+              <Icon name="plug" :size="13" />
+              <span>机器人链路</span>
+              <span class="lp-robot-val">{{ (link.robot && link.robot.label) || "未知" }}</span>
+            </div>
+            <div class="pop-row" v-if="link.robot && link.robot.host">
+              <span class="k">控制器</span>
+              <span class="v">{{ link.robot.host }}:{{ link.robot.port }}</span>
+            </div>
+            <div class="pop-row" v-if="link.robot && link.robot.simulate">
+              <span class="k">simulate</span><span class="v">{{ link.robot.simulate }}</span>
+            </div>
+            <p class="pop-tip" v-if="link.robot && link.robot.detail">{{ link.robot.detail }}</p>
+            <div class="pop-btns">
+              <button class="mini" :disabled="link.busy" @click="doReconnect">
+                <Icon name="refresh" :size="12" /> 重新连接
+              </button>
+            </div>
+            <p v-if="link.actionMsg" :class="actionErr ? 'pop-err' : 'pop-msg'">{{ link.actionMsg }}</p>
+          </div>
+          <hr class="lp-sep" />
           <RcReadyCard />
-        </template>
-
-        <!-- ---------- 机器人：地址 / 模式 / 重连 ---------- -->
-        <template v-else-if="p.key === 'robot'">
-          <div class="pop-head">
-            <Icon name="plug" :size="14" />
-            <span>机器人链路</span>
-            <button class="pop-x" @click="close"><Icon name="close" :size="13" /></button>
-          </div>
-          <div class="pop-row"><span class="k">状态</span><span class="v">{{ p.value }}</span></div>
-          <div class="pop-row" v-if="p.host">
-            <span class="k">控制器</span><span class="v">{{ p.host }}:{{ p.port }}</span>
-          </div>
-          <div class="pop-row" v-if="p.simulate">
-            <span class="k">simulate</span><span class="v">{{ p.simulate }}</span>
-          </div>
-          <p class="pop-tip">{{ p.detail }}</p>
-          <div class="pop-btns">
-            <button class="mini" :disabled="link.busy" @click="doReconnect">
-              <Icon name="refresh" :size="12" /> 重新连接
-            </button>
-          </div>
-          <p v-if="link.actionMsg" :class="actionErr ? 'pop-err' : 'pop-msg'">{{ link.actionMsg }}</p>
         </template>
 
         <!-- ---------- 摄像头：设备信息 / 重连 / 打开 ---------- -->
@@ -434,6 +474,19 @@ async function claim(id) {
 /* ---- 真机链路面板：RcReadyCard 自带卡片外观，这里只把收起按钮浮到右上 ---- */
 .lp-rc-close { position: absolute; top: 8px; right: 8px; z-index: 2; margin-left: 0; }
 .link-pop .card :deep(h3) { padding-right: 26px; }
+
+/* ★ 2026-10-11：真机链路片里新增的「机器人链路」块（原「机器人」片内容迁入）。
+   顶部一条分隔线把它与下面的 RcReadyCard（就绪链）分开；灯色跟着 robotTone 走。 */
+.lp-robot { padding-right: 26px; }
+.lp-robot-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700;
+  color: var(--txt); padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.lp-robot-head svg { color: var(--accent); }
+.lp-robot-val { margin-left: auto; font-weight: 600; }
+.lp-robot.ok .lp-robot-val { color: var(--ok); }
+.lp-robot.warn .lp-robot-val { color: var(--warn); }
+.lp-robot.err .lp-robot-val { color: var(--err); }
+.lp-robot.off .lp-robot-val { color: var(--muted); }
+.lp-sep { border: none; border-top: 1px solid var(--line); margin: 8px 0; }
 
 /* ---- 窄屏：底栏元素变多，先牺牲文字标签，保住"灯 + 数值"这个信息核心 ---- */
 @media (max-width: 1120px) {

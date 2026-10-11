@@ -11,7 +11,9 @@
 //   · **绝不占用 Space**（Space 已用于语音）；焦点在输入框/文本域时**不拦截**。
 //
 // ★ 棋盘 = B 区 3×3（cell i ↔ B 槽位 B(i+1)），与后端同口径（games/tictactoe.js）。
-//   ★ 复盘态显示的是**复盘进度重建的棋盘**（只放 2D，不动机器人）。
+//   ★「回放」态显示的是**按棋谱逐手重建的棋盘**（只查看、不动机器人）；
+//     「真实复盘」是后端 POST /tictactoe/replay（机器人真的动、逐子搬回原位），
+//     它开始前会退出回放态 —— 于是本浮层始终跟随**真实**棋盘（不编故事）。
 // =====================================================================
 import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { useTicTacToeStore } from "../stores/tictactoe.js";
@@ -152,7 +154,7 @@ onBeforeUnmount(() => {
       <span v-else-if="!ttt.inReplay && canPlay" class="ttt-hint">左摇杆/↑↓←→ 移动 · A/右摇杆↑ 落子</span>
     </div>
 
-    <div v-if="ttt.inReplay" class="ttt-rep">复盘回放（不动机器人）</div>
+    <div v-if="ttt.inReplay" class="ttt-rep">回放（棋谱记录 · 只查看不动机器人）</div>
   </div>
 </template>
 

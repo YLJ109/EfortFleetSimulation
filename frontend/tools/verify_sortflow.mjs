@@ -63,17 +63,19 @@ console.log("== A. 后端 stage 覆盖率（每个 stage 都要能落到某一�
     "未覆盖: " + JSON.stringify(missing));
   ok("确实是抓到了 stage（判据不是恒真）", all.length >= 12, "抓到 " + all.length);
 
-  // ★★ 2026-10-09 实测抓到的漏洞：**真机路径**与**空跑路径**写的 stage 不是同一套！
-  //   真机：`_set(st, stage=label)` → 气路标签 "吸"/"停止吸"/"放"/"停止放"
+  // ★★ 实测抓到的漏洞：**真机路径**与**空跑路径**写的 stage 不是同一套！
+  //   真机：`_set(st, stage=label)` → 气路标签 "吸"/"停止吸"/"放"/"停止放"（反面同理）；
   //   空跑：`stage="%s(空跑)" % stage` → 语义名 "取料·吸(空跑)"
   //   只映射语义名 → **真机跑起来流程条认不出、不跳步**（现场最常看的恰恰是真机）。
-  //   这里直接从后端的 label 字典**解析**出这四个字面量来断言，不手写（手写会漏）。
-  //   注意：字典里键是英文动作名（suck/release/blow/unblow），只有**值**才是阶段文案 ——
-  //   所以要按"含中文"过滤，否则会把 suck/blow 这些键也当成待映射的 stage（第一版就错了）。
-  const labelDict = (api.match(/label = \{([^}]+)\}\.get\(action, action\)/) || [, ""])[1];
-  const labels = [...labelDict.matchAll(/"([^"]+)"/g)].map((m) => m[1])
-    .filter((v) => /[\u4e00-\u9fff]/.test(v));
-  ok(`★ 后端气路标签解析到 ${labels.length} 个（吸/停止吸/放/停止放）`, labels.length >= 4,
+  //   这里直接从后端的标签表**解析**出全部字面量来断言，不手写（手写会漏）。
+  // ★★ 2026-10-11（用户权威位表）：真机气路标签不再是 `_air` 里的 dict，而是收敛到
+  //   `backend/app/services/modbus.py` 的 `VAC_ACTIONS`（8 个动作 → (位值, 中文标签)）。
+  //   只认形如 `"suck": (VAC_BIT_SUCK, "吸")` 的**条目行**，避免把注释里的中文误当标签。
+  const modbusPy = read("../backend/app/services/modbus.py");
+  const vacBlock = (modbusPy.match(/VAC_ACTIONS[^\n]*=\s*\{([\s\S]*?)\n\}/) || [, ""])[1];
+  const labels = [...vacBlock.matchAll(/"(\w+)":\s*\([^,]+,\s*"([^"]+)"\)/g)]
+    .map((m) => m[2]).filter((v) => /[\u4e00-\u9fff]/.test(v));
+  ok(`★ 后端气路标签解析到 ${labels.length} 个（下板 4 + 反面 4）`, labels.length >= 8,
     JSON.stringify(labels));
   const labelMissing = labels.filter((l) => !mapKeys.includes(l));
   ok("★★ 真机路径的气路标签全部有映射（否则真机时流程条不跳步）",
@@ -130,6 +132,11 @@ console.log("== B2. 用**实测抓到的真实 stage 序列**驱动映射（这�
     ["停止吸", "stop_suck"],       // ★ 真机气路标签
     ["放", "blow"],                // ★ 真机气路标签
     ["停止放", "stop_blow"],       // ★ 真机气路标签
+    // ★★ 2026-10-11：双面（一趟两件）真机路径新增的**反面**气路标签（两面独立）
+    ["反面吸", "suck"],
+    ["反面停止吸", "stop_suck"],
+    ["反面放", "blow"],
+    ["反面停止放", "stop_blow"],
     ["回起点", "back"],
     ["收尾·回开始/结束点", "end"],
   ];
@@ -264,6 +271,48 @@ console.log("== G. J6 正面/反面：界面只显示 J6（用户 2026-10-11 反
   // 反证：非 j6-only 的点仍走完整 6 值渲染（coordText 未被整体替换掉）。
   ok("★ 非 j6-only 行仍显示完整坐标（coordText 仍在）",
     /coordText\(ptOf\(sl\.name\)\)/.test(view));
+
+  // ★★ 2026-10-11 本轮反馈：「正反面没有在原地啊，每次回去起点」——
+  //   分拣页这两行的按钮必须叫「切面」（语义=原地只改 J6），不能再叫「到点」（会让人以为整姿态到点）。
+  ok("★ j6-only 行的按钮是「切面」（不是「到点」）",
+    /sl\.j6Only \? "切面" : "到点"/.test(view));
+
+  // ★★ 点位执行页：`J6正面`/`J6反面` 同样**只显示 J6**（后端已把下发转成"原地切面"），
+  //   不把"其余 5 轴写 0"当成坐标列出来（否则界面像在说这 5 轴也参与）。
+  const pv = read("src/components/PointExecView.vue");
+  ok("★ 点位执行页对 J6 正/反面只显示 J6（isJ6Face 分支 + 「仅 J6 有效」标注）",
+    /isJ6Face\(p\)/.test(pv) && /仅 J6 有效/.test(pv));
+  ok("★ 点位执行页这两点的执行按钮标成「切面」",
+    /isJ6Face\(p\) \? "切面" : "执行"/.test(pv));
+}
+
+console.log("");
+console.log("== H. 「当前面」如实显示（取自后端真实字段 state.face，标注为流程推断） ==");
+{
+  // ★★ 2026-10-11（方案 §A）用户要求：分拣页要**如实显示当前面（正面/反面）**。
+  //   三条铁律（本项目口径）：① 数据必须取自**后端真实字段** state.face（由后端 `_move` 每次如实写）；
+  //   ② 现场**没有"面"传感器** → 必须标注为"流程推断"；③ 取不到 → 显示「—/未知」，**绝不编**。
+  ok("★ 当前面数据取自后端 state.face（不另算、不写死）",
+    /st\.value\s*&&\s*st\.value\.face/.test(view), "找不到读取 state.face 的地方");
+  ok("★ 如实映射：front→正面 / back→反面",
+    /f === "front" \? "正面" : f === "back" \? "反面"/.test(view));
+  ok("★ 标注为「流程推断」（现场无面传感器）",
+    /流程推断/.test(view) && /无面传感器/.test(view));
+  ok("★ 模板里有「当前面」一行且取不到时显示「—（未知）」",
+    /当前面/.test(view) && /v-if="faceNow"/.test(view) && /（未知）/.test(view));
+  // 反证：判据不是恒真（随便编一个函数名不应命中）
+  ok("反证：不存在的字段读取判据不会被误命中", !/st\.value\.not_a_real_field/.test(view));
+
+  // ★★ 2026-10-11（本轮 C）固定顺序：拍照**先反面后正面**、放料**先正面后反面**。
+  //   顺序在**后端**（唯一口径函数 `faces_for_capture` / `order_for_drop`）；这里钉住后端确实走了它们，
+  //   而不是在流程里"另排一遍"（那正是最容易排乱、且编译不报的地方）。
+  ok("★ 后端送检拍照面序走唯一口径 faces_for_capture（先反面后正面）",
+    /faces_for_capture/.test(api), "送检拍照面序没走唯一口径");
+  ok("★ 后端落料次序走唯一口径 order_for_drop（先正面后反面）",
+    /order_for_drop/.test(api), "落料次序没走唯一口径");
+  // 反证：旧的"先有效后无效"表达式不应再出现在双面流程里
+  ok("反证：旧的「先有效件再无效件」排序表达式已从双面流程移除",
+    !/\[v for v in verdicts if v\.get\("ok"\)\]\s*\+/.test(api));
 }
 
 console.log("");
