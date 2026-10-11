@@ -602,6 +602,166 @@ def test_dual_face_arrival_face_comes_from_first_capture_source():
 
 
 # ================================================================================
+# ★★ C 位到位校验「与实发同源」回归钉（2026-10-11 · 现场故障修复）
+#   现场故障（用户原话）：
+#     「[分拣] 已停止：未到达 C 检测点（实际偏差 180.0° > 3.0°），不判色」
+#     「[分拣] 阶段：异常·回开始/结束点（C检测)」
+#   根因（**上一轮"省翻面优化"引入的回归**）：`_camera_deviation` 过去拿 **C 检测点自带的
+#     正面姿态**当期望 —— 而"送检到达面 = 首个采集面（= 反面）"上线后，双面流程**在反面**到达
+#     C 位（J6 = 该点自身 ∓180）→ 与"C 点自带正面"恰好差 180° → 把**正常到达**误判成"没到"。
+#   修法（用户选定 **方案 A**）：**校验与实际下发同源** —— 期望 = `_move` 本次**真正下发的 target**。
+#   ★ 安全口径（本次最关键、**绝不放宽**）：只换"期望值"来源，**容差 3.0° 未动、不忽略 J6、
+#     不跳过校验**；机器人**真没到位**（如 J2 偏 10°）**仍然**报"未到达 C 检测点"（见下反证钉）。
+#   全部离线：stub `collector`（喂合成实时姿态），不连真机、不碰相机。
+# ================================================================================
+
+class _SnapCollector:
+    """只提供 `get_latest()` 的假采集器（喂一组合成实时关节）。"""
+
+    def __init__(self, joints):
+        self._j = list(joints)
+
+    def get_latest(self):
+        return {"j%d" % i: float(self._j[i - 1]) for i in range(1, 7)}
+
+
+# 期望目标（= 某次到 C 位**实发**的 6 值）。J6 正面 30 / 反面 -150（相差整 180°，代表"反面到达"）。
+_CAM_EXPECT_BACK = [10.0, 20.0, 30.0, 40.0, 50.0, -150.0]
+_CAM_EXPECT_FRONT = [10.0, 20.0, 30.0, 40.0, 50.0, 30.0]
+
+
+def test_camera_deviation_back_face_arrival_is_zero(monkeypatch):
+    """★★ 修正钉：**到达面=反面** → 期望取**实发 target** → 偏差≈0，**不得**报"未到达"。"""
+    from app.api import sorting as API
+
+    monkeypatch.setattr(API, "collector", _SnapCollector(_CAM_EXPECT_BACK))
+    dev = API._camera_deviation(_CAM_EXPECT_BACK)
+    assert dev is not None and dev < 1e-9, "反面到达时偏差必须≈0（不再误报 180°），实测=%r" % dev
+    assert not (dev > API.CAM_ARRIVE_TOL_DEG), "反面正常到达不得被判'未到达 C 检测点'"
+
+
+def test_camera_deviation_old_expect_would_be_180(monkeypatch):
+    """★ 根因复现：若拿 **C 点自带正面姿态**当期望，反面到达会差 180° —— 故必须同源。"""
+    from app.api import sorting as API
+
+    monkeypatch.setattr(API, "collector", _SnapCollector(_CAM_EXPECT_BACK))
+    old_dev = API._camera_deviation(_CAM_EXPECT_FRONT)      # 旧期望：C 点自带正面
+    new_dev = API._camera_deviation(_CAM_EXPECT_BACK)        # 新期望：实发 target
+    assert abs(old_dev - 180.0) < 1e-9, "旧期望（C 点自带正面）在反面到达时应差 180°（根因）"
+    assert new_dev < API.CAM_ARRIVE_TOL_DEG, "新期望（实发 target）在反面到达时偏差应≈0"
+
+
+def test_camera_deviation_still_flags_true_miss(monkeypatch):
+    """★★ 反证钉（必须有）：机器人**真没到位**（J2 偏 10°）→ **仍然**报"未到达 C 检测点"。
+
+    证明校验**没有被改松** —— 只换期望值来源，容差与判据一字未改。
+    """
+    from app.api import sorting as API
+
+    missed = list(_CAM_EXPECT_BACK)
+    missed[1] += 10.0                                        # J2 偏 10°
+    monkeypatch.setattr(API, "collector", _SnapCollector(missed))
+    dev = API._camera_deviation(_CAM_EXPECT_BACK)
+    assert dev is not None, "读到实时姿态时必须给出偏差（不能借口'读不到'放行）"
+    assert abs(dev - 10.0) < 1e-9, "偏差应≈10°（J2 差 10°），实测=%r" % dev
+    assert dev > API.CAM_ARRIVE_TOL_DEG, \
+        "真没到位必须仍 > 容差 → 仍会报'未到达 C 检测点'（校验不许被改松）"
+
+
+def test_camera_deviation_front_face_arrival_is_zero(monkeypatch):
+    """★ 零回归钉：**正面到达**（单件/正常分拣）→ 期望=C 点自带姿态 → 偏差≈0（行为不变）。"""
+    from app.api import sorting as API
+
+    monkeypatch.setattr(API, "collector", _SnapCollector(_CAM_EXPECT_FRONT))
+    dev = API._camera_deviation(_CAM_EXPECT_FRONT)
+    assert dev is not None and dev < 1e-9, "正面到达偏差必须≈0"
+
+
+def test_camera_deviation_no_snapshot_or_bad_expect_allows(monkeypatch):
+    """★ 零回归钉：读不到实时姿态 / 期望不可用 → 返回 None（调用方放行，不误停）—— 同旧行为。"""
+    from app.api import sorting as API
+
+    class _Empty:
+        def get_latest(self):
+            return None
+
+    monkeypatch.setattr(API, "collector", _Empty())
+    assert API._camera_deviation(_CAM_EXPECT_BACK) is None
+    monkeypatch.setattr(API, "collector", _SnapCollector(_CAM_EXPECT_BACK))
+    assert API._camera_deviation(None) is None, "期望不可用 → 放行（同旧行为，不误停）"
+    assert API._camera_deviation([1.0, 2.0]) is None, "期望非 6 值 → 放行"
+
+
+def test_camera_arrive_tolerance_unchanged():
+    """★★ 安全钉：到位容差**未动**（仍是 3.0°）—— 修法只换期望值来源，绝不放大容差。"""
+    from app.api import sorting as API
+
+    assert API.CAM_ARRIVE_TOL_DEG == 3.0, "到位容差被改了（本修复禁止改容差）"
+
+
+def test_move_returns_exactly_what_it_dispatches(monkeypatch):
+    """★ 行为钉：`_move` 返回的 target == 真正传给 `motion.command` 的目标（严格相等）。"""
+    from app.api import sorting as API
+
+    class _Ctx:
+        def wait_pause(self):
+            return False
+
+        def cancelled(self):
+            return False
+
+    class _Row:
+        def __init__(self, joints):
+            self.joints = joints
+
+    monkeypatch.setattr(API, "_live_joints_or_none",
+                        lambda: [11.0, 22.0, 33.0, 44.0, 55.0, 66.0])
+    monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
+    cap = {}
+
+    def _fake_command(joints, speed, dwell=0, abort_check=None):
+        cap["joints"] = [float(v) for v in joints]
+        return {"ok": True}
+
+    monkeypatch.setattr(API.motion, "command", _fake_command)
+    # C 检测点 + face=back → 期望返回值 = "实发那 6 值"（二者必须逐字相同）
+    pmap = {S.CAMERA_POINT: _Row([1.0, 2.0, 3.0, 4.0, 5.0, 30.0])}
+    ret = API._move(_Ctx(), pmap, S.CAMERA_POINT, 5, False, "送检", face=S.FACE_BACK)
+    assert cap.get("joints") is not None, "应发生了一次下发"
+    assert ret == cap["joints"], "`_move` 返回的目标必须与实发逐字相同（同源前提）"
+    assert len(ret) == 6
+
+
+def test_camera_check_is_same_source_as_dispatch_source():
+    """★★ 同源源码钉：C 位到位校验的期望必须来自**实发那次 `_move` 的返回 target**。
+
+    · `_move` 必须**返回**本次下发的 target；
+    · 两个调用点（单件 / 双面）都必须把该返回值传给 `_camera_deviation`；
+    · `_camera_deviation` 内部**不许**再出现 `_joints_of(pmap, cam)`（拿点位自带姿态当期望）。
+    """
+    from app.api import sorting as API
+
+    assert "return [float(v) for v in target]" in inspect.getsource(API._move), \
+        "`_move` 必须返回本次真正下发的 target（校验与实发同源的前提）"
+
+    single = inspect.getsource(API._run_sorting)
+    dual = inspect.getsource(API._run_sorting_dual_face)
+    assert 'cam_target = _move(ctx, pmap, cam, speed, dry, "送检")' in single, \
+        "单件送检必须接住 `_move` 返回的实发目标"
+    assert "_camera_deviation(cam_target)" in single, "单件 C 位校验必须用实发目标当期望"
+    assert 'cam_target = _move(ctx, pmap, cam, speed, dry, "送检", face=arrival_face)' in dual, \
+        "双面送检必须接住 `_move` 返回的实发目标（按到达面解算）"
+    assert "_camera_deviation(cam_target)" in dual, "双面 C 位校验必须用实发目标当期望"
+    assert "_camera_deviation(pmap, cam)" not in single \
+        and "_camera_deviation(pmap, cam)" not in dual, \
+        "校验又退回'拿点位自带姿态当期望'（与实发不同源 → 反面到达会误报 180°）"
+
+    dev_src = inspect.getsource(API._camera_deviation)
+    assert "_joints_of(pmap, cam)" not in dev_src, \
+        "`_camera_deviation` 不许再拿 C 点自带正面姿态当期望（同源是硬要求）"
+
+
+# ================================================================================
 # ★★ J6 正/反面**示教点位白名单**回归钉（2026-10-10 用户口径）
 #   用户："在「C 区 与 开始/结束点」分组里再加两个可录入的点，记 J6 工装的正面/反面；
 #         两个都是一个参数，只是 J6 的" → 需要能存点/到点/删除，但 **38 不能动**。

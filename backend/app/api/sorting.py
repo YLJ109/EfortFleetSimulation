@@ -77,19 +77,44 @@ register_scene_source("sorting", _scene_state)
 #         用轮换占位色把"点位 + 选槽 + 落料"整套逻辑走通（状态里标 dry）；
 #      2) 真实下发 → 先校验"确实到了 C 检测点"（关节偏差容差），
 #         没到就如实报"未到达 C 检测点"，而不是含糊地报"检测不到"。
+#   ★★ 2026-10-11 修复：该到位校验必须**与实发同源** —— 期望目标取 `_move` 本次真正下发的
+#      target（按到达面解算），**绝不再拿 C 点自带的正面姿态当期望**（那会把"反面到达"误报成
+#      偏差 180°）。容差 `CAM_ARRIVE_TOL_DEG` 未动；真没到位仍如实报"未到达"。详见 `_camera_deviation`。
 _DRY_PLACEHOLDER_COLORS = ("红", "绿", "蓝")
 CAM_ARRIVE_TOL_DEG = 3.0        # 判色前的到位容差（度）
 
 
-def _camera_deviation(pmap: Dict[str, object], cam: str) -> Optional[float]:
-    """当前实际姿态与 C 检测点的**最大关节偏差（度）**；读不到实时姿态返回 None。"""
+def _camera_deviation(expect: Optional[Sequence[float]]) -> Optional[float]:
+    """当前实际姿态与**本次到达 C 点实际下发的目标**的**最大关节偏差（度）**；读不到返回 None。
+
+    ★★ 2026-10-11 修复（现场误报警「未到达 C 检测点（实际偏差 180.0° > 3.0°），不判色」）：
+      过去这里把 **C 检测点自带的正面 6 值**（旧实现用 `_joints_of` 取该点自带姿态）当成期望 ——
+      而"送检到达面 = 首个采集面（= 反面）"这条**省翻面优化**（上一轮上线）之后，
+      双面流程会**在反面**到达 C 位（J6 = 该点自身 J6 ∓180）→ 与"C 点自带的正面"**恰好差 180°**
+      → 校验把**正常到达**误判成"没到" → 停 + "异常·回开始/结束点"。
+      ⇒ 根因 = **期望目标与实发不同源**。改为**结构性同源**：期望 = `_move` **本次真正下发的
+        target**（由 `_move` 返回 —— 它已按与实发**同一个 face** 经 `S.resolve_target_joints`
+        解算过）。正面到达时它就是 C 点自带值（**与旧行为逐字一致、零回归**），
+        反面到达时它就是 ∓180 那一侧（偏差≈0，不再误报）。
+
+    ★ **校验绝不放宽**（本次最关键的安全属性）：
+      · 到达面=反面 → 期望 J6 = ∓180 → 偏差≈0（**不再误报 180°**）；
+      · 机器人**真没到位**（例如 J2 差 10°、整姿态偏）→ 偏差照报 > 容差 → **仍然**"未到达"；
+      · 只换"期望值"这一个来源，**容差 `CAM_ARRIVE_TOL_DEG` 一个字节未动**
+        （**不**忽略 J6、**不**放大容差、**不**跳过校验）。
+
+    ★ 读不到实时姿态（`collector` 无快照）或 expect 不可用 → 返回 None → 调用方**放行**
+      （与旧行为一致：没有实时数据时不下"没到"的结论，避免误停）。
+    """
     snap = collector.get_latest()
-    if not snap:
+    if not snap or expect is None:
         return None
     try:
         live = [float(snap["j%d" % i]) for i in range(1, 7)]
-        tgt = _joints_of(pmap, cam)
-    except Exception:
+        tgt = [float(v) for v in expect]
+    except Exception:  # noqa: BLE001 —— 快照/目标形状异常 → 当作拿不到，放行
+        return None
+    if len(tgt) != 6:
         return None
     return max(abs(a - b) for a, b in zip(live, tgt))
 
@@ -393,7 +418,7 @@ def _live_joints_or_none() -> Optional[List[float]]:
     return None
 
 
-def _move(ctx, pmap, name, speed, dry, stage, st=None, face=S.FACE_FRONT) -> None:
+def _move(ctx, pmap, name, speed, dry, stage, st=None, face=S.FACE_FRONT) -> List[float]:
     """走一个示教点位（写目标 + 触发位 → 常驻 210 执行 MJOINT）。
 
     ★★ 2026-10-11 **face-aware（本轮修根因）**：不再无条件把该点自带的 6 轴整姿态下发 ——
@@ -408,6 +433,9 @@ def _move(ctx, pmap, name, speed, dry, stage, st=None, face=S.FACE_FRONT) -> Non
       如果都不是调整接近哪个点就那个」）：去**原料位**时**保持当前面、不旋转** ——
       J6 沿用当前面（正面=该点自身 J6 / 反面=该点自身 J6∓180 / 判不出→取更近的一面）。
       `state.face` 如实记录**实际保持的面**（`S.resolve_face`），绝不把 keep 谎报成正面。
+    ★★ 2026-10-11 **返回本次真正下发的 target**（`-> List[float]`）：供调用方做**同源校验**
+      （如"送检是否到达 C 点"）—— 校验要用**实发值**当期望，不能再自己拿点位自带姿态推一遍
+      （那正是"反面到达被误报 180°"的根因，见 `_camera_deviation`）。空跑（dry）也返回该值。
     """
     if ctx.wait_pause():
         raise _Stop("已被停止", stage)
@@ -424,7 +452,7 @@ def _move(ctx, pmap, name, speed, dry, stage, st=None, face=S.FACE_FRONT) -> Non
     face_rec = S.resolve_face(face, j[5], (_cur[5] if _cur else None))
     if dry:
         _set(st, stage=stage, last_point=name, face=face_rec)
-        return
+        return [float(v) for v in target]
     ok, reason, _snap = guard_check()
     if not ok:
         raise _Stop("安全围栏互锁：%s" % reason, stage)
@@ -433,6 +461,7 @@ def _move(ctx, pmap, name, speed, dry, stage, st=None, face=S.FACE_FRONT) -> Non
     _set(st, stage=stage, last_point=name, face=face_rec)
     if not r.get("ok"):
         raise _Stop("运动到「%s」失败：%s" % (name, r.get("error")), stage)
+    return [float(v) for v in target]
 
 
 # ★★ 2026-10-11：动作 × 面 → 210 触发位动作名（**唯一映射口**）。
@@ -850,7 +879,10 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
             #    旧实现是抬起来就「停止吸」，靠杯内残余负压吊着件飞一路 ——
             #    路上要是掉了，判色/落料都会莫名其妙；现在负压阀一直开着，件才真被吸住。
             _move(ctx, pmap, a_slot + "上", speed, dry, "抬起")
-            _move(ctx, pmap, cam, speed, dry, "送检")
+            # ★ 送检返回**本次真正下发的目标**：下面"是否到达 C 点"的校验要用它当期望
+            #   （与实发同源，见 `_camera_deviation` 的 ★★ 说明）。单件路径到达面=正面 →
+            #   与"C 点自带姿态"一致 → 与旧行为逐字一致（零回归）。
+            cam_target = _move(ctx, pmap, cam, speed, dry, "送检")
             # 3) 停顿 + 判色
             _set(stage="停顿")
             if ctx.sleep(int(body.dwell_ms) / 1000.0):
@@ -867,7 +899,9 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
             else:
                 # ★ 真实下发：先确认真的到了 C 检测点 —— 没到就判色等于瞎判，
                 #   而且失败原因会被说成"检测不到"，把人往相机上带偏。
-                dev = _camera_deviation(pmap, cam)
+                #   ★★ 期望值取**实发那次的目标**（`cam_target`）→ 与实发**结构性同源**：
+                #     不再拿 C 点自带正面姿态硬比（那会把"反面到达"误报成偏差 180°）。
+                dev = _camera_deviation(cam_target)
                 if dev is not None and dev > CAM_ARRIVE_TOL_DEG:
                     raise _Stop("未到达 C 检测点（实际偏差 %.1f° > %.1f°），不判色"
                                 % (dev, CAM_ARRIVE_TOL_DEG), "判色", idx)
@@ -1155,7 +1189,11 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
             #   ★ `_set_cam_face`（见下）依旧"面变了才摆 J6"：到达面 == 首组帧面 → 首组帧不重复下发。
             faces = S.faces_for_capture(len(trip))
             arrival_face = _face_of_slot(faces[0]) if faces else S.FACE_FRONT
-            _move(ctx, pmap, cam, speed, dry, "送检", face=arrival_face)
+            # ★★ 送检返回**本次真正下发的目标**（已按 `arrival_face` 解算）：
+            #   下面"是否到达 C 点"的校验要用它当期望 —— **校验与实发结构性同源**。
+            #   两件趟 arrival_face=反面 → 期望 J6 = ∓180 那一侧 → 偏差≈0（不再误报 180°）；
+            #   单件趟 arrival_face=正面 → 与 C 点自带姿态一致 → 零回归。
+            cam_target = _move(ctx, pmap, cam, speed, dry, "送检", face=arrival_face)
             _set(stage="停顿")
             if ctx.sleep(int(body.dwell_ms) / 1000.0):
                 stop_reason = "已被停止"; phase = "cancelled"; break
@@ -1170,7 +1208,10 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
                 log.info("空跑/未开双闸（双面）：跳过判色，占位色=%s",
                          [v["color"] for v in verdicts])
             else:
-                dev = _camera_deviation(pmap, cam)
+                # ★★ 期望值取**实发那次的目标**（`cam_target`，按 `arrival_face` 解算）
+                #   → 与实发**结构性同源**：到达面=反面时期望 J6=∓180、偏差≈0（不再误报 180°）；
+                #   真没到位（如 J2 偏 10°）仍 > 容差 → 照报"未到达 C 检测点"（校验未放宽）。
+                dev = _camera_deviation(cam_target)
                 if dev is not None and dev > CAM_ARRIVE_TOL_DEG:
                     raise _Stop("未到达 C 检测点（实际偏差 %.1f° > %.1f°），不判色"
                                 % (dev, CAM_ARRIVE_TOL_DEG), "判色", done + 1)
