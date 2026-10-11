@@ -257,8 +257,10 @@ console.log("== G. J6 正面/反面：界面只显示 J6（用户 2026-10-11 反
     /v-if="sl\.j6Only"/.test(view));
   ok("★ 有 J6-only 取值函数（j6Text，只取 joints[5]）",
     /function j6Text\(/.test(view) && /j\[5\]/.test(view));
-  ok("★ 明确标注「仅 J6 有效，其余轴不使用」",
-    /仅 J6 有效，其余轴不使用/.test(view));
+  // ★ 2026-10-11（方案 S2）：原来"只用 J6 / 其余轴不用 / J1~J5 保持实时姿态"在同一张卡讲了
+  //   三遍（坐标行内 + 两段说明）。现坐标行只留数值，语义统一收敛到卡底**一段**说明 —— 断言随之收敛。
+  ok("★ 卡底一段说明「只用 J6；翻转时 J1~J5 保持当前实时姿态」",
+    /只用 J6/.test(view) && /当前实时姿态/.test(view));
   // 反证：非 j6-only 的点仍走完整 6 值渲染（coordText 未被整体替换掉）。
   ok("★ 非 j6-only 行仍显示完整坐标（coordText 仍在）",
     /coordText\(ptOf\(sl\.name\)\)/.test(view));

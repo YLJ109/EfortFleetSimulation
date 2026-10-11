@@ -200,7 +200,7 @@ function _failedSteps() {
         </button>
         <!-- ★ 清除示教器（控制器）报错：只清报警，不替「一键就绪」做上电/加载 -->
         <button class="clear-err" :disabled="!canControl || rc.busy" @click="exec.clearError()"
-                title="清掉示教器（控制器）报警；不含伺服上电/加载，清完需重新一键就绪">
+                title="清控制器报警（不含上电 / 加载，清完需重新一键就绪）">
           <Icon name="eraser" :size="14" /> 清除报错
         </button>
       </div>
@@ -217,7 +217,7 @@ function _failedSteps() {
       </div>
 
       <p v-if="rc.jogTrig" class="small" style="margin-top:6px">
-        检测到「点动触发位」仍为 1（上一发点动未收尾）：点「一键就绪」会**先撤销触发位**再继续。
+        点动触发位仍为 1（上一发未收尾）：一键就绪会先撤触发再继续。
       </p>
 
       <p v-if="!canControl" class="small">

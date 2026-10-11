@@ -359,12 +359,17 @@ onMounted(() => {
     </div>
 
     <!-- ===== 实时信息卡 ===== -->
+    <!-- ★ St3：实时信息只在**管理员**时加载 —— 非管理员时不再"整块消失"（会造成同一页不同角色
+         布局差异大、像是少了一块）。这里明确给一行占位说明。 -->
     <div v-if="liveCards.length" class="stg-cards">
       <div v-for="c in liveCards" :key="c.label" class="stg-card" :class="c.level">
         <div class="stg-card-h"><Icon :name="c.icon" :size="14" /> {{ c.label }}</div>
         <div class="stg-card-m">{{ c.main }}</div>
         <div class="stg-card-s">{{ c.sub }}</div>
       </div>
+    </div>
+    <div v-else-if="!st.isAdmin" class="stg-msg">
+      <Icon name="lock" :size="14" /> 实时信息（链路 / 相机 / 数据库 / 真实下发）需<b>管理员</b>权限，当前{{ st.role ? "为操作员" : "未授权" }}。
     </div>
 
     <!-- ===== 分组导航 ===== -->
@@ -693,9 +698,11 @@ onMounted(() => {
 .stg-card-s { font-size: 11px; color: var(--muted); margin-top: 3px; word-break: break-all; }
 
 /* ---- 分组导航 ---- */
+/* ★ St2：sticky top 从 -14px 改为 0 —— 容器 .stg 有 padding:10px，原先吸附点为负，
+   滑到顶时会盖住上一张卡的底边。改为相对滚动容器顶对齐。 */
 .stg-nav { display: flex; flex-wrap: wrap; gap: 6px; padding: 9px 10px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
-  position: sticky; top: -14px; z-index: 3; }
+  position: sticky; top: 0; z-index: 3; }
 .stg-nav-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 9px;
   font-size: 11px; border-radius: 20px; color: var(--muted);
   border: 1px solid var(--line); background: var(--panel2); cursor: pointer; }
@@ -718,10 +725,14 @@ onMounted(() => {
 .stg-danger { border-color: var(--err-line); }
 
 /* ---- 字段 ---- */
+/* ★ St1：弱化"卡片套卡片" —— 每个字段原来都是独立小盒子（边框+底色+圆角），一屏几十个框很碎。
+   改为**行分隔**：去掉整圈边框/底色，只留左侧色条（dirty 时点亮作脏标记）+ 底部行分隔线，
+   分组卡外层保留。 */
 .stg-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 10px; }
-.stg-field { border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); padding: 10px; }
+.stg-field { border-left: 3px solid transparent; border-bottom: 1px solid var(--line);
+  padding: 10px 2px 10px 8px; }
 .stg-field.locked { opacity: .68; }
-.stg-field.dirty { border-color: var(--accent-line); }
+.stg-field.dirty { border-left-color: var(--accent); }
 .stg-f-head { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 .stg-f-label { font-size: 12px; color: var(--txt); font-weight: 600; }
 .stg-f-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;

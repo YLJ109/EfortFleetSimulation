@@ -53,6 +53,9 @@ onBeforeUnmount(() => { highlightJoint(-1); robot.setDemo(false); });
         <CameraPanel />
       </template>
     <div class="side-cards">
+      <!-- ★ R1：本页是只读监控，右栏只有关节角 / TCP 两张读数卡，相对其它页偏窄。
+           这里显式加一行"本页能做什么"的指路（不新增任何按钮/装饰），补足信息与高度。 -->
+      <p class="small muted">本页为<b>只读监控</b>：示教 / 点动 / 执行请到「点位执行」页；点动前先到底栏「真机链路」一键就绪。</p>
       <!-- 关节角 + 末端 TCP：只读读数。连接状态已整合到底栏「机器人链路」状态灯，
            这里不再重复展示（重连动作也从底部状态灯里点开）。 -->
       <RobotParamsCard :connection="false" />

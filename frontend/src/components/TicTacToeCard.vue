@@ -272,17 +272,18 @@ onBeforeUnmount(() => {
   font-size: 12px; color: var(--muted); cursor: pointer; }
 .dry-toggle b { color: var(--txt); }
 .btns { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+/* ★ S12：改用语义令牌（--warn* / --err*），不再硬编码 rgba/#hex */
 .pause-btn { display: inline-flex; align-items: center; gap: 5px;
   padding: 6px 10px; border-radius: 8px; cursor: pointer;
-  border: 1px solid rgba(255, 176, 32, .45); color: #ffc861;
-  background: rgba(255, 176, 32, .10); font-family: var(--font); font-size: 13px; font-weight: 600; }
-.pause-btn:hover:not(:disabled) { background: rgba(255, 176, 32, .18); }
+  border: 1px solid var(--warn-line); color: var(--warn-fg);
+  background: var(--warn-soft); font-family: var(--font); font-size: 13px; font-weight: 600; }
+.pause-btn:hover:not(:disabled) { filter: brightness(1.18); }
 .pause-btn:disabled { opacity: .5; cursor: not-allowed; }
 .stop-btn { display: inline-flex; align-items: center; gap: 5px;
   padding: 6px 10px; border-radius: 8px; cursor: pointer;
-  border: 1px solid rgba(224, 82, 82, .5); color: #ffb4b4;
-  background: rgba(224, 82, 82, .12); font-family: var(--font); font-size: 13px; font-weight: 600; }
-.stop-btn:hover:not(:disabled) { background: rgba(224, 82, 82, .2); }
+  border: 1px solid var(--err-line); color: var(--err-fg);
+  background: var(--err-soft); font-family: var(--font); font-size: 13px; font-weight: 600; }
+.stop-btn:hover:not(:disabled) { filter: brightness(1.18); }
 .stop-btn:disabled { opacity: .5; cursor: not-allowed; }
 .mini-btn { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px;
   font-size: 12px; border-radius: 6px; }

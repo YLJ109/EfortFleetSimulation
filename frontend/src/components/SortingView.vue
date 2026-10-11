@@ -127,11 +127,18 @@ const missing = computed(() => new Set((chk.value && chk.value.missing) || []));
 // ★ 可选附加点（不在 38 个体检名单里、允许缺失）：判定"是否已示教"**不能**用 38 的 missing，
 //   否则它们会恒为"已示教"（绿点常亮 /「到点」可点）—— 那是界面在编故事。
 //   改为看点位库(exec.points)里是否真有这个名字（存过点才有）。
-//   ★ 对 38 个必备点，下面的 isTaught 表达式与改动前**逐字一致**。
+// ★★ P0 修复（2026-10-11）：38 个必备点的判据**必须要求体检已就绪**。
+//   原实现 `!!(chk && chk.ok) || !missing.has(name)`：当体检未返回（首屏未加载 / `/sorting/points`
+//   失败 → chk 为 null）时，`missing` 是空集 → 对**全部**点位返回 true → 绿点全亮、
+//   「到点/删除」按钮被判为可点 —— 界面在谎称"已示教"。这与本页"缺一个都不允许启动"的口径直接矛盾。
+//   现在：体检没拿到（chk 为 null）一律按"未知/未示教"呈灰点、按钮禁用；体检 OK 才全绿，
+//   体检返回且缺项时只对已有项呈绿。（检中有体检失败文案 chkErr 提示，不会让用户以为"点位都没了"。）
 const OPTIONAL_POINTS = new Set(["J6正面", "J6反面"]);
-const isTaught = (name) => (OPTIONAL_POINTS.has(name)
-  ? !!ptOf(name)
-  : (!!(chk.value && chk.value.ok) || !missing.value.has(name)));
+const isTaught = (name) => {
+  if (OPTIONAL_POINTS.has(name)) return !!ptOf(name);   // 可选点看点位库是否真存过
+  if (!chk.value) return false;                          // ★ 未体检 → 未知，不得当作已示教
+  return !!chk.value.ok || !missing.value.has(name);
+};
 
 // ★ 快速分拣（双面）必须的两个可录入点 —— 名字与后端一致的唯一口径：
 //   services/sorting.py 的 OPTIONAL_EXTRA_POINTS / api/sorting.py 的 DUAL_FACE_FLIP_POINT。
@@ -700,10 +707,9 @@ watch(() => rc.readyTick, (n) => {
             <Icon name="play" :size="13" /> {{ running ? "运行中…" : "开始" }}
           </button>
           <!-- ★ 暂停/继续（2026-10-09 用户需求）：原地冻结当前分拣（步边界生效），可继续。
-               与「停止」语义区分：暂停=冻结可续；停止=取消+回开始/结束点；
-               想让机器人**立刻**停住 → 停止/急停，不是暂停。 -->
+               与「停止」语义区分见卡片下方那一行常显说明（此处 title 只留动作名，不重复）。 -->
           <button v-if="running || paused" class="pause-btn" :disabled="pauseBusy" @click="togglePause"
-                  :title="paused ? '从暂停处继续分拣' : '在当前动作结束后暂停（等待步立即冻结）；想让机器人立刻停住请用停止/急停'">
+                  title="暂停 / 继续">
             <Icon :name="paused ? 'play' : 'pause'" :size="13" /> {{ paused ? "继续" : "暂停" }}
           </button>
           <button class="rec-on" :disabled="!running && !busy" @click="stop">
@@ -748,12 +754,12 @@ watch(() => rc.readyTick, (n) => {
         <div v-if="dryRun || (st && st.dry_run)" class="warn-badge">
           <Icon name="alert" :size="12" /> 空跑：方块仅示意，机器人不动
         </div>
-        <p v-if="handHold" class="small muted" style="margin-top:5px">
-          <Icon name="pin" :size="12" /> 当前手上有件（按流程推断：取料吸合已完成）——
-          现场无真空反馈，不代表真的吸住了。
-        </p>
-        <p v-if="suspect" class="small err" style="margin-top:5px">
-          <Icon name="alert" :size="12" /> 疑似没取到：该方块已画回 A 格并标红（不显示夹持）。
+        <!-- ★ S5：手上夹件 / 疑似没取到都是"流程推断"，原来各占一段常驻小字。
+             现合并为**一个状态条**（正常=有件 / 异常=疑似没取到，最多两类）。 -->
+        <p v-if="handHold || suspect" class="small" :class="suspect ? 'err' : 'muted'" style="margin-top:5px">
+          <Icon :name="suspect ? 'alert' : 'pin'" :size="12" />
+          <template v-if="suspect">疑似没取到：该方块已画回 A 格并标红（不显示夹持）。</template>
+          <template v-else>手上有件（按流程推断：取料吸合已完成）—— 现场无真空反馈，不代表真的吸住了。</template>
         </p>
         <p v-if="blocksWarn.length" class="small muted" style="margin-top:5px">
           未画：{{ blocksWarn.slice(0, 4).join("；") }}<span v-if="blocksWarn.length > 4"> 等
@@ -763,7 +769,8 @@ watch(() => rc.readyTick, (n) => {
 
       <div class="card">
         <h3><Icon name="activity" :size="15" /> 运行状态
-          <span class="h3-sub">{{ running ? "运行中" : "空闲" }}</span>
+          <!-- ★ S11：视口 HUD 已报「运行中/空闲」，此处改报进度，避免两处同义 -->
+          <span class="h3-sub">{{ piece }}/{{ total }} 件</span>
         </h3>
         <div class="row"><span class="k">阶段</span><span class="v">{{ stage }}</span></div>
         <div class="row"><span class="k">进度</span>
@@ -780,8 +787,9 @@ watch(() => rc.readyTick, (n) => {
         </div>
         <div class="row"><span class="k">落料槽位</span><span class="v">{{ targetNow || "—" }}</span></div>
         <div v-if="judgeOff" class="small muted" style="margin-top:6px">
-          <Icon name="info" :size="12" /> 本次<b>不判色</b>：空跑或双闸未开时方块不会到 C 区，
-          故跳过相机判定、也不会因"检测不到"停止（仅验证点位与选槽逻辑）。
+          <!-- ★ S3：这里只讲"本次不判色"的**后果**；"空跑不下发运动"已由上方开关 label 与
+               3D 卡空跑角标各自表达，不再重复第三遍。 -->
+          <Icon name="info" :size="12" /> 本次<b>不判色</b>：方块不会到 C 区，跳过相机判定，也不会因"检测不到"停止。
         </div>
         <div class="cols">
           <span v-for="c in placement" :key="c.color" class="colstat">
@@ -928,15 +936,16 @@ watch(() => rc.readyTick, (n) => {
         <div class="coord wide" v-for="sl in extraSlots" :key="'c-' + sl.name"
              :title="sl.name + ' · ' + (sl.j6Only ? j6Text(ptOf(sl.name)) : coordText(ptOf(sl.name)))">
           <b>{{ sl.name }}</b>
-          <!-- ★ J6 正面/反面：**只渲染 J6**（其余轴不参与翻转）；其余点位照旧显示完整 6 值。 -->
+          <!-- ★ J6 正面/反面：**只渲染 J6**（其余轴不参与翻转）；其余点位照旧显示完整 6 值。
+               ★ S2：原来"只用 J6 / 其余轴不用 / J1~J5 保持实时姿态"在本卡讲了三遍，
+                 现坐标行只留数值，语义统一收敛到卡片底部那**一段**说明。 -->
           <template v-if="sl.j6Only">
-            {{ j6Text(ptOf(sl.name)) }}<span class="muted">（仅 J6 有效，其余轴不使用）</span>
+            {{ j6Text(ptOf(sl.name)) }}
           </template>
           <template v-else>{{ coordText(ptOf(sl.name)) }}</template>
         </div>
         <p class="small muted">「开始/结束点」是一个点：一轮开始先去、结束与异常都回这里。</p>
-        <p class="small muted">J6 正面/反面<b>只用 J6</b>（其余轴不使用）：双面分拣在这两个点之间切换 J6，</p>
-        <p class="small muted">靠「同一位置、不同 J6」覆盖左右两侧；翻转下发时 J1~J5 保持机器人<b>当前实时姿态</b>。</p>
+        <p class="small muted">J6 正面/反面<b>只用 J6</b>；翻转时 J1~J5 保持机器人<b>当前实时姿态</b>。</p>
       </div>
     </template>
 
@@ -959,7 +968,7 @@ watch(() => rc.readyTick, (n) => {
 /* 分拣模式分段控件：复用全局 .srt-tabs/.srt-tab 的选中态视觉，只把它压成行内尺寸
    （默认那两个 tab 是 flex:1 满宽，放进参数行里会撑开）。 */
 .mode-seg { flex: none; }
-.mode-seg .srt-tab { flex: none; padding: 5px 14px; font-size: 12.5px; }
+.mode-seg .srt-tab { flex: none; padding: 5px 10px; font-size: 12.5px; }
 .mode-seg .srt-tab:disabled { opacity: .5; cursor: not-allowed; }
 .card { border: 1px solid var(--line); border-radius: 10px; padding: 10px;
   background: var(--panel); }
@@ -997,14 +1006,15 @@ watch(() => rc.readyTick, (n) => {
   border: 1px solid var(--line); background: var(--panel); color: var(--txt); }
 .unit { color: var(--muted); font-size: 12px; }
 .btns { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
-/* ★ 暂停/继续：琥珀色调（区别于开始=青、停止=红）—— 现场一眼分清三态 */
+/* ★ 暂停/继续：琥珀色调（区别于开始=青、停止=红）—— 现场一眼分清三态。
+   ★ S12：改用语义令牌（--warn*），不再硬编码 rgba/#hex。 */
 .pause-btn {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 7px 10px; border-radius: 8px; cursor: pointer;
-  border: 1px solid rgba(255,176,32,.45); color: #ffc861;
-  background: rgba(255,176,32,.10); font-family: var(--font); font-size: 13px; font-weight: 600;
+  border: 1px solid var(--warn-line); color: var(--warn-fg);
+  background: var(--warn-soft); font-family: var(--font); font-size: 13px; font-weight: 600;
 }
-.pause-btn:hover:not(:disabled) { background: rgba(255,176,32,.18); }
+.pause-btn:hover:not(:disabled) { filter: brightness(1.18); }
 .pause-btn:disabled { opacity: .5; cursor: not-allowed; }
 .dry-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 12px;
   color: var(--muted); cursor: pointer; }
@@ -1015,9 +1025,8 @@ watch(() => rc.readyTick, (n) => {
 .res { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 8px;
   padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); }
 .res.err { color: #ffb4b4; border-color: #e0525255; }
-.jog-axes { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; }
-.jog-axes button { padding: 4px 0; font-size: 12px; }
-.jog-axes button.on { border-color: var(--accent); color: var(--accent); }
+/* ★ 原 .jog-axes（点动轴分段）与 .sel-grid/.sel-j（点位选择网格）死样式已删除：
+   模板里均无引用（点动已移交点位执行页，选点改用 .pcell/.pitem 行列表）。 */
 /* （原 .teach-grid/.tcell/.tcell-h 三件套已随"横向网格 → 竖排行列表"改版移除：
    它们正是"卡片套卡片 + 等宽网格"的来源。B 区列色改由 .prow.c-* 左色条表达。） */
 /* =====================================================================
@@ -1039,7 +1048,7 @@ watch(() => rc.readyTick, (n) => {
 .pcell:hover { border-color: var(--accent-d, rgba(47,214,240,.5)); }
 /* 格号：等宽 + 亮色 —— 扫视时的锚点 */
 .pkey { display: flex; align-items: center; gap: 4px; padding-bottom: 1px;
-  font-family: var(--font-mono, ui-monospace, monospace);
+  font-family: var(--mono);
   font-size: 12.5px; font-weight: 600; color: var(--txt); }
 .pitems { display: flex; flex-direction: column; gap: 3px; }
 .pitem { display: flex; flex-direction: column; gap: 1px; padding: 3px 4px;
@@ -1054,12 +1063,13 @@ watch(() => rc.readyTick, (n) => {
 .pname.pinned { color: var(--accent); }
 .pname.pinnedb { color: var(--warn, #d48806); }
 /* 坐标：等宽暗色小字，放名称下方一行，**悬停看全** */
-.pi-coord { font-family: var(--font-mono, ui-monospace, monospace);
+.pi-coord { font-family: var(--mono);
   font-size: 10px; color: var(--muted); letter-spacing: -.1px;
   padding-left: 10px; white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
-/* 动作按钮：图标化，hover 才提亮（9 格 × 2 槽会很多，默认弱化） */
-.pacts { flex: none; display: flex; gap: 2px; opacity: .5;
+/* 动作按钮：图标化，hover 才提亮（9 格 × 2 槽会很多，默认弱化）
+   ★ S10：默认 opacity 从 .5 提到 .75 —— 原来默认几乎看不见，现场"不知道能点"。 */
+.pacts { flex: none; display: flex; gap: 2px; opacity: .75;
   transition: opacity .15s ease-out; }
 .pitem:hover .pacts { opacity: 1; }
 .pitem .pacts .mini-btn { padding: 2px 4px; }
@@ -1075,7 +1085,7 @@ watch(() => rc.readyTick, (n) => {
    现在：只占行内剩余宽度、小字等宽、超出省略；**完整坐标仍在鼠标悬停的 title 里**。
    效果：每格从 5 行压到 3 行，且坐标"看得见"（虽然省略）+ 悬停可看全。 */
 .slot .scoord { flex: 1 1 auto; min-width: 0; font-size: 10.5px; color: var(--muted);
-  font-family: var(--font-mono, ui-monospace, monospace); letter-spacing: -.2px;
+  font-family: var(--mono); letter-spacing: -.2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
 .slot.wide { padding: 7px 0; }
 .sdot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: none; }
@@ -1104,11 +1114,6 @@ watch(() => rc.readyTick, (n) => {
 .grow .gj { flex: 1; min-width: 0; color: var(--muted); font-variant-numeric: tabular-nums;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .grow .mini-btn { flex: none; }
-.grow .mini-btn { flex: none; }
-.sel-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
-.sel-j { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between;
-  gap: 4px; border: 1px solid var(--line); border-radius: 5px; padding: 2px 5px; }
-.sel-j b { color: var(--txt); font-variant-numeric: tabular-nums; font-weight: 500; }
 /* （B 区列色已改用 .prow.c-* 的左色条，见上方点位列表样式） */
 .dotc { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   margin-left: 4px; background: var(--muted); }

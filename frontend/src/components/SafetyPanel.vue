@@ -286,7 +286,7 @@ watch(open, (v) => { if (v) safety.refreshEvents(); });
       <div class="sp-sec">
         <div class="sp-sec-h" @click="sec.shape = !sec.shape">形状与尺寸 <Icon :name="sec.shape ? 'chevronDown' : 'chevronRight'" :size="14" /></div>
         <div v-show="sec.shape">
-          <div class="btns" style="margin-bottom:8px">
+          <div class="btns" style="margin:8px 0">
             <button :class="{ primary: cur.shape === 'rect' }" @click="setShape(cur, 'rect')">矩形</button>
             <button :class="{ primary: cur.shape === 'quad' }" @click="setShape(cur, 'quad')">四点</button>
             <button :class="{ primary: cur.shape === 'circle' }" @click="setShape(cur, 'circle')">圆形</button>
@@ -391,7 +391,7 @@ watch(open, (v) => { if (v) safety.refreshEvents(); });
             <label>四面透明玻璃</label>
             <input type="checkbox" :checked="wallsOn" @change="setWalls($event)" />
           </div>
-          <div class="small" style="margin-bottom:6px">关闭后隐藏围栏面板，仍保留线框与角柱，区域边界清晰可见。</div>
+          <div class="small" style="margin:6px 0">关闭后隐藏围栏面板，仍保留线框与角柱，区域边界清晰可见。</div>
           <div class="sp-line">
             <label>地面碰撞检测</label>
             <input type="checkbox" :checked="groundEnabled" @change="setGroundEnabled($event)" />
@@ -423,7 +423,7 @@ watch(open, (v) => { if (v) safety.refreshEvents(); });
           </div>
 
           <div class="sp-hr"></div>
-          <div class="small" style="margin-bottom:6px">
+          <div class="small" style="margin:6px 0">
             <b>地面报警垫</b>铺满「四个角柱围成的那块地面」（跟随主工作区形状，
             矩形 / 正方形 / 四边形 / 圆形都跟随），随上面四级实时变色。
             机器人站在站台上时，垫子自动改铺到台面上。
@@ -482,7 +482,7 @@ watch(open, (v) => { if (v) safety.refreshEvents(); });
       <div class="sp-sec">
         <div class="sp-sec-h" @click="sec.events = !sec.events">报警记录 ({{ safety.events.length }}) <Icon :name="sec.events ? 'chevronDown' : 'chevronRight'" :size="14" /></div>
         <div v-show="sec.events">
-          <div class="btns" style="margin-bottom:8px">
+          <div class="btns" style="margin:8px 0">
             <button @click="safety.refreshEvents()"><Icon name="refresh" :size="15" /> 刷新</button>
             <button @click="safety.clearEvents()"><Icon name="trash" :size="15" /> 清空</button>
           </div>

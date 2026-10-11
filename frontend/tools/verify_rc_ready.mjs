@@ -134,7 +134,7 @@ ok("★★ 点击时**先读一次实时伺服状态**再决定（rc.load() → 
   && /async function onReadyToggle[\s\S]{0,700}?rc\.servoOn/.test(card));
 ok("★★ 下电**不再弹确认框**（2026-10-10 用户口径：不需要提示）",
   !/window\.confirm/.test(card));
-// ── 清除报错（清控制器报警）：三页入口 + 只清报警不替就绪做上电/加载 ──
+// ── 清除报错（清控制器报警）：唯二入口（就绪卡 + 底栏真机链路片复用同一卡） + 只清报警不替就绪做上电/加载 ──
 const sortView = read("src/components/SortingView.vue");
 const execStore = read("src/stores/exec.js");
 const controlApi = read("../backend/app/api/control.py");
@@ -142,8 +142,10 @@ const readySvcBackend = read("../backend/app/services/rc_ready.py");
 ok("exec store 有 clearError（清示教器报错）", /clearError\s*\(/.test(execStore));
 ok("exec.clearError 打 /control/clear-error", /\/control\/clear-error/.test(execStore));
 ok("点位/分拣页共用的就绪卡有「清除报错」按钮", card.includes("清除报错") && card.includes("exec.clearError()"));
-ok("程序执行页也挂了「清除报错」（它不用 RcReadyCard）",
-  progView.includes("清除报错") && progView.includes("exec.clearError()"));
+// ★★ 2026-10-11 修复（方案 Pr3）：程序执行页原另有一颗「清除报错」，与底栏「真机链路」面板里的
+//   RcReadyCard **同名同义重复**（底栏任何页都能点开）。现统一走底栏那一个入口，本页不再重复。
+ok("程序执行页不再重复「清除报错」（统一走底栏「真机链路」面板）",
+  !progView.includes("清除报错") && !progView.includes("exec.clearError()"));
 ok("后端 /control/clear-error 挂 require_control",
   /def api_clear_error\(tok: str = Depends\(require_control\)\)/.test(controlApi));
 ok("后端 clear_alarm 只清报警（不写 LOAD/RUN，不替就绪做上电加载）",

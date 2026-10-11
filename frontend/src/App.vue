@@ -609,15 +609,17 @@ onBeforeUnmount(() => {
     </transition>
 
     <!-- 连接自检 / 操作引导：浮在 3D 视口底部上方（absolute 浮层，不占底栏、
-         不挤 3D 视口高度，见 index.html #guide-zone 样式）。只报最高优先级一条。 -->
-    <div id="guide-zone">
+         不挤 3D 视口高度，见 index.html #guide-zone 样式）。只报最高优先级一条。
+         ★ B1 避让：底部「五选一」面板打开时（默认开「运行日志」），面板从底栏向上弹出，
+           会盖住这一带 —— 此时给引导条加 .lifted，把它抬到面板之上（静态避让；层级见 index.html）。 -->
+    <div id="guide-zone" :class="{ lifted: !!ui.statusPopover }">
       <GuideBar />
     </div>
 
     <!-- 快捷键反馈：只在按了键之后出现 2 秒。
          位置固定在 3D 视口底部居中偏上，不遮底栏状态灯，也不进主布局流。 -->
     <transition name="kh-fade">
-      <div v-if="keyHint" id="key-hint">
+      <div v-if="keyHint" id="key-hint" :class="{ lifted: !!ui.statusPopover }">
         <Icon name="keyboard" :size="13" /> {{ keyHint }}
       </div>
     </transition>
@@ -676,7 +678,7 @@ onBeforeUnmount(() => {
           </button>
         </template>
         <button v-else class="ctrl-request primary" @click="requestControl"
-                :disabled="!auth.required" title="连接真机控制前需管理员密码授权">
+                :disabled="!auth.required" title="需输入管理员或操作员口令授权">
           <Icon name="lock" :size="14" /> 请求控制
         </button>
       </div>
@@ -690,13 +692,13 @@ onBeforeUnmount(() => {
       <div class="modal">
         <div class="modal-head">
           <Icon name="lock" :size="18" />
-          <span>管理员验证</span>
+          <span>身份验证</span>
           <button class="modal-x" @click="auth.closeLogin()" aria-label="关闭">
             <Icon name="close" :size="16" />
           </button>
         </div>
         <p class="modal-tip">
-          连接真实机器人进行控制前，需输入管理员密码获取限时控制令牌（有效期
+          连接真实机器人进行控制前，需输入口令（管理员 / 操作员）获取限时控制令牌（有效期
           {{ auth.cfgTtlText }}；可在「系统设置 → 控制权限时长」调整）。
         </p>
         <ul class="modal-roles">
@@ -713,7 +715,7 @@ onBeforeUnmount(() => {
           <Icon name="lock" :size="15" />
           <input ref="pwInput" type="password" v-model="pw"
                  autocomplete="current-password"
-                 :disabled="auth.busy" placeholder="请输入管理员密码" />
+                 :disabled="auth.busy" placeholder="请输入口令（管理员 / 操作员）" />
         </form>
         <p v-if="auth.error" class="modal-err"><Icon name="alert" :size="14" /> {{ auth.error }}</p>
         <div class="modal-btns">
@@ -853,6 +855,9 @@ onBeforeUnmount(() => {
   background: var(--glass-solid); border: 1px solid var(--line2);
   box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5); pointer-events: none; white-space: nowrap;
   backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+/* ★ B1：底部五选一面板打开时让位（抬到面板之上，避免与底栏浮层重叠）。
+   ⚠ 静态避让值（300px）按日志面板最大高度估算，仍待浏览器实测微调。 */
+#key-hint.lifted { bottom: 300px; }
 #key-hint svg { color: var(--accent); }
 .kh-fade-enter-active, .kh-fade-leave-active { transition: opacity .18s ease, transform .18s ease; }
 .kh-fade-enter-from, .kh-fade-leave-to { opacity: 0; transform: translateX(-50%) translateY(6px); }

@@ -179,7 +179,8 @@ watch(() => auth.controlActive, (v) => {
     <!-- 关节点动（合并：滑块示教 + 点动 J1~J6） -->
     <div class="card">
       <h3><Icon name="sliders" :size="15" /> 关节点动 J1~J6
-        <span class="h3-sub">拖动滑块 / 按 −/+ 走一格</span>
+        <!-- ★ 副标题只报参数（当前步长），操作说明统一放在卡片底部一行，不重复三遍 -->
+        <span class="h3-sub">步长 {{ exec.jogStepDeg }}°</span>
       </h3>
       <!-- ★ 需求：所有组件在"未就绪"时一律不可修改/不可点 -->
       <p v-if="!readyOk" class="lock-hint">
@@ -187,7 +188,7 @@ watch(() => auth.controlActive, (v) => {
       </p>
 
       <!-- 步长 + 残影预演（同一行：步长靠左，残影预演由全局 margin-left:auto 推到行尾） -->
-      <div class="pf-row" style="margin-bottom:8px">
+      <div class="pf-row" style="margin:8px 0">
         <label>步长</label>
         <div class="seg mini">
           <button v-for="s in JOG_STEPS" :key="s" :class="{ on: exec.jogStepDeg === s }"
@@ -209,7 +210,7 @@ watch(() => auth.controlActive, (v) => {
                 @pointerdown.prevent="exec.jogPress(i + 1, -1)"
                 @pointerup="exec.jogRelease" @pointerleave="exec.jogRelease"
                 @pointercancel="exec.jogRelease"
-                :title="'− 走一格 / 按住连续反向'">
+                :title="'反向走一格（按住连续）'">
           −
         </button>
         <input class="ja-range" type="range"
@@ -221,18 +222,18 @@ watch(() => auth.controlActive, (v) => {
                 @pointerdown.prevent="exec.jogPress(i + 1, 1)"
                 @pointerup="exec.jogRelease" @pointerleave="exec.jogRelease"
                 @pointercancel="exec.jogRelease"
-                :title="'+ 走一格 / 按住连续正向'">
+                :title="'正向走一格（按住连续）'">
           +
         </button>
         <span class="ja-val">{{ Number(exec.teachQ[i]).toFixed(1) }}°</span>
       </div>
 
-      <p class="small muted" style="margin-top:8px">
+      <p class="small muted mt8">
         拖动滑块实时预演（残影跟随），松手即停；点击 −/+ 走一格，按住连续走。
       </p>
 
       <!-- 操作按钮 -->
-      <div class="btns" style="margin-top:8px">
+      <div class="btns mt8">
         <button class="primary" :disabled="!exec.canExec || exec.teachBusy"
                 @click="exec.applyTeach()">
           <Icon name="target" :size="13" /> 执行到位姿
@@ -251,10 +252,10 @@ watch(() => auth.controlActive, (v) => {
       <h3><Icon name="database" :size="15" /> 预设点位
         <span class="h3-sub">{{ exec.points.length }} 个</span>
       </h3>
-      <div class="btns" style="margin-bottom:10px">
+      <div class="btns" style="margin:10px 0">
         <button class="primary" @click="openNew"><Icon name="edit" :size="14" /> 新建点位</button>
         <button :disabled="!canControl"
-                :title="canControl ? '读取机器人当前 6 个关节坐标存为点位（T1/T2 示教器手动对位也可，仅记录不运动）'
+                :title="canControl ? '读取当前位姿存为点位（不运动）'
                                   : '需控制权限且机器人已连接、遥测可信'"
                 @click="exec.markCurrentPoint">
           <Icon name="pin" :size="14" /> 标记当前点
@@ -346,8 +347,15 @@ watch(() => auth.controlActive, (v) => {
               <Icon name="sliders" :size="13" /> 预演
             </button>
             <button @click="openEdit(p)"><Icon name="edit" :size="13" /> 编辑</button>
-            <button @click="exportPoint(p)"><Icon name="download" :size="13" /> 导出</button>
-            <button class="pt-del" @click="delPoint(p)"><Icon name="trash" :size="13" /> 删除</button>
+            <!-- ★ P6：导出 / 删除收进「⋯」更多菜单 —— 原来 5 颗按钮平铺、密度高且删除易误点。
+                 删除仍在菜单里保持红色 + confirm（二次确认不放宽）。 -->
+            <details class="pt-more">
+              <summary class="mini-more" title="更多">⋯</summary>
+              <div class="pt-more-pop">
+                <button @click="exportPoint(p)"><Icon name="download" :size="13" /> 导出</button>
+                <button class="pt-del" @click="delPoint(p)"><Icon name="trash" :size="13" /> 删除</button>
+              </div>
+            </details>
           </div>
         </div>
         <p v-if="!exec.points.length" class="small">
@@ -359,6 +367,8 @@ watch(() => auth.controlActive, (v) => {
 </template>
 
 <style scoped>
+/* ★ P5：把模板里零散的 inline margin 收敛为类（不再逐处硬编码 style） */
+.mt8 { margin-top: 8px; }
 /* ★ 未就绪时示教/点动区的"锁"提示条（说明为什么整块点不动） */
 .lock-hint {
   display: flex; align-items: center; gap: 6px;
@@ -380,8 +390,7 @@ watch(() => auth.controlActive, (v) => {
 /* ★ 点位列表：纵向堆叠（上下关系），取消默认横向内联 */
 .pt-item {
   display: block;                 /* 取消 flex：名称 / 标签 / 坐标 / 备注 / 操作 上下排列 */
-  padding: 9px 11px;
-  margin-bottom: 8px;
+  padding: 9px 10px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--panel);
@@ -421,6 +430,20 @@ watch(() => auth.controlActive, (v) => {
 }
 .pt-note svg { color: var(--muted); flex: none; }
 .pt-ops { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+/* ★ P6：「⋯」更多菜单（导出 / 删除） */
+.pt-more { position: relative; flex: none; }
+.mini-more { list-style: none; cursor: pointer; display: inline-flex;
+  align-items: center; justify-content: center; width: 26px; height: 24px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  font-weight: 700; font-size: 13px; user-select: none; }
+.mini-more::-webkit-details-marker { display: none; }
+.mini-more:hover { color: var(--accent); border-color: var(--accent); }
+.pt-more[open] .mini-more { color: var(--accent); border-color: var(--accent); }
+.pt-more-pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5;
+  display: flex; flex-direction: column; gap: 4px; padding: 6px; min-width: 96px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: var(--shadow-lg); }
+.pt-more-pop button { justify-content: flex-start; width: 100%; }
 .btns button.warn {
   color: var(--warn); border-color: var(--warn-line); background: var(--warn-soft);
 }
@@ -432,7 +455,6 @@ watch(() => auth.controlActive, (v) => {
   /* 用户指定样式（2026-10-09）：收紧间隙与内边距，保证单行装得下 */
   display: flex; align-items: center; gap: 5px; padding: 2px;
 }
-.jog-axis:last-child { margin-bottom: 0; }
 .ja-name {
   flex: none; width: 20px;           /* 用户指定 20px */
   font-size: 13px; font-weight: 600; color: var(--accent);

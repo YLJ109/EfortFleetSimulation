@@ -200,7 +200,10 @@ const simTitle = "点这里 = 按手柄（走同一套广播，用来验证会�
       <span class="k">来源</span>
       <span class="v" :class="{ on: pad.connected }">{{ sourceText }}</span>
     </div>
-    <!-- ★ 「浏览器到底看见几个」——排查手柄问题的第一现场数据（收起也常显） -->
+    <!-- ★ S6：收起态只留「状态 / 来源」两行；其余（可见数、型号、排查清单、诊断文本）
+         全部收进"展开才渲染"（v-if="open"）—— 原来收起也渲染整段清单与长诊断，撑高卡片。 -->
+    <template v-if="open">
+    <!-- ★ 「浏览器到底看见几个」——排查手柄问题的第一现场数据 -->
     <div class="gpt-row">
       <span class="k">可见</span>
       <span class="v">浏览器可见手柄 <b>{{ pad.count || 0 }}</b> 个{{ pad.count ? "：" + (pad.ids || []).join(" / ") : "" }}</span>
@@ -221,7 +224,7 @@ const simTitle = "点这里 = 按手柄（走同一套广播，用来验证会�
       </span>
     </div>
 
-    <!-- ★ 检测不到时的排查清单（常显；含"重新扫描"即时反馈） -->
+    <!-- ★ 检测不到时的排查清单（展开才显示；含"重新扫描"即时反馈） -->
     <div v-if="!pad.connected" class="gpt-diag">
       <div class="gpt-sub">
         检测不到？按顺序排查
@@ -241,6 +244,7 @@ const simTitle = "点这里 = 按手柄（走同一套广播，用来验证会�
         <li>蓝牙手柄：先在系统里连好，再拔插 / 重连一次，然后重开本页面</li>
       </ol>
     </div>
+    </template>
 
     <template v-if="open">
       <div class="gpt-row">

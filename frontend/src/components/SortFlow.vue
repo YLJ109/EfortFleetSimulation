@@ -164,7 +164,9 @@ const showFrames = computed(() => frameList.value.length > 0 && curStep.value !=
           </div>
         </div>
         <p v-if="!s.judge" class="small muted" style="margin-top:4px">
-          本轮<b>不判色</b>（空跑或双闸未开）：帧内容是占位色，不代表真的看到。
+          <!-- ★ S3：此处只说明"帧是占位色"；"本轮不判色/空跑或双闸未开"的完整口径在分拣页
+               「运行状态」卡那一处讲（不重复第三、第四遍）。 -->
+          帧为<b>占位色</b>（本轮未判色），不代表真的看到。
         </p>
       </div>
     </div>

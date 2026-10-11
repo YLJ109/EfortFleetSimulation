@@ -96,7 +96,7 @@ const qtyOf = (m) => {
 /** 禁用格 = **黑色方块**（用户口径："禁止摆放你就放黑色方块就行了"） */
 const BAN_SQ = {
   display: "inline-block", marginLeft: "4px", padding: "0 5px",
-  background: "#000", color: "#fff", border: "1px solid #555",
+  background: "var(--screen)", color: "var(--ink)", border: "1px solid var(--muted)",
   borderRadius: "3px", fontStyle: "normal", fontSize: "11px",
 };
 const atBottom = ref(true);
@@ -343,15 +343,15 @@ const stageLine = (m) => {
               </div>
               <!-- ★ 来源标注（用户口径 Q7）：谁解析的必须说清 —— 大模型 / 降级到规则 / 安全直达 -->
               <div v-if="srcLabel(m)" :style="{ fontSize: '11px', margin: '2px 0 4px',
-                       color: (m.parsed && m.parsed.source === 'rule-degraded') ? '#f2c500' : 'var(--muted)' }">
+                       color: (m.parsed && m.parsed.source === 'rule-degraded') ? 'var(--warn)' : 'var(--muted)' }">
                 {{ srcLabel(m) }}
               </div>
               <!-- ★ 做不到（占用/禁放/摆不下）→ 摊开原因 + 建议，**不给执行按钮**（用户口径 Q1②） -->
               <div v-if="m.parsed && !m.parsed.ok"
                    :style="{ margin: '4px 0', padding: '6px 8px', borderRadius: '4px',
-                             background: 'rgba(229,72,77,.10)', border: '1px solid rgba(229,72,77,.5)',
+                             background: 'var(--err-soft)', border: '1px solid var(--err-line)',
                              fontSize: '12px' }">
-                <div style="color:#ff6b6b; font-weight:600">
+                <div style="color:var(--err); font-weight:600">
                   ⚠ 无法实现：{{ plain(m.parsed.error || "这个要求做不到") }}
                 </div>
                 <ul v-if="m.parsed.suggestions && m.parsed.suggestions.length"
@@ -360,7 +360,7 @@ const stageLine = (m) => {
                 </ul>
               </div>
               <!-- ★ 件数回显（用户口径 Q8）：让人一眼看到"这一轮会动多少件"再确认 -->
-              <div v-if="qtyOf(m)" :style="{ fontSize: '12px', margin: '4px 0', color: '#f2c500' }">
+              <div v-if="qtyOf(m)" :style="{ fontSize: '12px', margin: '4px 0', color: 'var(--warn)' }">
                 本次将动 <b>{{ qtyOf(m) }}</b> 件 —— 确认无误再说「执行」
               </div>
               <!-- ★ 2026-10-10 用户口径："禁止摆放你就放黑色方块就行了"：
@@ -506,7 +506,7 @@ const stageLine = (m) => {
 .cw-hi { font-size: 13.5px; color: var(--txt); }
 .cw-presets { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
 .cw-pg { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.cw-chip { font-size: 12px; padding: 5px 11px; border-radius: 14px;
+.cw-chip { font-size: 12px; padding: 5px 10px; border-radius: 14px;
   border: 1px solid var(--line); background: transparent; color: var(--muted);
   cursor: pointer; transition: color .15s, border-color .15s; }
 .cw-chip:hover { color: var(--accent); border-color: var(--accent); }

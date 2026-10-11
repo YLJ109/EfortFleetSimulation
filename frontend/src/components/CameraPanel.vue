@@ -495,7 +495,9 @@ const lastWhy = computed(() => {
     </div>
 
     <!-- 画面区域 -->
-    <div class="cam-screen" :style="{ height: (expanded ? size.h : 200) + 'px' }">
+    <!-- ★ C4：收起态高度用 min(size.h, 200) 收敛 —— 原写死 200，而「展开」用 size.h（默认 260），
+         一展开画面会"长高"一大截。现在收起态不会超过展开态高度，切换更平滑。 -->
+    <div class="cam-screen" :style="{ height: (expanded ? size.h : Math.min(size.h, 200)) + 'px' }">
       <!-- 审计修复 P0-ui-1：双缓冲两路画面 —— front 是显示路（保留旧帧 + 不透明底），
            .cam-back 是预连接路（透明底，拿到首帧才接管显示，重连窗口零黑帧） -->
       <img ref="imgA" class="cam-img" :class="{ 'cam-back': front !== 'a' }" alt=""
@@ -593,7 +595,7 @@ const lastWhy = computed(() => {
         </label>
         <input class="conf-slider" type="range" min="15" max="95" step="5"
                :value="(cam.colorConf * 100).toFixed(0)"
-               :disabled="cam.serviceDown" title="confidence: conf 低于此值的目标不画框/不记录"
+               :disabled="cam.serviceDown" title="低于此值的颜色不画框、不记录。"
                @change="cam.setColorConf($event.target.value / 100)" />
       </div>
       <div class="target-row" v-if="cam.colorSupported && cam.colorCapable && cam.colorTargets.length">
@@ -628,11 +630,8 @@ const lastWhy = computed(() => {
           </label>
           <input class="conf-slider" type="range" min="0" max="95" step="5"
                  :value="(colorThr.fill_min * 100).toFixed(0)" :disabled="cam.serviceDown"
-                 title="「只识别矩形」硬门槛：低于此值直接判非矩形、不输出颜色。0 = 关闭。
-⚠ 必须**低于现场实测最低填充率**（实测真矩形 0.67~0.75）：定太高会误杀真方块，
-   表现是「三色全都检测不到」（2026-10-08 事故：曾定为 0.72 → 绿色/蓝色全部被判非矩形）。
-⚠ 与旋转无关（斜着举的方块不受影响）；被遮挡较厉害的件会被判非矩形 → 分拣按「检测不到」停，
-   现场觉得太严就调低。"
+                 :title="'「只识别矩形」硬门槛：低于此值判非矩形、不输出颜色（0 = 关闭）。'
+                   + '须低于现场实测最低填充率（真矩形 0.67~0.75），定太高会误杀真方块。'"
                  @change="cam.setThr({ fill_min: Number($event.target.value) / 100 })" />
         </div>
       </template>
@@ -660,7 +659,7 @@ const lastWhy = computed(() => {
         <span class="info-value">{{ device }}</span>
         <span class="info-label">分辨率</span>
         <span class="info-value">{{ cam.status?.resolution || "—" }}</span>
-        <span class="info-label">分割</span>
+        <span class="info-label">颜色分割</span>
         <span class="info-value">{{ cam.status?.vision?.seg || "—" }}</span>
       </div>
 
@@ -717,7 +716,8 @@ const lastWhy = computed(() => {
 .cam-fps { color: var(--ok); font-size: 11px; font-variant-numeric: tabular-nums; }
 .cam-toggle {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 24px; height: 24px; margin-left: 6px; padding: 0;
+  /* ★ C3：点击区放大到 28×28（原 24×24）—— 与拖动标题栏相邻，热区大一点更不易误拖 */
+  width: 28px; height: 28px; margin-left: 6px; padding: 0;
   border: none; border-radius: 6px;
   background: transparent; color: var(--muted); cursor: pointer;
 }
@@ -890,16 +890,6 @@ input:checked + .slider:before {
 }
 input:disabled + .slider { opacity: .45; cursor: not-allowed; }
 
-/* 灰度相机提示 */
-.color-unavail {
-  display: flex; align-items: center; gap: 7px;
-  font-size: 12px; line-height: 1.5; color: #b3872a;
-  background: rgba(214, 158, 46, 0.10); border: 1px solid rgba(214, 158, 46, 0.28);
-  border-radius: 8px; padding: 8px 10px;
-}
-.color-unavail .dot { width: 8px; height: 8px; border-radius: 50%; background: #d69e2e; flex: none; }
-.color-unavail strong { color: #e8b347; }
-
 /* 三色置信度滑杆 */
 .conf-row { padding-top: 4px; }
 .conf-slider {
@@ -968,7 +958,8 @@ input:disabled + .slider { opacity: .45; cursor: not-allowed; }
 
 .cam-resize {
   position: absolute; right: 0; bottom: 0;
-  width: 18px; height: 18px;
+  /* ★ C3：缩放手柄热区放大到 24×24（视觉图标仍 13px）—— 原来 18×18 太小、不好抓 */
+  width: 24px; height: 24px;
   display: flex; align-items: center; justify-content: center;
   color: var(--muted); cursor: nwse-resize; opacity: .7;
 }

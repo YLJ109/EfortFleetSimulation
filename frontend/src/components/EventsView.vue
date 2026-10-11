@@ -404,7 +404,7 @@ watch(() => filt.q, () => {
       <div class="ops-head">
         <Icon name="activity" :size="16" />
         <span class="ops-title">事件时间线</span>
-        <span class="ops-chip">共 {{ stats.total }} 条</span>
+        <span class="ops-chip">共 {{ stats.total }} 条（含信息级）</span>
         <span v-for="lv in ['critical','error','warn']" :key="lv"
               class="ops-chip" :class="lv">
           {{ LV_TEXT[lv] }} {{ stats.by_level?.[lv] || 0 }}

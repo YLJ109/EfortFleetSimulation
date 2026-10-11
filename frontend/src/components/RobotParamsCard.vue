@@ -137,7 +137,6 @@ onBeforeUnmount(() => highlightJoint(-1));
     </div>
     <div class="small" style="margin-top:8px">
       条宽按各轴行程归一化。鼠标移到某一行会同时高亮 3D 里对应的关节段。
-      读数与 3D 画面同源（{{ sourceLabel }}）。
     </div>
   </div>
 
@@ -155,9 +154,8 @@ onBeforeUnmount(() => highlightJoint(-1));
 .hoverable { transition: background .12s; border-radius: 4px; }
 .hoverable:hover { background: var(--accent-soft); }
 
-/* ★ 用 rp- 前缀而不是复用全局 .axis：全局 .axis 在 index.html 里被定义过两次
-   （34px 1fr 64px 与 26px 1fr 52px），列宽会随加载顺序变化；
-   读数行属于只读展示，不该跟示教滑块抢同一套列宽。 */
+/* ★ 用 rp- 前缀而不是复用全局 .axis：全局 .axis 为 `26px 1fr 52px`（见 index.html:279），
+   而本卡读数行用 34px/1fr/64px 的列宽更舒展；读数行属于只读展示，不该跟示教滑块抢同一套列宽。 */
 .rp-axis { display: grid; grid-template-columns: 34px 1fr 64px; align-items: center;
   gap: 8px; margin: 6px 0; padding: 2px 4px; border-radius: 4px; transition: background .12s; }
 .rp-axis label { font-size: 13px; color: var(--muted); }

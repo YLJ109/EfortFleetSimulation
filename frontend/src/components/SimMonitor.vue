@@ -8,6 +8,7 @@ import { apiUrl } from "../config.js";
 import { dancePose } from "../utils/dance.js";
 import MonitorLayout from "./MonitorLayout.vue";
 import Icon from "./Icon.vue";
+import RobotParamsCard from "./RobotParamsCard.vue";
 
 const robot = useRobotStore();
 
@@ -39,8 +40,6 @@ function errText(d, status) {
   }
   return (d && (d.message || d.error)) || ("后端返回 " + status);
 }
-
-const simTcp = ref({ x: 0, y: 0, z: 0 });
 
 // 操控模式：joint = 关节模式；cart = 机器人模式（末端 XYZ 移动，经后端 IK 反解）
 const controlMode = ref("joint");
@@ -127,7 +126,6 @@ function clampQ(i, v) {
 function applySimPose() {
   if (robot.activeView !== "sim") return;   // 单模型：只有本视图在前台才登记
   robot.setOverride("sim", robot.simQ, getTcp());
-  simTcp.value = getTcp();
 }
 
 watch(() => robot.simQ, applySimPose, { deep: true, immediate: true });
@@ -335,7 +333,8 @@ function stopDance() {
         <!-- ★ 需求更正：本页移除的是 RobotParamsCard 的**只读**关节角读数卡
              （读数和 3D 姿态同源，属于"已读"展示）；**可操作**的关节角滑块卡
              保留在下方（"关节角 (deg)" 带 range 的那个）。
-             TCP 读数由下方独立的"末端 TCP (mm)"卡（与 simTcp 同源）显示，故此处不再引用。 -->
+             ★ Si3：TCP 读现已直接复用 RobotParamsCard 的 tcp 卡（见本页底部），
+                其读数取自 robot.readoutTcp ≡ 3D 显示姿态，与画面同源。 -->
         <div class="card">
         <h3>演示动作</h3>
         <div class="btns">
@@ -343,18 +342,17 @@ function stopDance() {
           <button :disabled="!dancing" @click="stopDance"><Icon name="stop" :size="15" /> 停止</button>
         </div>
         <div class="small" style="margin-top:8px">
-          一段预设的关节轨迹（J1 摆头 / J2·J3 舒展起伏 / J4 翻腕 / J5 点头 / J6 腕部摆动），
-          经姿态平滑丝滑循环。
+          预设关节轨迹，姿态平滑循环。
         </div>
       </div>
       <!-- ★ 合并卡片：关节角和机器人模式，通过 tab 切换 -->
       <div class="card">
         <h3>关节角和机器人模式</h3>
-        <div class="seg" style="margin-bottom:10px">
+        <div class="seg">
           <button :class="{ on: controlMode === 'joint' }" @click="controlMode = 'joint'">关节模式</button>
           <button :class="{ on: controlMode === 'cart' }" @click="controlMode = 'cart'">机器人模式</button>
         </div>
-        <div v-if="ikMsg && ikMsg !== '计算中…'" class="small err-line" style="margin-bottom:8px">{{ ikMsg }}</div>
+        <div v-if="ikMsg && ikMsg !== '计算中…'" class="small err-line">{{ ikMsg }}</div>
         <!-- 关节模式：J1~J6 滑块 -->
         <div v-if="controlMode === 'joint'">
           <div class="axis" v-for="(n, i) in robot.axes" :key="n">
@@ -380,17 +378,13 @@ function stopDance() {
           </div>
         </div>
       </div>
-      <div class="card">
-        <h3>末端 TCP (mm) 坐标
-          <span class="h3-sub">只读</span>
-        </h3>
-        <div class="row"><span class="k">X</span><span class="v">{{ simTcp.x.toFixed(1) }}</span></div>
-        <div class="row"><span class="k">Y</span><span class="v">{{ simTcp.y.toFixed(1) }}</span></div>
-        <div class="row"><span class="k">Z</span><span class="v">{{ simTcp.z.toFixed(1) }}</span></div>
-        <div v-if="controlMode === 'cart'" class="small" style="margin-top:6px;color:var(--muted)">
-          机器人模式拖动上方滑块即可联动修改 TCP 坐标
-        </div>
-      </div>
+      <!-- ★ Si3：原来本页自建了一张「末端 TCP」只读卡，内容与 RobotParamsCard 的 TCP 卡重复。
+           现直接复用 RobotParamsCard（只开 tcp 卡，关掉连接与关节角）—— 一份实现不会漂移；
+           读数取自 robot.readoutTcp（≡ 3D 显示姿态里的 TCP），与画面同源。 -->
+      <RobotParamsCard :connection="false" :joints="false" :tcp="true" />
+      <p v-if="controlMode === 'cart'" class="small" style="color:var(--muted)">
+        机器人模式拖动上方滑块即可联动修改 TCP 坐标
+      </p>
     </div>
     </MonitorLayout>
   </div>
@@ -398,51 +392,15 @@ function stopDance() {
 
 <style scoped>
 .sim-root { position: relative; flex: 1; min-height: 0; display: flex; }
-/* 左侧浮动物体管理面板：可折叠，靠在 3D 视口左上、避开顶部 HUD 一行 */
-.sim-floating { position: absolute; left: 12px; top: 44px; width: 286px; z-index: 30;
-  max-height: calc(100% - 60px); overflow-y: auto; }
+/* ★ 原死样式已删除（G4/Si2）：.sim-floating（左侧浮动物体管理面板）与
+   .xpl-card/.xpl-badge/.xpl-field/.xpl-label/.xpl-hint/.xpl-select/.xpl-ta/
+   .xpl-actions/.xpl-status/.xpl-suck/.xpl-err/.xpl-speed* （XPL 仿真执行卡）
+   以及 .linkq（六轴联动结果行）在模板里均无引用 —— 保留只会让样式漂移来源变多。 */
 
-/* ===== XPL 仿真执行卡片：纵向分区，层次清晰、控件不挤压 ===== */
-.xpl-card :deep(h3) { display: flex; align-items: center; gap: 6px; }
-.xpl-badge {
-  margin-left: auto; font-size: 10px; font-weight: 500; color: var(--warn);
-  border: 1px solid var(--warn-line); background: var(--warn-soft);
-  border-radius: 20px; padding: 1px 8px; white-space: nowrap;
-}
-.xpl-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
-.xpl-label { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
-.xpl-hint { color: var(--muted); opacity: .8; font-size: 10px; line-height: 1.4; }
-.xpl-select { width: 100%; background: var(--panel2); color: var(--txt);
-  border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; font-size: 12px;
-  font-family: inherit; }
-.xpl-select:focus { outline: none; border-color: var(--accent); }
-.xpl-ta { width: 100%; resize: vertical; font-family: Consolas, monospace; font-size: 11.5px;
-  line-height: 1.55; min-height: 96px; box-sizing: border-box;
-  background: var(--panel2); color: var(--txt); border: 1px solid var(--line);
-  border-radius: 7px; padding: 8px 10px; }
-.xpl-ta:focus { outline: none; border-color: var(--accent); }
-.xpl-actions { display: flex; gap: 8px; margin-bottom: 8px; }
-.xpl-actions .xpl-btn { flex: 1 1 0; justify-content: center; display: inline-flex;
-  align-items: center; gap: 5px; padding: 8px 10px; }
-.xpl-status { display: flex; align-items: center; gap: 8px; font-size: 11px;
-  color: var(--txt); min-height: 18px; flex-wrap: wrap; }
-.xpl-status b { color: var(--accent); }
-.xpl-suck { font-size: 10px; color: var(--ok); border: 1px solid var(--ok-line);
-  background: var(--ok-soft); border-radius: 20px; padding: 1px 8px; }
-.xpl-err { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px;
-  color: var(--err); border: 1px solid var(--err-line, var(--line)); background: var(--err-soft, var(--panel2));
-  border-radius: 7px; padding: 7px 9px; }
-.xpl-speed { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-.xpl-speed input[type="range"] { flex: 1; accent-color: var(--accent); }
-.xpl-speed-v { width: 44px; text-align: right; font-variant-numeric: tabular-nums;
-  font-size: 12px; color: var(--txt); }
-
-/* 操控模式里的"仅出错才显示"提示行 */
-.err-line { margin-top: 8px; color: var(--err); }
-/* 机器人模式：当前点动轴那一行高亮 */
-.row.hot { background: var(--accent-soft2); border-radius: 4px; }
-/* 机器人模式：六轴联动结果（整臂运动的佐证） */
-.linkq { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px;
-  font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.linkq b { color: var(--accent); }
+/* 操控模式里的"仅出错才显示"提示行（上下对称间距，避免只写底部单项） */
+.err-line { margin: 8px 0; color: var(--err); }
+/* 机器人模式：当前点动轴那一行高亮
+   ★ Si1 修复：模板把 hot 加在 <div class="axis"> 上，选择器却写的是 `.row.hot`
+     （.axis 与 .row 不是一个类）→ 高亮永不生效。改为匹配真实的 .axis。 */
+.axis.hot { background: var(--accent-soft2); border-radius: 4px; }
 </style>

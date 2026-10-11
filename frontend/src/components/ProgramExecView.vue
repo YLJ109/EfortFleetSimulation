@@ -97,9 +97,9 @@ async function refetchFiles() {
   try { await exec.loadFiles(); } finally { refetching.value = false; }
 }
 
-// ---------- 序列编辑（只四类操作）----------
+// ---------- 序列编辑（六类操作）----------
 // ★ 需求（2026-09-29）：像编辑器一样自己把顺序排好，然后执行 / 暂停 / 继续 / 停止执行，
-//   可保存成本地文件、可选择已保存文件载入并执行。**只有四类**：标记点/吸气/停止吸气/等待。
+//   可保存成本地文件、可选择已保存文件载入并执行。**六类**：标记点 / 吸 / 停止吸 / 放 / 停止放 / 等待。
 //   方案见 docs/方案-程序执行序列编辑器（五类操作·经210执行）.md
 //   全部执行都在后端逐步下发（经控制器常驻程序 210），前端只负责编排与进度。
 
@@ -133,8 +133,8 @@ const runSeqDisabled = computed(() => !auth.controlActive || exec.seqBusy
   || exec.fileBusy || exec.runBusy || !exec.seqItems.length);
 
 // ---------- 运行日志 ----------
-// ★ 右侧栏的"运行日志"卡片已移除，日志统一由 MonitorLayout 的左下角浮动面板显示
-//   （自动跟随最新的"粘底"逻辑也在那边实现）。此处不再保留本地日志视图代码。
+// ★ 运行日志由 MonitorLayout 左下角浮动面板 / 底部状态区「运行日志」片统一显示，
+//   本页不再保留任何本地日志视图。
 
 const steps = computed(() => {
   const pr = selProgram.value;
@@ -232,16 +232,14 @@ watch(() => rc.readyTick, (n) => {
       <Icon :name="isReady ? 'check' : 'alert'" :size="18" class="rb-ico" />
     </div>
 
-    <!-- ★ 清除示教器（控制器）报错：只清报警，不替「一键就绪」做上电/加载 -->
-    <div class="btns" style="margin-top:8px">
-      <button class="clear-err" :disabled="!auth.controlActive || rc.busy" @click="exec.clearError()"
-              title="清掉示教器（控制器）报警；不含伺服上电/加载，清完需重新一键就绪">
-        <Icon name="eraser" :size="14" /> 清除报错
-      </button>
-    </div>
+    <!-- ★ Pr3 修复：本页原另有一颗"清控制器报错"的按钮，与底栏「真机链路」面板里的 RcReadyCard
+         重复（同名同义、且底栏任何页都能点开）。现统一走底栏那一个入口，本页不再重复。 -->
 
     <!-- 运行状态 -->
-    <div v-if="exec.runTotal || exec.lastRun" class="card">
+    <!-- ★ Pr4 修复：原 `v-if="exec.runTotal || exec.lastRun"` → 首跑前不显示、一旦开始运行才
+         **插入**，把下方「序列编辑/示教器程序/本地程序/手动执行」整列往下顶（布局跳动）。
+         现改为**常驻卡片**，内部用 v-if 区分"空闲/运行"两种内容，盒高稳定不跳。 -->
+    <div class="card">
       <h3><Icon name="activity" :size="15" /> 运行状态
         <span class="h3-sub">{{ exec.running ? "运行中" : "空闲" }}</span>
       </h3>
@@ -274,12 +272,14 @@ watch(() => rc.readyTick, (n) => {
           {{ exec.lastRun.error ? " · " + exec.lastRun.error : "" }}
         </span>
       </div>
+      <p v-else class="small muted" style="margin-top:6px">尚未运行 —— 选好程序或填好文件名后点「执行」。</p>
     </div>
 
-    <!-- ★ 序列编辑（只四类操作）：自己排序 → 执行 / 暂停 / 继续 / 停止执行 → 保存/载入 -->
+    <!-- ★ 序列编辑（六类操作）：自己排序 → 执行 / 暂停 / 继续 / 停止执行 → 保存/载入 -->
     <div class="card">
       <h3><Icon name="layers" :size="15" /> 序列编辑
-        <span class="h3-sub">六类：标记点 / 吸 / 停止吸 / 放 / 停止放 / 等待</span>
+        <!-- ★ Pr7：每类都带 icon 的大按钮已直观表达，"六类：…"属冗余枚举，改为步骤数 -->
+        <span class="h3-sub">{{ exec.seqItems.length }} 步</span>
       </h3>
 
       <div class="pf-row">
@@ -348,7 +348,7 @@ watch(() => rc.readyTick, (n) => {
           </div>
         </div>
         <p v-if="!exec.seqItems.length" class="small">
-          还没有步骤。用上面四个按钮添加，再用 ▲▼ 排好顺序 —— 顺序就是执行顺序。
+          还没有步骤。用上面六个按钮添加，再用 ▲▼ 排好顺序 —— 顺序就是执行顺序。
         </p>
       </div>
 
@@ -485,7 +485,8 @@ watch(() => rc.readyTick, (n) => {
     <!-- 手动执行：填写文件名 → 测试（只校验不下发）/ 直接运行 -->
     <div class="card">
       <h3><Icon name="file" :size="15" /> 手动执行
-        <span class="h3-sub">填文件名 · 先测试再运行</span>
+        <!-- ★ Pr2：副标题只报中性信息「填文件名」；测试 vs 直接运行的区别只在下方一行讲一次 -->
+        <span class="h3-sub">填文件名</span>
       </h3>
       <div class="pf-row">
         <label>文件名</label>
@@ -512,7 +513,7 @@ watch(() => rc.readyTick, (n) => {
         </button>
       </div>
       <p class="small muted" style="margin-top:6px">
-        「测试」只解析校验（IK / 限位 / 可达），**绝不下发**；「直接运行」才会真下发。
+        「测试」只解析校验（IK / 限位 / 可达），<b>绝不下发</b>；「直接运行」才会真下发。
       </p>
       <div v-if="exec.fileResult" class="teach-res"
            :class="exec.fileResult.ok ? 'ok' : 'err'">
@@ -533,8 +534,7 @@ watch(() => rc.readyTick, (n) => {
       </div>
     </div>
 
-    <!-- ★ 需求：运行日志已从右侧栏移到 3D 视口左下角（MonitorLayout 的浮动日志面板），
-         这里不再重复渲染，避免"同一份日志出现两处"。 -->
+    <!-- ★ 运行日志由底部状态区「运行日志」片统一显示，本页不再重复渲染。 -->
   </MonitorLayout>
 </template>
 
@@ -560,12 +560,6 @@ watch(() => rc.readyTick, (n) => {
 .seq-add { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px; margin-top: 8px; }
 .seq-add > button { justify-content: center; min-width: 0; white-space: nowrap; }
-/* ★ 清除报错：中性警示色，与一键就绪(绿)/取消(红)区分 */
-.clear-err {
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  font-weight: 700; letter-spacing: .3px;
-  background: var(--warn, #d48806); border-color: var(--warn, #d48806); color: #fff;
-}
-.clear-err:hover:not(:disabled) { filter: brightness(1.08); }
-.clear-err:disabled { opacity: .5; cursor: not-allowed; }
+/* ★ 原 .clear-err 样式已随本页那颗"清控制器报错"按钮移除（Pr3：统一走底栏「真机链路」面板）——
+   顺带消除了这里 var(--warn, #d48806) 的硬编码兜底 hex（Pr6）。 */
 </style>

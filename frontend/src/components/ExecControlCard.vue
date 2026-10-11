@@ -30,15 +30,17 @@ const canEstop = computed(() => auth.controlActive);
 <template>
   <div class="card">
     <h3><Icon name="shield" :size="15" /> 控制权限
-      <span class="h3-sub">{{ canControl ? auth.ttlText : "未就绪" }}</span>
+      <!-- ★ A4：角色与剩余时长由**底栏控制区**统一表达（「控制中 · 角色 · 剩余时间」）——
+           本卡不再重复，只报本页这一步的状态（已就绪 / 待一键就绪）。 -->
+      <span class="h3-sub">{{ granted ? "已就绪" : "待一键就绪" }}</span>
     </h3>
 
     <div class="row">
       <span class="k">状态</span>
       <span class="v" :style="{ color: granted ? 'var(--ok)' : 'var(--warn)' }">
-        {{ granted ? "已获得控制权限"
+        {{ granted ? "已就绪（可示教 / 点动）"
            : (!robot.connected ? "机器人离线"
-              : (!canControl ? "未获得控制权限" : "已授权 · 待一键就绪")) }}
+              : (!canControl ? "未获得控制权限" : "待一键就绪")) }}
       </span>
     </div>
 
@@ -76,7 +78,7 @@ const canEstop = computed(() => auth.controlActive);
     </div>
 
     <!-- 急停 / 复位急停 -->
-    <div class="btns" style="margin-top:8px">
+    <div class="btns mt8">
       <button class="rec-on" :disabled="!canEstop || exec.estopBusy"
               @click="exec.doEstop()">
         <Icon name="power" :size="14" /> 急停
@@ -89,6 +91,8 @@ const canEstop = computed(() => auth.controlActive);
 </template>
 
 <style scoped>
+/* ★ P5：inline margin 收敛为类 */
+.mt8 { margin-top: 8px; }
 .vac-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .vac-suck { color: var(--c-suck, #2f9e6f); border-color: var(--c-suck-line, #2f9e6f55); }
 .vac-suck:hover:not(:disabled) { background: var(--c-suck, #2f9e6f); color: #fff; }

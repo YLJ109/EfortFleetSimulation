@@ -13,8 +13,10 @@
     <style>
       /* =================================================================
          设计令牌（全站唯一取色来源）— Sentinel 深色指挥中心主题
-         ★ 规矩：组件里**只准**引用这里的变量，不准写 #hex / rgba()。
-           守卫：tools/verify_theme.mjs 扫描组件与 index.html，发现硬编码色即失败。
+         ★ 规矩：组件里**优先**引用这里的变量，别写 #hex / rgba()。
+           ★ 2026-10-11 更正：此处原声称有 tools/verify_theme.mjs 守卫并会扫描失败 ——
+             实际 frontend/tools 下**没有**该脚本，属"文档承诺与实现不符"。已删除这句
+             不实承诺（本项目红线：不许留与事实不符的说明）。如需强制，应先补齐守卫脚本。
          ================================================================= */
       :root {
         /* ---- 底色阶（深蓝黑层级）---- */
@@ -126,14 +128,14 @@
       /* 平行四边形 tab 按钮 — 左右对称（左侧向右倾、右侧向左倾） */
       .tabs-left .tab {
         flex: 0 0 auto; min-width: 100px; background: transparent; color: var(--muted); border: none;
-        padding: 12px 22px; font-size: 13px;
+        padding: 10px 18px; font-size: 13px;
         cursor: pointer; font-weight: 600; position: relative; font-family: var(--font);
         transition: color .16s ease, background .16s ease, box-shadow .2s ease;
         clip-path: polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%);
       }
       .tabs-right .tab {
         flex: 0 0 auto; min-width: 100px; background: transparent; color: var(--muted); border: none;
-        padding: 12px 22px; font-size: 13px;
+        padding: 10px 18px; font-size: 13px;
         cursor: pointer; font-weight: 600; position: relative; font-family: var(--font);
         transition: color .16s ease, background .16s ease, box-shadow .2s ease;
         clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 100%, 10px 100%);
@@ -159,7 +161,7 @@
 
       .side { width: var(--side-w, 400px); flex: none; background: var(--panel);
         border-left: 1px solid var(--line);
-        display: flex; flex-direction: column; padding: 14px; gap: 12px; overflow-y: auto;
+        display: flex; flex-direction: column; padding: 10px; gap: 10px; overflow-y: auto;
         min-height: 0;
         overscroll-behavior: contain;
         transition: width .16s ease, padding .16s ease; }
@@ -199,10 +201,10 @@
       .side-grip:hover .grip-ico { opacity: 1; color: var(--accent); border-color: var(--accent); }
       .side-grip.dragging { cursor: col-resize; }
 
-      .side-cards { display: flex; flex-direction: column; gap: 12px; }
+      .side-cards { display: flex; flex-direction: column; gap: 10px; }
 
       /* ---- 安全围栏调试面板 ---- */
-      .sp { padding: 10px 12px; }
+      .sp { padding: 10px; }
       .sp h3 { margin: 0; flex: 1; }
       .sp-head { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
       .sp-state { font-size: 11px; padding: 1px 7px; border-radius: 4px; border: 1px solid; }
@@ -256,7 +258,7 @@
 
       /* ---- 卡片：面板顶部发光线 + 角标装饰 ---- */
       .card { position: relative; background: linear-gradient(180deg, var(--panel2), var(--panel));
-        border: 1px solid var(--line); border-radius: var(--radius); padding: 12px;
+        border: 1px solid var(--line); border-radius: var(--radius); padding: 10px;
         box-shadow: var(--shadow); overflow: hidden;
         transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease; }
       .card::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 1px;
@@ -287,7 +289,7 @@
       .btns { display: flex; gap: 8px; }
       /* ---- 按钮 ---- */
       button { flex: 0 1 auto; max-width: 100%; background: var(--panel2); color: var(--txt);
-        border: 1px solid var(--line2); border-radius: var(--radius-sm); padding: 8px 12px;
+        border: 1px solid var(--line2); border-radius: var(--radius-sm); padding: 8px 10px;
         cursor: pointer; font-size: 13px; font-family: inherit; font-weight: 500;
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         transition: transform .14s ease, box-shadow .2s ease, background .2s ease, border-color .2s ease; }
@@ -329,64 +331,18 @@
       .cmd-result.err { color: var(--err); }
       .cmd-result code { color: var(--accent); }
 
-      /* ---- 实时关节 HUD (玻璃拟态卡片) ---- */
-      .hud-joints { position: absolute; left: 12px; top: 12px; z-index: 10;
-        min-width: 212px; max-width: 232px;
-        background: var(--glass);
-        backdrop-filter: blur(14px) saturate(140%);
-        -webkit-backdrop-filter: blur(14px) saturate(140%);
-        border: 1px solid var(--glass-line);
-        border-radius: 12px;
-        box-shadow: var(--shadow-hud);
-        padding: 10px 12px; user-select: none; overflow: hidden; }
-      .hud-joints::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 1px;
-        background: linear-gradient(90deg, transparent, rgba(47,214,240,0.3), transparent);
-        opacity: 0.5; pointer-events: none; }
-      .hud-head { display: flex; align-items: center; gap: 7px; font-size: 12px;
-        color: var(--muted); padding-bottom: 8px; margin-bottom: 8px;
-        border-bottom: 1px solid var(--veil); }
-      .hud-title { font-weight: 700; color: var(--txt); letter-spacing: .5px;
-        font-family: 'Chakra Petch', var(--font); }
-      .hud-src { font-size: 10px; color: var(--muted); }
-      .hud-fps { font-size: 10px; color: var(--muted); margin-left: auto;
-        font-variant-numeric: tabular-nums; }
-      .hud-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
-      .hud-dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
-      .hud-dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
-      .hud-dot.err { background: var(--err); box-shadow: 0 0 6px var(--err); }
-      .hud-dot.off { background: var(--muted); }
+      /* ---- 折叠按钮（★ 原 .hud-joints* 实时关节 HUD 一整族死样式已删除：
+             真实监控早已改用 RobotParamsCard；唯 .hud-toggle 仍被 SafetyPanel 复用，保留。 ----） */
       .hud-toggle { flex: none; width: 18px; height: 18px; line-height: 1;
         background: transparent; border: 1px solid var(--glass-line2); color: var(--muted);
         border-radius: 5px; cursor: pointer; font-size: 13px; padding: 0;
         display: flex; align-items: center; justify-content: center; }
       .hud-toggle:hover { color: var(--txt); border-color: var(--accent); }
-      .hud-body { display: flex; flex-direction: column; gap: 3px; overflow: hidden;
-        max-height: 260px; opacity: 1; transition: max-height .2s ease, opacity .2s ease; }
-      .hud-body.collapsed { max-height: 0; opacity: 0; }
-      .hud-row { display: flex; align-items: center; gap: 8px; font-size: 12px;
-        padding: 3px 6px; border-radius: 6px;
-        transition: background .12s ease, color .12s ease, box-shadow .12s ease; }
-      .hud-row .hj { width: 18px; color: var(--muted); font-weight: 600; flex: none; }
-      .hud-row .hbar { position: relative; flex: none; width: 54px; height: 4px;
-        background: var(--glass-line); border-radius: 2px; overflow: hidden; }
-      .hud-row .hbar > i { position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
-        background: var(--accent); border-radius: 2px; transition: width .08s linear; }
-      .hud-row .hv { flex: 1; text-align: right; font-variant-numeric: tabular-nums;
-        font-weight: 600; color: var(--txt); font-family: var(--num); }
-      .hud-row.moving { background: var(--accent-soft2); }
-      .hud-row.moving .hv { color: var(--accent); }
-      .hud-row.moving .hbar > i { background: var(--accent2); box-shadow: 0 0 8px var(--accent); }
-      .hud-row.limit { background: var(--err-soft); }
-      .hud-row.limit .hv { color: var(--err); }
-      .hud-row.limit .hbar > i { background: var(--err); }
-      .hud-row.near { background: var(--warn-soft); }
-      .hud-row.near .hv { color: var(--warn); }
-      .hud-row.near .hbar > i { background: var(--warn); }
 
       /* ---- 安全围栏报警条 ---- */
       #safety-banner { position: fixed; top: 58px; left: 50%; transform: translateX(-50%);
         z-index: 60; display: flex; align-items: center; gap: 10px;
-        padding: 9px 16px; border-radius: 10px; font-size: 13px; font-weight: 600;
+        padding: 9px 10px; border-radius: 10px; font-size: 13px; font-weight: 600;
         border: 1px solid; backdrop-filter: blur(8px); white-space: nowrap; }
       #safety-banner .sa-sub { font-weight: 400; font-size: 12px; opacity: .85; }
       #safety-banner.danger { color: var(--err-fg); border-color: var(--err-line);
@@ -398,13 +354,17 @@
       /* ---- 底部状态栏 ---- */
       #guide-zone { position: fixed; left: 50%; transform: translateX(calc(-50% - 56px));
         bottom: 110px; z-index: 60; width: min(620px, 86vw); }
+      /* ★ B1 避让：底部五选一面板（默认开「运行日志」）从底栏向上弹出，会盖住 110px 这一带；
+         面板打开时把引导条抬到面板之上，确保不重叠。
+         ⚠ 静态避让值（300px）按日志面板最大高度估算，仍待浏览器实测微调。 */
+      #guide-zone.lifted { bottom: 300px; }
       #bottom-zone { flex: none; display: flex; align-items: center; gap: 10px;
         padding: 5px; flex-wrap: wrap; }
 
       /* ---- 安全围栏常驻状态片 — Sentinel 毛玻璃 ---- */
       #safety-chip { position: absolute; right: 12px; bottom: 10px; z-index: 14;
         display: flex; align-items: center; gap: 8px;
-        padding: 6px 12px; border-radius: 8px; font-size: 12px;
+        padding: 6px 10px; border-radius: 8px; font-size: 12px;
         border: 1px solid var(--glass-line); background: var(--glass-solid);
         color: var(--muted); user-select: none;
         backdrop-filter: blur(14px) saturate(140%); -webkit-backdrop-filter: blur(14px) saturate(140%);
@@ -442,8 +402,8 @@
       @keyframes h3-spin { to { transform: rotate(360deg); } }
       .card h3 svg { color: var(--accent); }
 
-      /* 分段选择 */
-      .seg { display: flex; gap: 4px; align-items: center; margin-bottom: 8px; }
+      /* 分段选择：间距由上下对称的 margin 承担（只写底部单项会与父 gap 叠加） */
+      .seg { display: flex; gap: 4px; align-items: center; margin: 8px 0; }
       .seg button { flex: none; padding: 4px 10px; font-size: 11px; border-radius: var(--radius-sm); }
       .seg button.on { color: #b9f4ff; border-color: var(--accent);
         background: linear-gradient(135deg, rgba(47,214,240,0.18), rgba(59,130,246,0.10));
@@ -472,16 +432,8 @@
       .tcp-in { width: 100%; background: #080e19; color: var(--txt); border: 1px solid var(--line2);
         border-radius: 4px; padding: 3px 6px; font-size: 12px; }
 
-      /* 点动 */
-      .jog-grid { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; }
-      .jog-row { display: grid; grid-template-columns: 26px 1fr 1fr; gap: 6px; align-items: center;
-        padding: 2px 4px; border-radius: var(--radius-sm); transition: background .12s ease; }
-      .jog-row:hover { background: var(--accent-soft); }
-      .jog-name { font-size: 11px; color: var(--muted); }
-      .jog-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px;
-        font-size: 11px; padding: 5px 6px; user-select: none; touch-action: none; }
-      .jog-btn.neg { color: var(--warn); }
-      .jog-btn.pos { color: var(--ok); }
+      /* ★ 原 .jog-grid/.jog-row/.jog-name/.jog-btn* 死样式已删除：
+         点动已改用 PointExecView 的 scoped .jog-axis/.ja-*（两套点动样式并存会漂移）。 */
 
       /* 结果条 */
       .teach-res { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 8px;
@@ -495,7 +447,7 @@
 
       /* 点位 / 程序表单与列表 */
       .pt-form { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px;
-        margin-bottom: 10px; background: var(--panel2); display: flex; flex-direction: column;
+        margin: 10px 0; background: var(--panel2); display: flex; flex-direction: column;
         gap: 8px; }
       .pf-row { display: flex; align-items: center; gap: 8px; }
       .pf-row label { color: var(--muted); font-size: 12px; flex: none; width: 40px; }
@@ -546,17 +498,8 @@
       .exec-result.ok { color: var(--ok); background: var(--ok-soft); }
       .exec-result.err { color: var(--err); background: var(--err-soft); }
 
-      /* 运行日志 */
-      .run-log { margin-top: 8px; height: 148px; flex: none; overflow-y: auto;
-        display: flex; flex-direction: column; gap: 3px;
-        font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums;
-        background: #080e19; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
-      .run-log .rl { display: flex; gap: 6px; }
-      .run-log .rl-t { color: var(--muted); flex: none; }
-      .run-log .rl.info { color: var(--txt); }
-      .run-log .rl.ok { color: var(--ok); }
-      .run-log .rl.warn { color: var(--warn); }
-      .run-log .rl.err { color: var(--err); }
+      /* ★ 原 .run-log* 死样式已删除：运行日志已统一收进底部状态区的「运行日志」片
+         （StatusStrip 的 .lp-log-*），各页不再自带日志视图。 */
       .prog-bar { height: 4px; border-radius: 2px; background: var(--glass-line);
         overflow: hidden; margin: 8px 0 2px; }
       .prog-bar > i { display: block; height: 100%; width: 0%;
@@ -570,21 +513,24 @@
         .side-grip + .side { max-width: none; }
       }
       @media (max-width: 1200px) {
-        .side { padding: 12px; }
-        #brand { padding: 0 12px; max-width: 268px; }
-        #tabs .tab { flex: 0 0 auto; min-width: 0; padding: 12px 12px; font-size: 12px; }
+        .side { padding: 10px; }
+        #brand { padding: 0 10px; max-width: 268px; }
+        #tabs .tab { flex: 0 0 auto; min-width: 0; padding: 10px 10px; font-size: 12px; }
         #control-zone { padding: 0 2px 0 10px; gap: 8px; }
         .cam-panel { width: 240px; }
+        /* ★ A3：窄屏左右两组 tab + 居中品牌 + 速度滑块同排时宽度紧张 ——
+           收起速度文字标签、滑块收窄，把宽度让给 tab（滑块本身仍可用，数值仍显示）。 */
+        .speed-label { display: none; }
+        .speed-slider { width: 64px; }
       }
       @media (max-width: 1120px) {
         .monitor { flex-direction: column; }
         .view { flex: 1 1 45%; min-height: 220px; }
         .side-grip { display: none; }
         .side, .side.collapsed { width: auto; flex: 1 1 55%; border-left: none;
-          border-top: 1px solid var(--line); max-height: none; padding: 12px;
+          border-top: 1px solid var(--line); max-height: none; padding: 10px;
           overflow-y: auto; transition: none; }
         #safety-banner { white-space: normal; max-width: 92vw; text-align: center; }
-        .hud-joints { min-width: 176px; max-width: 200px; }
         #bottom-zone { gap: 6px; }
       }
       @media (max-width: 720px) {

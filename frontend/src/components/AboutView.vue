@@ -28,7 +28,7 @@ import {
 import { shortcutRows } from "../shortcuts.js";
 import { useSettingsStore } from "../stores/settings.js";
 import { useLinkStore } from "../stores/link.js";
-import { visibleTabs } from "../tabs.js";
+import { visibleTabs, TABS } from "../tabs.js";
 import { useAuthStore } from "../stores/auth.js";
 
 const auth = useAuthStore();
@@ -39,8 +39,24 @@ const rows = computed(() => shortcutRows());
 const modules = computed(() => MODULE_GUIDE);
 const live = computed(() => settings.live);
 
+/** ★ Ab6：guide.js 数据里大量用 `**粗体**` markdown 记号，而本页是 `{{ }}` **纯文本**渲染 ——
+ *  星号会原样显示在界面上（如「**灰度相机**」）。这里统一在渲染/复制入口去掉 `**`。
+ *  ★ 不引入 v-html：这些文案不需要富文本，用 v-html 只会平白引入 XSS 面。 */
+const plain = (v) => String(v == null ? "" : v).replace(/\*\*/g, "");
+
 /** 当前权限下能用的模块（用来标注"需要权限"的模块现在能不能进）。 */
 const enabledKeys = computed(() => visibleTabs(auth).map((t) => t.key));
+
+// ★★ Ab1 修复（2026-10-11）：模块列表的数字编号必须与**顶栏数字键**一致。
+//   原来直接用 MODULE_GUIDE 的下标 i+1 —— 而 MODULE_GUIDE 里第 3 项是 tabs.js 中
+//   `hidden:true` 的「程序执行」（不在顶栏）。于是编号整体错位：读者按"3"以为切到
+//   「程序执行」，实际顶栏的第 3 个是「智能分拣」。这是**误导性映射**。
+//   现按顶栏真实顺序（navTabs，hidden 不占数字位）编号；hidden 项单独标注入口位置。
+//   ★ 用静态的 TABS（不按权限过滤）保证编号在不同权限下稳定 —— 权限只影响能否进入，
+//     不影响"这个模块在顶栏从左数是第几个"。
+const NAV_KEYS = TABS.filter((t) => !t.hidden).map((t) => t.key);
+/** 顶栏序号（1~8）；不在顶栏的（hidden，如「程序执行」）返回 0。 */
+function modNo(key) { return NAV_KEYS.indexOf(key) + 1; }
 
 // ---------------------------------------------------------------------
 // 章节导航（页面变长后没有导航会很难找东西）
@@ -172,23 +188,23 @@ function buildHelpText() {
   L.push("");
 
   L.push("【快速上手】");
-  QUICKSTART.forEach((s, i) => L.push(`${i + 1}. ${s.title} —— ${s.desc}`));
+  QUICKSTART.forEach((s, i) => L.push(`${i + 1}. ${s.title} —— ${plain(s.desc)}`));
   L.push("");
 
   L.push("【实验前检查清单】（★ = 不满足就不要开始实验）");
   CHECKLIST.forEach((g) => {
     L.push(`-- ${g.group} --`);
-    g.items.forEach((it) => L.push(`  [ ] ${it.critical ? "★ " : ""}${it.label}`));
+    g.items.forEach((it) => L.push(`  [ ] ${it.critical ? "★ " : ""}${plain(it.label)}`));
   });
   L.push("");
 
   L.push("【标准操作流程】");
   PROCEDURES.forEach((p) => {
     L.push(`-- ${p.title} --`);
-    L.push(`  为什么：${p.why}`);
+    L.push(`  为什么：${plain(p.why)}`);
     p.steps.forEach((s, i) => {
-      L.push(`  ${i + 1}) ${s.warn ? "⚠ " : ""}${s.text}`);
-      if (s.note) L.push(`        ↳ ${s.note}`);
+      L.push(`  ${i + 1}) ${s.warn ? "⚠ " : ""}${plain(s.text)}`);
+      if (s.note) L.push(`        ↳ ${plain(s.note)}`);
     });
   });
   L.push("");
@@ -196,15 +212,15 @@ function buildHelpText() {
   L.push("【注意事项】");
   PRECAUTIONS.forEach((g) => {
     L.push(`-- ${g.group} --`);
-    g.items.forEach((it) => L.push(`  · [${it.level}] ${it.title}：${it.text}`));
+    g.items.forEach((it) => L.push(`  · [${it.level}] ${it.title}：${plain(it.text)}`));
   });
   L.push("");
 
   L.push("【异常处置速查】");
   TROUBLESHOOT.forEach((r) => {
-    L.push(`  现象：${r.symptom}`);
-    L.push(`  原因：${r.cause}`);
-    L.push(`  处置：${r.action}`);
+    L.push(`  现象：${plain(r.symptom)}`);
+    L.push(`  原因：${plain(r.cause)}`);
+    L.push(`  处置：${plain(r.action)}`);
   });
   L.push("");
 
@@ -216,7 +232,7 @@ function buildHelpText() {
   L.push("");
 
   L.push("【模块】");
-  modules.value.forEach((m) => L.push(`${m.label}：${m.desc}`));
+  modules.value.forEach((m) => L.push(`${m.label}：${plain(m.desc)}`));
   return L.join("\n");
 }
 
@@ -231,7 +247,7 @@ function copyChecklistTodo() {
     const todo = g.items.filter((it) => !checked[it.id]);
     if (!todo.length) return;
     L.push(`-- ${g.group} --`);
-    todo.forEach((it) => L.push(`  [ ] ${it.critical ? "★ " : ""}${it.label}`));
+    todo.forEach((it) => L.push(`  [ ] ${it.critical ? "★ " : ""}${plain(it.label)}`));
   });
   return copyText(L.join("\n"), "todo");
 }
@@ -298,8 +314,8 @@ onMounted(() => {
       <ol class="ab-steps">
         <li v-for="(s, i) in QUICKSTART" :key="i">
           <div class="ab-step-h"><b>{{ s.title }}</b></div>
-          <div class="ab-step-d">{{ s.desc }}</div>
-          <div class="ab-step-x">{{ s.detail }}</div>
+          <div class="ab-step-d">{{ plain(s.desc) }}</div>
+          <div class="ab-step-x">{{ plain(s.detail) }}</div>
         </li>
       </ol>
     </div>
@@ -345,7 +361,7 @@ onMounted(() => {
               <span class="ab-cl-label">
                 <b v-if="it.critical" class="ab-cl-star">★</b>{{ it.label }}
               </span>
-              <span class="ab-cl-detail">{{ it.detail }}</span>
+              <span class="ab-cl-detail">{{ plain(it.detail) }}</span>
             </span>
           </label>
         </div>
@@ -375,13 +391,13 @@ onMounted(() => {
             <span class="ab-sop-cnt">{{ p.steps.length }} 步</span>
           </button>
           <div v-show="sopOpen[p.id]" class="ab-sop-body">
-            <p class="ab-sop-why">{{ p.why }}</p>
+            <p class="ab-sop-why">{{ plain(p.why) }}</p>
             <ol class="ab-sop-steps">
               <li v-for="(s, i) in p.steps" :key="i" :class="{ warn: s.warn }">
                 <span class="ab-sop-txt">
-                  <Icon v-if="s.warn" name="alert" :size="12" />{{ s.text }}
+                  <Icon v-if="s.warn" name="alert" :size="12" />{{ plain(s.text) }}
                 </span>
-                <span v-if="s.note" class="ab-sop-note">{{ s.note }}</span>
+                <span v-if="s.note" class="ab-sop-note">{{ plain(s.note) }}</span>
               </li>
             </ol>
           </div>
@@ -404,7 +420,7 @@ onMounted(() => {
               <Icon :name="precStyle(it.level).icon" :size="13" /><b>{{ it.title }}</b>
               <span class="ab-prec-lv">{{ it.level }}</span>
             </div>
-            <p>{{ it.text }}</p>
+            <p>{{ plain(it.text) }}</p>
           </div>
         </div>
       </div>
@@ -433,7 +449,7 @@ onMounted(() => {
         <div v-if="!troubleRows.length" class="ab-tr-empty">没有匹配项 —— 换个关键词，或直接看「注意事项」。</div>
       </div>
       <p class="ab-note">
-        ★ 界面对大多数异常都会给出**不同的提示文字**，读提示比猜快。
+        ★ 界面对大多数异常都会给出<b>不同的提示文字</b>，读提示比猜快。
         真出现表格里没有的现象：先把「运维审计 → 事件时间线」的对应时段导出，再找维护人员，
         别一边报故障一边继续点动。
       </p>
@@ -470,24 +486,26 @@ onMounted(() => {
     <div class="ab-sec" id="ab-sec-mods">
       <div class="ab-head">
         <Icon name="layers" :size="16" />
-        <span class="ab-title">九个模块</span>
+        <span class="ab-title">九个模块（顶栏 8 个 + 程序执行并入点位执行）</span>
         <span class="ab-sub">1 ~ 8 从左到右直达</span>
       </div>
       <div class="ab-mods">
-        <div v-for="(m, i) in modules" :key="m.key" class="ab-mod"
+        <div v-for="m in modules" :key="m.key" class="ab-mod"
              :class="{ locked: !enabledKeys.includes(m.key) }">
           <div class="ab-mod-h">
-            <span class="ab-mod-no">{{ i + 1 }}</span>
+            <!-- ★ 编号按顶栏顺序（hidden 的「程序执行」不占数字位，显示 — 并单独标注入口） -->
+            <span class="ab-mod-no">{{ modNo(m.key) || "—" }}</span>
             <Icon :name="m.icon" :size="15" />
             <b>{{ m.label }}</b>
+            <span v-if="modNo(m.key) === 0" class="ab-mod-entry">入口在「点位执行」页内</span>
             <span v-if="!enabledKeys.includes(m.key)" class="ab-mod-lock">
               <Icon name="lock" :size="11" /> 需{{ m.key === 'ops' ? '管理员' : '控制' }}权限
             </span>
           </div>
-          <div class="ab-mod-d">{{ m.desc }}</div>
-          <div class="ab-mod-u"><span class="ab-k">什么时候用</span>{{ m.use }}</div>
+          <div class="ab-mod-d">{{ plain(m.desc) }}</div>
+          <div class="ab-mod-u"><span class="ab-k">什么时候用</span>{{ plain(m.use) }}</div>
           <ul class="ab-mod-t">
-            <li v-for="(t, j) in m.tips" :key="j">{{ t }}</li>
+            <li v-for="(t, j) in m.tips" :key="j">{{ plain(t) }}</li>
           </ul>
         </div>
       </div>
@@ -549,6 +567,16 @@ onMounted(() => {
             所以那张表是必需的；但它<b>不是现场实况</b>，格子里到底有什么仍需人工确认。
           </p>
         </div>
+        <div class="ab-note-item warn">
+          <div class="ab-note-h"><Icon name="camera" :size="14" /><b>判色阈值（矩形填充率 / 置信度）</b></div>
+          <p>
+            「矩形填充率」是「只识别矩形」的硬门槛：低于此值直接判非矩形、不输出颜色（0 = 关闭）。
+            它必须<b>低于现场实测最低填充率</b>（真矩形实测 0.67~0.75）—— 定太高会误杀真方块，
+            表现为「三色全都检测不到」（2026-10-08 事故：曾定为 0.72 → 绿色/蓝色全部被判非矩形）。
+            阈值与旋转无关；被遮挡较厉害的件会被判非矩形 → 分拣按「检测不到」停，觉得太严就调低。
+            改阈值前请先跑现场真图回放（camera/tools/vision_e2e_replay.py），不要按合成图定。
+          </p>
+        </div>
       </div>
     </div>
 
@@ -564,7 +592,7 @@ onMounted(() => {
             <Icon :name="n.level === 'info' ? 'info' : 'alert'" :size="14" />
             <b>{{ n.title }}</b>
           </div>
-          <p>{{ n.text }}</p>
+          <p>{{ plain(n.text) }}</p>
         </div>
       </div>
     </div>
@@ -647,9 +675,10 @@ onMounted(() => {
 .ab-btn.sm { padding: 4px 9px; font-size: 11px; }
 
 /* ---- 章节导航 ---- */
+/* ★ St2：sticky top 从 -14px 改为 0（容器 .about 有 padding:10px，负吸附点会盖住上一卡底边） */
 .ab-nav { display: flex; flex-wrap: wrap; gap: 6px; padding: 9px 10px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
-  position: sticky; top: -14px; z-index: 3; backdrop-filter: blur(6px); }
+  position: sticky; top: 0; z-index: 3; backdrop-filter: blur(6px); }
 .ab-nav-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 9px;
   font-size: 11px; border-radius: 20px; color: var(--muted);
   border: 1px solid var(--line); background: var(--panel2); cursor: pointer; }
@@ -707,7 +736,7 @@ onMounted(() => {
 .ab-sop { display: flex; flex-direction: column; gap: 7px; }
 .ab-sop-item { border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); }
 .ab-sop-item.open { border-color: var(--accent-line); }
-.ab-sop-h { width: 100%; display: flex; align-items: center; gap: 7px; padding: 10px 11px;
+.ab-sop-h { width: 100%; display: flex; align-items: center; gap: 7px; padding: 10px;
   background: none; border: none; cursor: pointer; text-align: left; }
 .ab-sop-h b { font-size: 13px; color: var(--txt); }
 .ab-sop-h svg { color: var(--accent); flex: none; }
@@ -730,7 +759,7 @@ onMounted(() => {
 .ab-prec-gh { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--txt); }
 .ab-prec-gh svg { color: var(--accent); }
 .ab-prec-item { border: 1px solid var(--line); border-left-width: 3px; border-radius: 7px;
-  padding: 9px 11px; background: var(--panel2); }
+  padding: 9px 10px; background: var(--panel2); }
 .ab-prec-item.danger { border-left-color: var(--err); }
 .ab-prec-item.warn { border-left-color: var(--warn); }
 .ab-prec-item.info { border-left-color: var(--accent); }
@@ -746,7 +775,7 @@ onMounted(() => {
   border: 1px solid var(--line); background: var(--bg); color: var(--txt); }
 .ab-tr { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .ab-tr-head, .ab-tr-row { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(190px, 1.3fr) minmax(190px, 1.3fr);
-  gap: 10px; padding: 8px 11px; }
+  gap: 10px; padding: 8px 10px; }
 .ab-tr-head { background: var(--panel2); font-size: 11px; color: var(--accent); letter-spacing: .4px;
   border-bottom: 1px solid var(--line); }
 .ab-tr-row { font-size: 11px; line-height: 1.7; border-bottom: 1px solid var(--line); }
@@ -777,7 +806,7 @@ onMounted(() => {
 
 /* ---- 模块 ---- */
 .ab-mods { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 10px; }
-.ab-mod { border: 1px solid var(--line); border-radius: 8px; padding: 11px; background: var(--panel2); }
+.ab-mod { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel2); }
 .ab-mod.locked { opacity: .62; }
 .ab-mod-h { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--txt); }
 .ab-mod-h svg { color: var(--accent); }
@@ -785,6 +814,8 @@ onMounted(() => {
   font-size: 10px; font-weight: 700; color: var(--accent); border: 1px solid var(--accent-line); }
 .ab-mod-lock { margin-left: auto; display: inline-flex; align-items: center; gap: 3px;
   font-size: 10px; color: var(--warn); }
+/* ★ hidden 模块（不在顶栏，如「程序执行」）：不占数字位，单独标注入口在哪儿 */
+.ab-mod-entry { font-size: 10px; color: var(--muted); }
 .ab-mod-d { font-size: 12px; color: var(--muted); margin-top: 7px; line-height: 1.6; }
 .ab-mod-u { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.6; }
 .ab-mod-t { margin: 7px 0 0; padding-left: 16px; }
@@ -793,7 +824,7 @@ onMounted(() => {
 /* ---- 安全须知 ---- */
 .ab-notes { display: flex; flex-direction: column; gap: 8px; }
 .ab-note-item { border: 1px solid var(--line); border-left-width: 3px; border-radius: 7px;
-  padding: 10px 12px; background: var(--panel2); }
+  padding: 10px; background: var(--panel2); }
 .ab-note-item.danger { border-left-color: var(--err); }
 .ab-note-item.warn { border-left-color: var(--warn); }
 .ab-note-item.info { border-left-color: var(--accent); }

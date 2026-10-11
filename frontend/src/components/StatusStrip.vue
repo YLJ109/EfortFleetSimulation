@@ -93,7 +93,8 @@ const linkTab = computed(() => {
     key: "link", icon: "plug", label: "真机链路",
     value,
     tone: t,
-    title: "真机链路（就绪链）：" + value + (rc.error ? "\n" + rc.error : ""),
+    // ★ B4：片 value 是"一句话结论"，展开面板（RcReadyCard）里是逐项就绪链 —— 在 title 里点明关系。
+    title: "真机链路 —— " + value + "（展开面板为详细就绪链）" + (rc.error ? "\n" + rc.error : ""),
   };
 });
 
