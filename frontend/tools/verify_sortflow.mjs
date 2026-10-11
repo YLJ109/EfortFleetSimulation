@@ -242,5 +242,28 @@ console.log("== F. 分拣模式（正常 / 快速）→ 后端 dual_face ==");
 }
 
 console.log("");
+console.log("== G. J6 正面/反面：界面只显示 J6（用户 2026-10-11 反馈） ==");
+{
+  // ★ 用户口径："J6 的坐标不对，你应该只存储 J6 的坐标，别的五个点不用"。
+  //   后端已把翻转改成**只覆盖第 6 轴**（`_move_flip_j6`）；界面这两行也必须**只报 J6**，
+  //   否则列表里还列着 6 个关节值 → 会让人误以为那 5 个轴也参与翻转（界面在编故事）。
+  //   做法：给这两项打 `j6Only: true`，模板按标记分支渲染（**不**用 sl.name === ... 散落硬编码）。
+  const j6Lines = view.split("\n")
+    .filter((l) => !l.trim().startsWith("//") && /j6Only:\s*true/.test(l));
+  ok("★ j6Only 标记只打在 J6 两项上（C检测 / 开始/结束点 未被影响）",
+    j6Lines.length === 2 && j6Lines.every((l) => /"J6/.test(l)),
+    "打到: " + JSON.stringify(j6Lines.map((l) => l.trim())));
+  ok("★ 坐标区有 j6-only 的分支渲染（v-if=\"sl.j6Only\"）",
+    /v-if="sl\.j6Only"/.test(view));
+  ok("★ 有 J6-only 取值函数（j6Text，只取 joints[5]）",
+    /function j6Text\(/.test(view) && /j\[5\]/.test(view));
+  ok("★ 明确标注「仅 J6 有效，其余轴不使用」",
+    /仅 J6 有效，其余轴不使用/.test(view));
+  // 反证：非 j6-only 的点仍走完整 6 值渲染（coordText 未被整体替换掉）。
+  ok("★ 非 j6-only 行仍显示完整坐标（coordText 仍在）",
+    /coordText\(ptOf\(sl\.name\)\)/.test(view));
+}
+
+console.log("");
 console.log("结果: " + pass + " 通过 / " + fail + " 失败");
 process.exit(fail ? 1 : 0);

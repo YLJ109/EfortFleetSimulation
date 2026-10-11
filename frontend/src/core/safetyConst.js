@@ -15,6 +15,10 @@
  */
 export const SPEED_MIN = 5;
 export const SPEED_MAX = 100;
+// ★ 2026-10-11 用户口径：**每次启动默认 10%**（原来 5%）。
+//   下限仍 SPEED_MIN(=5)：需要更慢时还能往下拖。★ 默认值 5%→10% = 真机**提速一倍**，
+//   属用户明确要求；滑块值 1:1 直通到 40103（由 robot.yaml 的 service_program_vperc=100 保证）。
+export const SPEED_DEFAULT = 10;
 export const JOG_SPEED_MIN = 5; // °/s
 export const JOG_SPEED_MAX = 10; // °/s
 

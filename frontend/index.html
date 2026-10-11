@@ -449,6 +449,23 @@
         background: linear-gradient(135deg, rgba(47,214,240,0.18), rgba(59,130,246,0.10));
         box-shadow: inset 0 0 0 1px rgba(47,214,240,0.25); }
       .seg.mini button { padding: 2px 8px; }
+      /* 功能 Tab（分段控件）：srt-tabs / srt-tab —— Sentinel 指挥中心风格，
+         满宽分栏 + 选中态青色发光下划线，与顶栏平行四边形按钮同一套青色语言。
+         ★ 2026-10-11：从 SortingView.vue 的 scoped 样式**提到全局**，
+           供「智能分拣」页与「点位执行 / 程序执行」页**共用同一套视觉**
+           （用户要求两处 tab 栏一致；避免各写一套、样式漂移）。 */
+      .srt-tabs { display: flex; margin: 0; border-radius: 9px;
+        background: var(--panel2); border: 1px solid var(--line); padding: 3px; gap: 3px; }
+      .srt-tab { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+        padding: 9px 0; border-radius: 7px; font-size: 13px; color: var(--muted);
+        background: transparent; transition: all .16s ease; position: relative; }
+      .srt-tab:hover { color: var(--txt); background: rgba(47, 214, 240, .06); }
+      .srt-tab.on { color: var(--accent);
+        background: linear-gradient(180deg, rgba(47,214,240,.10), rgba(47,214,240,.03));
+        box-shadow: inset 0 0 0 1px var(--accent-line, rgba(47,214,240,.28)); }
+      .srt-tab.on::after { content: ""; position: absolute; left: 18%; right: 18%; bottom: -1px;
+        height: 2px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+      .srt-tab.on svg { filter: drop-shadow(0 0 3px var(--accent)); }
       .ghost-toggle { margin-left: auto; display: inline-flex; align-items: center; gap: 4px;
         font-size: 11px; color: var(--muted); }
 

@@ -4,7 +4,10 @@
 //
 //   左侧：MonitorLayout 的 3D 视口（与其它页共用同一个 scene/canvas），
 //         示教时看着机器人动，右边点「存点 / 到点」。
-//   右侧：① 就绪（复用现成 RcReadyCard：一键就绪）  ② 页签「执行 / 点位」
+//   右侧：① 就绪（复用现成 RcReadyCard：一键就绪）
+//         ② 页签「井字棋 / 执行 / 点位」（★ 2026-10-11 由两栏改三栏，详见下方 tab 注释）
+//         · 井字棋：井字棋卡片 + 手柄测试盒（原来常驻右栏，执行/点位两个 tab 都能看到，
+//                   现统一收进本 tab，只保留一份；棋盘 2D 浮层仍挂 #hud，不属 tab 内容）
 //         · 执行：参数 + 空跑/开始/暂停/继续/停止 + 进度 + 判色 + 三列占用
 //         · 点位：精简点动 + A/B 各 9 格 × 2 槽（正上位 & 料位）+ C + 开始/结束点
 //                 每个点位槽：存点（记当前位置）/ 到点（复核）/ 清空
@@ -45,7 +48,19 @@ const s3d = useSorting3dStore();
 //   轮询随本页（sort）进出：进入启、离开停（照 s3d/ai 的门控写法）。
 const ttt = useTicTacToeStore();
 
-const tab = ref("run");           // run | point
+// ★ 2026-10-11 用户需求：本页 tab 栏由「执行 / 点位」两栏改成「井字棋 / 执行 / 点位」三栏。
+//   改动动机：井字棋卡片（TicTacToeCard）与手柄测试盒（GamepadTestCard）原先是**常驻右栏**的，
+//   于是执行、点位两个 tab 下都会看到游戏内容。现在把这两张卡统一收进「井字棋」tab，
+//   执行/点位不再出现游戏内容 —— **只保留一份**（不复制任何井字棋逻辑，仍是同一个 store）。
+//   ★ 默认仍选中「执行」：本页主功能是分拣运行，一进页面先看到游戏不合适
+//     （用户原话把「井字棋」列在最前，这里按"主功能优先"取默认，可在回报中让用户纠正）。
+const tab = ref("run");           // ttt | run | point
+// ★ 井字棋 2D 棋盘浮层（挂 #hud）的显示口径（2026-10-11 用户口径："要"把它也收进 tab）：
+//   浮层只在**井字棋 tab 下**出现 —— 执行/点位 tab 不该被游戏棋盘挡住分拣画面。
+//   · 「有对局/复盘」内建判据**复用 store 的 gameVisible**（不在此重写，避免口径两处分叉）；
+//   · 「停在哪个 tab」只有本页知道，故在本地与内建判据取"与"。
+//   ★ 只改"显不显示"：不动浮层定位/尺寸，也不动对局逻辑与轮询进出规则。
+const showTttBoard = computed(() => ttt.gameVisible && tab.value === "ttt");
 const chk = ref(null);            // 38 点位体检
 const chkErr = ref("");
 const st = ref(null);             // 分拣进度
@@ -100,8 +115,11 @@ const extraSlots = [
   //   在「正面 / 反面」之间切换（用同一位置覆盖左右两侧）。
   //   名字必须与后端 services/sorting.py 的 OPTIONAL_EXTRA_POINTS、
   //   api/sorting.py 的 DUAL_FACE_FLIP_POINT 完全一致（回归钉会比对源码）。
-  { name: "J6正面", label: "J6 正面（下板 · 正常面）" },
-  { name: "J6反面", label: "J6 反面（上板 · 翻转面）" },
+  // ★ 2026-10-11 用户反馈："J6 的坐标不对，你应该只存储/使用 J6，别的五个轴不用"
+  //   → 这两项打 `j6Only: true`：坐标区**只显示 J6 一个值**，并如实标注"仅 J6 有效"。
+  //   （翻转的实际下发也已在后端 `_move_flip_j6` 里改成只覆盖第 6 轴，这里同步显示口径。）
+  { name: "J6正面", label: "J6 正面（下板 · 正常面）", j6Only: true },
+  { name: "J6反面", label: "J6 反面（上板 · 翻转面）", j6Only: true },
 ];
 
 /** 未示教名单（体检结果里就是"缺哪些"）→ 用来判断每个点位槽的状态。 */
@@ -146,6 +164,22 @@ function coordText(p) {
   const j = p.joints;
   if (!j || !j.length) return "无坐标";
   return j.map((v) => Number(v).toFixed(1)).join("  ");
+}
+
+/**
+ * J6-only 点（`J6正面` / `J6反面`）的坐标显示：**只显示第 6 轴**。
+ *
+ * ★ 为什么这两行只显示 J6（用户 2026-10-11 反馈："J6 的坐标不对，你应该只存储 J6 的坐标，
+ *   别的五个点不用"）：双面翻转**只用 J6** 切换用哪一面 —— J1~J5 由后端
+ *   `_move_flip_j6` 保持"当前实时姿态"原样不动。列表里再列 6 个关节值会让人误以为
+ *   那 5 个轴也参与翻转（界面在"编故事"），所以这里如实只报 J6。
+ * ★ 存点仍走 `/sorting/teach`、仍存 6 值（**点位库格式不变**）—— 只是**使用/显示**只看 J6。
+ */
+function j6Text(p) {
+  const j = p && p.joints;
+  if (!j || j.length < 6) return "未示教";
+  const v = Number(j[5]);
+  return Number.isFinite(v) ? "J6 = " + v.toFixed(1) + "°" : "未示教";
 }
 
 /**
@@ -241,6 +275,9 @@ async function poll() {
     if (!r.ok) return;
     const d = await r.json();
     running.value = !!d.running;
+    // ★ 2026-10-11：分拣页自带轮询时，同步把"是否有执行在跑"写回全局 store
+    //   （本页 tick 被 sorting3d 跳过，避免重复请求；底部状态区靠这个判据自动开日志）。
+    s3d.running = running.value;
     st.value = d.state || null;
     // ★ 暂停态在 /control/run-state（RunContext 统一进度快照）——
     //   只在运行中多打一次轻量 GET；空闲直接清掉，不发多余请求。
@@ -562,14 +599,21 @@ watch(() => rc.readyTick, (n) => {
            views[0]='sort' 是本页（面板归属），带上 'live' 让真实监控页共用同一实例，
            避免"同一台相机被两个面板各开一路"。 -->
       <CameraPanel :views="['sort', 'live']" />
-      <!-- ★ 井字棋 2D 棋盘浮层：只在有对局/复盘时显示（无对局时组件自身 v-if 隐藏，
-           不干扰分拣操作）；键盘 ↑↓←→ + Enter / 鼠标点格落子（见 TicTacToeBoard.vue）。 -->
-      <TicTacToeBoard />
+      <!-- ★ 井字棋 2D 棋盘浮层：只在「井字棋」tab 且（有对局/复盘）时显示
+           （showTttBoard = store.gameVisible && tab==='ttt'，见上方计算属性）；
+           执行/点位 tab 不显示它，避免挡住分拣画面。无对局时组件自身也 v-if 隐藏，
+           键盘 ↑↓←→ + Enter / 鼠标点格落子（见 TicTacToeBoard.vue）。 -->
+      <TicTacToeBoard v-if="showTttBoard" />
     </template>
 
-    <!-- 功能 Tab：执行 / 点位 —— 一张卡两种活儿，用带图标的 tab 栏切换，
-         选中态青色发光 + 底部指示条（Sentinel 指挥中心风格），与顶栏语言一致。 -->
+    <!-- 功能 Tab：井字棋 / 执行 / 点位 —— 用带图标的 tab 栏切换，
+         选中态青色发光 + 底部指示条（Sentinel 指挥中心风格），与顶栏语言一致。
+         ★ 2026-10-11：样式 .srt-tabs/.srt-tab 已从本组件 scoped 提到全局（index.html），
+           供本页与「点位执行」页共用同一套视觉（用户要求两处 tab 栏一致）。 -->
     <div class="srt-tabs" role="tablist">
+      <button class="srt-tab" :class="{ on: tab === 'ttt' }" @click="tab = 'ttt'">
+        <Icon name="grid" :size="13" /><span>井字棋</span>
+      </button>
       <button class="srt-tab" :class="{ on: tab === 'run' }" @click="tab = 'run'">
         <Icon name="play" :size="13" /><span>执行</span>
       </button>
@@ -578,10 +622,6 @@ watch(() => rc.readyTick, (n) => {
       </button>
     </div>
 
-    <!-- ★ 井字棋卡片：常驻于本页右栏（棋盘 = B 区、搬运链路与分拣同源） -->
-    <TicTacToeCard />
-    <!-- ★ 手柄测试盒：连接状态 + 实时读数 + 模拟触发（点按钮 = 按手柄），常驻右栏 -->
-    <GamepadTestCard />
 
     <!-- ================= 执行 ================= -->
     <template v-if="tab === 'run'">
@@ -754,7 +794,7 @@ watch(() => rc.readyTick, (n) => {
     </template>
 
     <!-- ================= 点位 ================= -->
-    <template v-else>
+    <template v-else-if="tab === 'point'">
       <div class="card sel-card">
         <h3><Icon name="layers" :size="15" /> 残影对比
           <span class="h3-sub">点名字=A(蓝) · Shift+点=B(橙)</span>
@@ -870,7 +910,7 @@ watch(() => rc.readyTick, (n) => {
              @mouseenter="hover(sl.name)" @mouseleave="unhover()">
           <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
           <span class="sname" :class="{ pinned: pinnedName === sl.name, pinnedb: pinnedBName === sl.name }"
-                :title="sl.name + ' · ' + coordText(ptOf(sl.name))"
+                :title="sl.name + ' · ' + (sl.j6Only ? j6Text(ptOf(sl.name)) : coordText(ptOf(sl.name)))"
                 @click="pin(sl.name, $event)">{{ sl.label }}<span class="muted"> · {{ sl.name }}</span></span>
           <button class="mini-btn" :disabled="!canTeach || pointBusy === sl.name"
                   title="把机器人当前位置存为该点位" @click="teach(sl.name)">
@@ -886,32 +926,37 @@ watch(() => rc.readyTick, (n) => {
           </button>
         </div>
         <div class="coord wide" v-for="sl in extraSlots" :key="'c-' + sl.name"
-             :title="sl.name + ' · ' + coordText(ptOf(sl.name))">
-          <b>{{ sl.name }}</b>{{ coordText(ptOf(sl.name)) }}
+             :title="sl.name + ' · ' + (sl.j6Only ? j6Text(ptOf(sl.name)) : coordText(ptOf(sl.name)))">
+          <b>{{ sl.name }}</b>
+          <!-- ★ J6 正面/反面：**只渲染 J6**（其余轴不参与翻转）；其余点位照旧显示完整 6 值。 -->
+          <template v-if="sl.j6Only">
+            {{ j6Text(ptOf(sl.name)) }}<span class="muted">（仅 J6 有效，其余轴不使用）</span>
+          </template>
+          <template v-else>{{ coordText(ptOf(sl.name)) }}</template>
         </div>
         <p class="small muted">「开始/结束点」是一个点：一轮开始先去、结束与异常都回这里。</p>
-        <p class="small muted">J6 正面/反面是<b>同一姿态、只有 J6 不同</b>；双面分拣靠在这两个点之间切换来实现「用同一位置覆盖左右两侧」。</p>
+        <p class="small muted">J6 正面/反面<b>只用 J6</b>（其余轴不使用）：双面分拣在这两个点之间切换 J6，</p>
+        <p class="small muted">靠「同一位置、不同 J6」覆盖左右两侧；翻转下发时 J1~J5 保持机器人<b>当前实时姿态</b>。</p>
       </div>
+    </template>
+
+    <!-- ================= 井字棋 ================= -->
+    <!-- ★ 井字棋卡片 + 手柄测试盒：原先常驻右栏（执行/点位两个 tab 都能看到），
+         现统一收进本 tab（**只保留一份**，逻辑仍是同一个 store，不复制）。
+         棋盘 2D 浮层仍挂在 #hud（视口右上角）——它是"对局显示"不是 tab 内容，故不在此处。 -->
+    <template v-else>
+      <TicTacToeCard />
+      <GamepadTestCard />
     </template>
   </MonitorLayout>
 </template>
 
 <style scoped>
-/* ---- 功能 Tab（执行 / 点位）：Sentinel 指挥中心风格 ----
-   满宽分栏 + 选中态青色发光下划线，与顶栏平行四边形按钮用同一套青色语言。
-   用透视的连接线做 aria-tablist 内的分隔，强化"主导航内再分层"的层级感。 */
-.srt-tabs { display: flex; margin: 0; border-radius: 9px;
-  background: var(--panel2); border: 1px solid var(--line); padding: 3px; gap: 3px; }
-.srt-tab { flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
-  padding: 9px 0; border-radius: 7px; font-size: 13px; color: var(--muted);
-  background: transparent; transition: all .16s ease; position: relative; }
-.srt-tab:hover { color: var(--txt); background: rgba(47, 214, 240, .06); }
-.srt-tab.on { color: var(--accent); background: linear-gradient(180deg, rgba(47,214,240,.10), rgba(47,214,240,.03));
-  box-shadow: inset 0 0 0 1px var(--accent-line, rgba(47,214,240,.28)); }
-.srt-tab.on::after { content: ""; position: absolute; left: 18%; right: 18%; bottom: -1px;
-  height: 2px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
-.srt-tab.on svg { filter: drop-shadow(0 0 3px var(--accent)); }
-/* 分拣模式分段控件：复用上面 .srt-tabs/.srt-tab 的选中态视觉，只把它压成行内尺寸
+/* ---- 功能 Tab（井字棋 / 执行 / 点位）----
+   基础样式 .srt-tabs / .srt-tab （满宽分栏 + 选中态青色发光下划线）已提到**全局**
+   index.html，供本页与「点位执行」页共用同一套视觉（用户要求两处 tab 栏一致）。
+   本组件只保留下面这几条**行内尺寸覆盖**（分拣模式分段控件复用同一套视觉但不是满宽）。 */
+/* 分拣模式分段控件：复用全局 .srt-tabs/.srt-tab 的选中态视觉，只把它压成行内尺寸
    （默认那两个 tab 是 flex:1 满宽，放进参数行里会撑开）。 */
 .mode-seg { flex: none; }
 .mode-seg .srt-tab { flex: none; padding: 5px 14px; font-size: 12.5px; }

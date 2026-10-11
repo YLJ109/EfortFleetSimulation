@@ -112,23 +112,42 @@ def test_original_single_piece_path_is_untouched():
         "for idx, a_slot in enumerate(S.A_SLOTS"), "双面分支必须是**早返回**"
 
 
-def test_rotation_whitelist_pure():
-    """★ 方案 §6-1：旋转只允许 正上位 / 摄像头点位 / 起点；原料位 → 拒绝。"""
-    assert S.rotation_point_allowed("A3") is False
-    assert S.rotation_point_allowed("A1上") is False
-    assert S.rotation_point_allowed("B5") is False
-    assert S.rotation_point_allowed("") is False
-    assert S.rotation_point_allowed("正上位") is True
-    assert S.rotation_point_allowed("C检测位") is True          # ★ 方案叫法
-    assert S.rotation_point_allowed(S.CAMERA_POINT) is True      # "C检测"
-    assert S.rotation_point_allowed(S.START_POINT) is True       # "开始/结束点"
+# ★★ 2026-10-11 口径变更（用户原话）：
+#   「J6 反正不能在**原位**进行旋转！其他的时候可以旋转」
+#   —— 「原位」= **原料位（A 区格位本身，如 A1…A9）**。
+#   ⇒ 判据由旧的"**白名单**（只允许 正上位/摄像头/起点）"改为
+#      "**黑名单**：**只有原料位禁止旋转，其余一切允许**"。
+#   ★ 旧白名单的两条断言因此**必须翻案**：`A1上`（正上位）与 `J6反面`（双面翻转目标）
+#     旧值都是 False，正是把双面流程拦死、与设计自相矛盾的根源。
+@pytest.mark.parametrize("name,allowed", [
+    # —— 原料位（A 区格位本身）→ **禁止** ——
+    ("A1", False), ("A9", False), ("A3", False),
+    # 大小写 / 空格 / 带后缀写法：归一后仍是"看着像 A 区格位且不带 '上'" → 保守按原料位拒
+    ("a1", False), ("A1 ", False), (" a 1 ", False), ("A1(原料)", False),
+    ("", False),                                        # 空名字 → 保守拒绝（沿用旧行为）
+    # —— 其余一切 → **允许** ——
+    ("A1上", True), ("正上位", True),                    # A 区正上位（旧白名单反而误禁，自相矛盾）
+    ("J6正面", True), ("J6反面", True),                 # ★ 双面翻转目标点（旧白名单误禁 → 流程跑不起来）
+    ("C检测", True), ("C检测位", True), ("摄像头位", True),
+    (S.START_POINT, True), ("起点", True), ("home", True),
+    ("B5", True),                                       # 非 A 区格位 → 允许
+])
+def test_rotation_blacklist_pure(name, allowed):
+    """★ 方案 §6-1（2026-10-11 更新）：旋转判据是**黑名单**（只禁原料位），不是白名单。
+
+    用户原话：「J6 反正不能在**原位**进行旋转！其他的时候可以旋转」。
+    """
+    assert S.rotation_point_allowed(name) is allowed
+    # 非空名字：被禁止 ⟺ 被判为原料位（空名字由 rotation_point_allowed 单独"保守拒绝"，不算原料位）
+    if name:
+        assert S.is_raw_material_slot(name) is (not allowed)
 
 
 def test_rotation_guard_rejects_raw_slot_before_motion():
     """★★ 回归钉：**在原料位请求带 J6 翻转的下发 → 下发之前就拒绝**（不写下去才后悔）。
 
-    `_move_flip` 先过 `_rotation_guard`：A 区格位 → `_Stop`（ctx 都没被用到）；
-    白名单点位 → 不抛错。
+    `_move_flip` 先过 `_rotation_guard`：原料位（A 区格位本身）→ `_Stop`（ctx 都没被用到）；
+    非原料位点位 → 不抛错。
     """
     from app.api import sorting as API
 
@@ -326,4 +345,155 @@ def test_flip_point_matches_ui_name():
     src = vue.read_text(encoding="utf-8")
     assert '"J6正面"' in src, "界面 extraSlots 缺少 J6正面（与后端不同步）"
     assert '"J6反面"' in src, "界面 extraSlots 缺少 J6反面（与后端不同步）"
+
+
+# ================================================================================
+# ★★ 翻转**只覆盖 J6**（用户 2026-10-11 反馈）
+#   用户："J6 的坐标不对，你应该只存储 J6 的坐标，别的五个点不用啊，
+#         现在你把两个正反面的两个点所有轴的坐标都存储了"
+#   事实：点位库**只存 6 关节**（未指定轴时把当时实时整组存下），所以翻转时若直接
+#         下发该点的完整 6 关节，就会把录点当时的 J1~J5 也带进动作里 → 现场看到"J6 不对"。
+#   口径：翻转时 基姿态 = **当前实时关节**，**只把第 6 轴**换成该点的 joints[5]；J1~J5 不动。
+#   全部离线：stub 掉 `_live_joints` / `motion.command` / `guard_check`，不连真机、不真下发。
+# ================================================================================
+
+class _FlipCtx:
+    """极简 ctx：翻转链路只用到 `wait_pause()` / `cancelled()`。"""
+    def wait_pause(self):
+        return False
+
+    def cancelled(self):
+        return False
+
+    def sleep(self, _s):  # 兼容潜在调用
+        return None
+
+
+class _PointRow:
+    """模拟点位库行对象（`_joints_of` 只取 `.joints`）。"""
+    def __init__(self, joints):
+        self.joints = joints
+
+
+def test_flip_only_overrides_j6_keeps_other_five(monkeypatch):
+    """★★ 核心回归钉：翻转时 **J1~J5 与基姿态逐轴相同，只有 J6 变**。
+
+    断言传给 `motion.command` 的：第 1~5 个值 == 基姿态 1~5；第 6 个 == J6反面 点的 joints[5]。
+    ★ 这里把旋转**黑名单** `_rotation_guard` 打桩成放行 —— 本用例只验证**"只覆盖 J6"这条纯逻辑**；
+      **原料位**拒绝由另一条独立钉子 `test_flip_j6_rejects_raw_slot_before_motion` 负责
+      （否则本条会被黑名单先拦下，测不到 J6 覆盖逻辑）。
+    """
+    from app.api import sorting as API
+
+    monkeypatch.setattr(API, "_rotation_guard", lambda name: None)
+    base = [11.0, 22.0, 33.0, 44.0, 55.0, 66.0]        # 当前实时基姿态
+    monkeypatch.setattr(API, "_live_joints", lambda: list(base))
+    cap = {}
+
+    def _fake_command(joints, speed, dwell=0, abort_check=None):
+        cap["joints"] = [float(v) for v in joints]
+        return {"ok": True}
+
+    monkeypatch.setattr(API.motion, "command", _fake_command)
+    monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
+    # J6反面 点里存的是"录点时那一整组"（J1~J5 与 base 不同 —— 正是被误带过去的那 5 个）
+    pmap = {API.DUAL_FACE_FLIP_POINT: _PointRow([1.0, 2.0, 3.0, 4.0, 5.0, -180.0])}
+
+    API._move_flip_j6(_FlipCtx(), pmap, API.DUAL_FACE_FLIP_POINT, 5, False,
+                      "翻转·J6反面（仅J6）")
+
+    assert len(cap["joints"]) == 6, "仍必须传 6 个值（motion.command 强制 len==6）"
+    assert cap["joints"][:5] == base[:5], "J1~J5 必须 = 当前实时基姿态（不许被录点时的值顶替）"
+    assert cap["joints"][5] == -180.0, "第 6 轴 = J6反面 点里存的 joints[5]"
+
+
+def test_flip_falls_back_and_logs_when_base_unavailable(monkeypatch):
+    """★ 基姿态**取不到**（空跑/离线/读不到实时关节）：回退为该点自带 6 轴，**日志如实标注**。
+
+    "不许悄悄用"：回退必须留一条可排查的日志（含「基姿态不可得」「改用点位自带姿态」）。
+    ★ 同样把旋转**黑名单**打桩放行（见上一条说明），只验证回退 + 日志口径。
+    """
+    from app.api import sorting as API
+
+    monkeypatch.setattr(API, "_rotation_guard", lambda name: None)
+
+    def _boom():
+        raise RuntimeError("拿不到当前姿态（机器人未连接/无实时数据），无法示教")
+
+    monkeypatch.setattr(API, "_live_joints", _boom)
+    cap = {}
+
+    def _fake_command(joints, speed, dwell=0, abort_check=None):
+        cap["joints"] = [float(v) for v in joints]
+        return {"ok": True}
+
+    monkeypatch.setattr(API.motion, "command", _fake_command)
+    monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
+
+    class _FakeLog:
+        def __init__(self):
+            self.warns = []
+
+        def warning(self, fmt, *a):
+            self.warns.append(fmt % a if a else fmt)
+
+        def info(self, *a, **k):
+            pass
+
+        def exception(self, *a, **k):
+            pass
+
+    fake = _FakeLog()
+    monkeypatch.setattr(API, "log", fake)
+
+    own = [1.0, 2.0, 3.0, 4.0, 5.0, -180.0]
+    pmap = {API.DUAL_FACE_FLIP_POINT: _PointRow(own)}
+
+    API._move_flip_j6(_FlipCtx(), pmap, API.DUAL_FACE_FLIP_POINT, 5, False,
+                      "翻转·J6反面（仅J6）")
+
+    assert cap["joints"] == own, "基姿态不可得时应回退为该点自带的完整 6 轴姿态"
+    assert any("基姿态不可得" in m and "改用点位自带姿态" in m for m in fake.warns), \
+        "回退必须在日志里如实标注（不许悄悄用）"
+
+
+def test_flip_j6_rejects_raw_slot_before_motion():
+    """★ **黑名单**钉子延续：新翻转函数 `_move_flip_j6` **同样先过旋转黑名单**。
+
+    原料位（A 区格位本身）→ 在**下发之前**拒绝（ctx=None 也照样拒，说明拒绝发生在运动/取姿态之前）。
+    ★ 2026-10-11 口径变更：`A1上`（A 区**正上位**）**不再被拒** —— 黑名单只禁原料位本身
+      （用户原话：「J6 反正不能在**原位**进行旋转！其他的时候可以旋转」）。
+    """
+    from app.api import sorting as API
+
+    with pytest.raises(API._Stop):
+        API._move_flip_j6(None, {}, "A3", 5, False, "翻转·J6反面（仅J6）")
+    # 原料位本身（A+数字、不带"上"）一律拒
+    with pytest.raises(API._Stop):
+        API._move_flip_j6(None, {}, "A9", 5, False, "翻转")
+    # ★ A1上（正上位）不再被拒（旧白名单会误拒 —— 见上方口径变更）
+    API._rotation_guard("A1上")          # 不抛
+
+
+def test_dual_face_flip_target_passes_rotation_guard():
+    """★★ 口径变更验收：双面翻转的目标点名（`DUAL_FACE_FLIP_POINT` = "J6反面"）必须**通过**旋转护栏。
+
+    旧白名单会把它判 False → `_rotation_guard` 抛 `_Stop` → **双面流程根本跑不起来**
+    （这正是用户报的"J6 不对"背后的真障碍）。
+    这里用**纯函数直调**，不跑流程、不连真机。
+    """
+    from app.api import sorting as API
+
+    assert S.rotation_point_allowed(API.DUAL_FACE_FLIP_POINT) is True
+    API._rotation_guard(API.DUAL_FACE_FLIP_POINT)      # 不抛（= 双面翻转可下发）
+
+
+def test_dual_face_flow_calls_j6_only_flip():
+    """★ 编排钉：双面流程必须调用 `_move_flip_j6`（只覆盖 J6），不许退回会整点下发的 `_move_flip`。"""
+    from app.api import sorting as API
+
+    src = inspect.getsource(API._run_sorting_dual_face)
+    assert "_move_flip_j6(" in src, "双面翻转没有用只覆盖 J6 的下发"
+    assert "翻转·J6反面（仅J6）" in src, "翻转 stage 文案应与界面/日志对照一致"
+
 

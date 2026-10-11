@@ -1,49 +1,168 @@
 ﻿<script setup>
 // =====================================================================
-// 底栏常驻状态灯：机器人链路 / 摄像头 / 示教器档位。
+// 底部状态区（五选一片条）：运行日志 / 机器人 / 摄像头 / 示教器 / 真机链路。
 //
-// 三条硬性要求（来自现场）：
-//   1. **任何情况下三盏灯都在**，不是出问题才出现 —— 现场要的是"一眼看全"，
-//      而不是"没报警就以为都好"。所以 links 缺失时显示灰灯"未知"，不是隐藏。
-//   2. 示教器档位**不管有没有 AUTO 都要显示**。档位优先由控制器状态字**实测**
-//      （AUTO/远程自动确认，不用人工声明）；控制器读不到时才回落到人工声明。
-//      所以"未确认"本身就是有效信息 —— 如实显示，而不是因为没有数据就不显示。
-//   3. 点灯能展开详情 + 就地重连/声明，不用再跳页面找按钮。
+// ★ 2026-10-11 用户口径（以这次为准）：
+//   「底部的真机链路能不能跟机器人/摄像头/示教器那样样式…还有运行日志也放进去，
+//     五个样式、状态，五选一显示，点别的地方自己隐藏，默认运行日志开启状态，
+//     绿色/黄色/红色点要亮起来，运行日志放在最左侧。」
 //
-// 状态 → 外观的映射全在 src/linkview.js（纯函数，可被 node 断言）。
-// 数据来自 stores/link.js（唯一的 /system/guide 轮询者）。
+// 结构：
+//   · 五个片（tab）从左到右： log(运行日志) · robot · camera · run_mode · link(真机链路)
+//   · 五选一：点某片 → 只显示该片面板；**再点同一片收起**（toggle）
+//   · 点面板/状态区以外的任何地方 → 自动收起（document 监听，**非阻塞**，不铺全屏遮罩）
+//   · 默认开「运行日志」；**运行中（分拣/程序/AI 任一 running）自动开日志且不允许整体隐藏**
+//
+// 复用：
+//   · 机器人/摄像头/示教器三片沿用 linkview.js → link.pills 的既有样式与判据（一字未改）；
+//   · 真机链路片的面板内容 = **原样复用 RcReadyCard**（双闸/档位/伺服/报警/急停/程序/点动 +
+//     一键就绪·取消就绪·清除报错）—— 原来独立浮窗 LinkPanel 的内容整体迁入这里。
+//
+// 灯的判据（全部取自真实字段，取不到就是灰，绝不兜底成绿）见 docs 方案文档 B.3。
+// 状态 → 外观的映射：三片走 src/linkview.js（纯函数，node 可断言）；
+//   日志片走最新一条日志级别；真机链路片走 stores/rcReady.js 的寄存器快照。
+// 数据来自 stores/link.js（唯一 /system/guide 轮询者）等既有 store，不新增轮询者。
 // =====================================================================
-import { computed } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, watch, nextTick } from "vue";
 import Icon from "./Icon.vue";
+import RcReadyCard from "./RcReadyCard.vue";
 import { useLinkStore } from "../stores/link.js";
 import { useCameraStore } from "../stores/camera.js";
 import { useUiStore } from "../stores/ui.js";
+import { useExecStore } from "../stores/exec.js";
+import { useRcReadyStore } from "../stores/rcReady.js";
+import { useSorting3dStore } from "../stores/sorting3d.js";
 
 const emit = defineEmits(["request-control"]);
 
 const link = useLinkStore();
 const cam = useCameraStore();
 const ui = useUiStore();
+const exec = useExecStore();
+const rc = useRcReadyStore();
+const s3d = useSorting3dStore();
 
 /**
- * 当前展开的灯（"" = 全部收起）。三盏灯共用一个展开位，避免并排弹出挡住视口。
- * ★ 状态放在 ui store 而不是局部 ref：全局键盘处理要能知道"现在有浮层开着"，
- *   这样按 Esc 才是"关浮层"而不是"急停"（见 src/shortcuts.js 的 resolveKey）。
+ * 当前展开的片（"" = 全部收起）。五片共用一个展开位，避免并排弹出挡住视口。
+ * ★ 状态放在 ui store 而不是局部 ref：全局键盘处理要知道"现在有没有**用户主动打开的**
+ *   浮层"，才能在按 Esc 时先关浮层而不是直接急停（见 ui.popoverModal）。
  */
 const open = computed(() => ui.statusPopover);
+
+/** 有执行在跑（程序/点位/序列 -> exec.running；分拣/AI/文件 -> sorting3d.running）。 */
+const anyRunning = computed(() => exec.running || s3d.running);
+
+// ---------------------------------------------------------------------
+// 运行日志片：灯 = **最新一条日志的级别**（真实字段 exec.log[last].level）。
+//   ok/info → 绿；warn → 黄；err → 红；无日志 → 灰。
+// ---------------------------------------------------------------------
+const logTab = computed(() => {
+  const n = exec.log.length;
+  const last = n ? exec.log[n - 1] : null;
+  const tone = !last ? "off"
+    : last.level === "err" ? "err"
+      : last.level === "warn" ? "warn" : "ok";
+  return {
+    key: "log", icon: "terminal", label: "运行日志",
+    value: n ? (n + " 条") : "空",
+    tone,
+    title: last ? ("运行日志（最新）：" + last.text) : "运行日志：暂无",
+  };
+});
+
+// ---------------------------------------------------------------------
+// 真机链路片：灯 = **就绪链状态**（取自 stores/rcReady.js 的寄存器快照）。
+//   红 = 读不到快照(模拟/离线) / 报警 / 急停 / **非 AUTO·远程档**；
+//   绿 = 完整就绪（伺服+程序+运行+AUTO/远程+无报警+非急停）；
+//   黄 = 其余（有快照、无故障，但伺服未上电或程序未加载 = 中间态）。
+// ---------------------------------------------------------------------
+function rcTone() {
+  if (!rc.ok) return "err";                 // ★ 读不到控制器寄存器快照（模拟/离线/未连接）
+  const b = rc.bits || {};
+  if (b.alarm || b.estop) return "err";     // ★ 报警 / 急停
+  if (!rc.joggable) return "err";           // ★ 非 AUTO/远程档：上位机指令无效
+  if (rc.ready) return "ok";                // ★ 完整就绪
+  return "warn";                            // 中间态（正在就绪 / 条件未满足）
+}
+const linkTab = computed(() => {
+  const t = rcTone();
+  const value = !rc.ok ? "读不到"
+    : rc.ready ? "就绪"
+      : (rc.servoOn ? "未就绪" : "未上电");
+  return {
+    key: "link", icon: "plug", label: "真机链路",
+    value,
+    tone: t,
+    title: "真机链路（就绪链）：" + value + (rc.error ? "\n" + rc.error : ""),
+  };
+});
+
+/** 五个片：运行日志（最左）→ 机器人/摄像头/示教器（link.pills）→ 真机链路（最右）。 */
+const tabs = computed(() => [logTab.value, ...link.pills, linkTab.value]);
+
+// ---------------------------------------------------------------------
+// 五选一：切换 / 收起。
+// ---------------------------------------------------------------------
 function toggle(k) {
   const next = open.value === k ? "" : k;
-  // 换一盏灯就把上一次的动作反馈清掉：否则会出现"点开相机，却看到机器人上次的
-  // 重连结果"这种串味提示（三块浮层共用同一行反馈位）。
+  // 换一片就把上一片的动作反馈清掉：否则会出现"点开相机，却看到机器人上次的
+  // 重连结果"这种串味提示（几块面板共用同一行反馈位）。
   if (next !== open.value) { link.actionMsg = ""; link.claimError = ""; }
+  // ★ 运行中不允许把「运行日志」整体收起来（用户："运行中一定可见"）。
+  if (next === "" && anyRunning.value && k === "log") { ui.setStatusPopover("log"); return; }
   ui.setStatusPopover(next);
 }
-function close() { ui.closeStatusPopover(); }
+function close() {
+  // 运行中即便点"外部"也不让全藏（保证运行日志可见）。
+  if (anyRunning.value) { ui.setStatusPopover("log"); return; }
+  ui.closeStatusPopover();
+}
 
-const pills = computed(() => link.pills);
+// ---- 点面板/状态区以外的任何地方 → 自动收起（非阻塞：页面照常可点） ----
+function onDocMouseDown(ev) {
+  if (!open.value) return;
+  const t = ev.target;
+  // 用 #bottom-zone 判定"状态区以内"：点控制区(播报/请求控制)也算区内，不收面板。
+  if (t && t.closest && t.closest("#bottom-zone")) return;
+  close();
+}
+onMounted(() => document.addEventListener("mousedown", onDocMouseDown, true));
+onBeforeUnmount(() => document.removeEventListener("mousedown", onDocMouseDown, true));
+
+// ---- 运行中自动开日志（rising edge 打开；运行中不许整体隐藏） ----
+watch(anyRunning, (r) => { if (r && open.value !== "log") ui.setStatusPopover("log"); });
+watch(() => ui.statusPopover, (v) => {
+  if (!v && anyRunning.value) ui.setStatusPopover("log");   // 运行中不让"全部隐藏"
+});
+
+// ---------------------------------------------------------------------
+// 运行日志：自动跟随最新（"粘底"，用户往上翻看历史时不抢滚动条）。
+// ---------------------------------------------------------------------
+const logBody = ref(null);
+const logStick = ref(true);
+const LOG_BOTTOM_EPS = 24;
+function onLogScroll() {
+  const el = logBody.value;
+  if (!el) return;
+  logStick.value = (el.scrollHeight - el.scrollTop - el.clientHeight) <= LOG_BOTTOM_EPS;
+}
+async function logScrollToBottom() {
+  await nextTick();
+  const el = logBody.value;
+  if (el) el.scrollTop = el.scrollHeight;
+}
+watch(() => exec.log.length, () => { if (logStick.value) logScrollToBottom(); });
+watch(open, (k) => { if (k === "log") { logStick.value = true; logScrollToBottom(); } });
+
+/** 各片面板宽度：日志要宽一点看得清，真机链路要放得下 RcReadyCard，其余沿用默认。 */
+function popStyle(k) {
+  if (k === "log") return { width: "min(460px, 92vw)" };
+  if (k === "link") return { width: "min(420px, 92vw)" };
+  return null;
+}
 
 /**
- * 动作反馈是"成功"还是"失败"。store 里只存一行纯文本（三个浮层共用这一行），
+ * 动作反馈是"成功"还是"失败"。store 里只存一行纯文本（几块面板共用这一行），
  * 这里按文案判定配色 —— 不把颜色塞进 store，是为了让 store 保持与 UI 无关。
  */
 const actionErr = computed(() => /失败|不可用|未成功|未打开|权限/.test(link.actionMsg || ""));
@@ -71,7 +190,7 @@ async function claim(id) {
 
 <template>
   <div class="link-strip">
-    <div v-for="p in pills" :key="p.key" class="link-wrap">
+    <div v-for="p in tabs" :key="p.key" class="link-wrap">
       <button class="link-pill" :class="[p.tone, { on: open === p.key }]"
               :title="p.title" @click="toggle(p.key)">
         <span class="lp-dot"></span>
@@ -81,14 +200,44 @@ async function claim(id) {
         <Icon :name="open === p.key ? 'chevronUp' : 'chevronDown'" :size="11" class="lp-caret" />
       </button>
 
-      <!-- ★★ 浮层必须挂在"被点的那一个灯"上：条件里同时判 open 与 p.key。
+      <!-- ★★ 浮层必须挂在"被点的那一个片"上：条件里同时判 open 与 p.key。
            只写 v-if="open === 'robot'" 是不够的 —— 这段在 v-for 里面，v-for 每一轮
-           都会对这个条件求值一次，于是点任意一盏灯都会**三个灯各渲染一份同样的浮层**
-           （症状：点一个开了三个，而且三层叠在一起）。 -->
-      <div v-if="open === p.key" class="link-pop" :class="{ wide: p.key === 'run_mode' }">
+           都会对这个条件求值一次，于是点任意一片都会**五片各渲染一份同样的浮层**
+           （症状：点一个开了五个，而且五层叠在一起）。 -->
+      <div v-if="open === p.key" class="link-pop" :class="{ wide: p.key === 'run_mode' }"
+           :style="popStyle(p.key)">
+
+        <!-- ---------- 运行日志：最新在底、自动粘底、可清空 ---------- -->
+        <template v-if="p.key === 'log'">
+          <div class="pop-head">
+            <Icon name="terminal" :size="14" />
+            <span>运行日志 ({{ exec.log.length }})</span>
+            <button class="pop-x" @click="close"><Icon name="close" :size="13" /></button>
+          </div>
+          <div class="lp-log-body" ref="logBody" @scroll="onLogScroll">
+            <div v-if="!exec.log.length" class="lp-log-empty">暂无日志</div>
+            <div v-for="(l, i) in exec.log" :key="i" class="lp-log-line" :class="l.level">
+              <span class="lp-log-time">{{ l.t }}</span>
+              <span class="lp-log-text">{{ l.text }}</span>
+            </div>
+          </div>
+          <div class="pop-btns">
+            <button class="mini" @click="exec.clearLog()">
+              <Icon name="trash" :size="12" /> 清空日志
+            </button>
+          </div>
+        </template>
+
+        <!-- ---------- 真机链路：完整复用 RcReadyCard（内容一字未删） ---------- -->
+        <template v-else-if="p.key === 'link'">
+          <button class="pop-x lp-rc-close" @click="close" aria-label="收起">
+            <Icon name="close" :size="13" />
+          </button>
+          <RcReadyCard />
+        </template>
 
         <!-- ---------- 机器人：地址 / 模式 / 重连 ---------- -->
-        <template v-if="p.key === 'robot'">
+        <template v-else-if="p.key === 'robot'">
           <div class="pop-head">
             <Icon name="plug" :size="14" />
             <span>机器人链路</span>
@@ -195,13 +344,11 @@ async function claim(id) {
         </template>
       </div>
     </div>
-
-    <div v-if="open" class="link-backdrop" @click="close"></div>
   </div>
 </template>
 
 <style scoped>
-/* 状态灯固定在底栏左侧；右侧留给引导条与控制区（见 App.vue 的 #bottom-zone） */
+/* 状态片固定在底栏左侧；右侧留给控制区（见 App.vue 的 #bottom-zone） */
 .link-strip { display: flex; align-items: center; gap: 8px; flex: none; }
 .link-wrap { position: relative; display: flex; }
 
@@ -268,8 +415,21 @@ async function claim(id) {
 .lo-id { flex: none; font-weight: 700; color: var(--accent); min-width: 52px; }
 .lo-desc { flex: 1; min-width: 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
 
-/* 点击外部收起（放在面板下层，不吃面板上的点击） */
-.link-backdrop { position: fixed; inset: 0; z-index: 120; }
+/* ---- 运行日志面板：整体沿用底栏日志的观感（等宽、按级别配色、粘底） ---- */
+.lp-log-body { max-height: 180px; overflow-y: auto; margin-top: 6px;
+  font-size: 11px; line-height: 1.6; font-family: Consolas, monospace; }
+.lp-log-empty { color: var(--muted); padding: 6px 2px; }
+.lp-log-line { display: flex; gap: 8px; padding: 2px 0; white-space: nowrap; overflow: hidden; }
+.lp-log-time { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.lp-log-text { color: var(--txt); min-width: 0; text-overflow: ellipsis; overflow: hidden; }
+.lp-log-line.ok .lp-log-text { color: var(--ok); }
+.lp-log-line.warn .lp-log-text { color: var(--warn); }
+.lp-log-line.err .lp-log-text { color: var(--err); }
+.lp-log-line.info .lp-log-text { color: var(--accent); }
+
+/* ---- 真机链路面板：RcReadyCard 自带卡片外观，这里只把收起按钮浮到右上 ---- */
+.lp-rc-close { position: absolute; top: 8px; right: 8px; z-index: 2; margin-left: 0; }
+.link-pop .card :deep(h3) { padding-right: 26px; }
 
 /* ---- 窄屏：底栏元素变多，先牺牲文字标签，保住"灯 + 数值"这个信息核心 ---- */
 @media (max-width: 1120px) {

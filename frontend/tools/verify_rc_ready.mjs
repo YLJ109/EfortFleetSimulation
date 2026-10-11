@@ -36,6 +36,7 @@ const card = read("src/components/RcReadyCard.vue");
 const pointView = read("src/components/PointExecView.vue");
 const progView = read("src/components/ProgramExecView.vue");
 const linkPanel = read("src/components/LinkPanel.vue");
+const statusStrip = read("src/components/StatusStrip.vue");
 const app = read("src/App.vue");
 const icons = read("src/components/Icon.vue");
 const robotApi = read("../backend/app/api/robot.py");
@@ -67,12 +68,17 @@ ok("claimMode 委托 link.claimMode（档位声明绝不另写一份）",
 
 // ---------- C. 卡片挂载与门控 ----------
 // ★ 架构变更（2026-10-10）：就绪卡不再由各页各自挂载。原先只有「点位执行」「分拣」两页的
-//   可折叠右栏里有它 → 现场反映"别的页面也没有一键就绪"。现统一收进底部「真机链路」浮层：
-//   LinkPanel 内嵌 RcReadyCard，App 提供切换按钮 + #bottom-zone —— 任何页面都能点。
-ok("就绪卡由底部「真机链路」浮层统一挂载（LinkPanel 内嵌 RcReadyCard）",
+//   可折叠右栏里有它 → 现场反映"别的页面也没有一键就绪"。统一收进底部「真机链路」入口：
+//   App 提供切换按钮 + #bottom-zone —— 任何页面都能点。
+// ★★ 架构变更（2026-10-11）：底部状态区改为**五选一**（StatusStrip：运行日志/机器人/
+//   摄像头/示教器/真机链路）—— 「真机链路」是其中一片，面板内容仍是 RcReadyCard。
+//   原来独立的切换按钮 + LinkPanel 浮窗已并入这一片。
+ok("就绪卡由底部状态区「真机链路」片统一挂载（StatusStrip 内嵌 RcReadyCard）",
+  statusStrip.includes("import RcReadyCard from") && statusStrip.includes("<RcReadyCard"));
+ok("App 底栏挂 StatusStrip（五选一，含真机链路片）+ bottom-zone",
+  app.includes("<StatusStrip") && app.includes("bottom-zone"));
+ok("LinkPanel 仍内嵌 RcReadyCard（保留文件，仅入口已并入五选一）",
   linkPanel.includes("import RcReadyCard from") && linkPanel.includes("<RcReadyCard />"));
-ok("App 底栏提供「真机链路」切换按钮并挂载 LinkPanel",
-  app.includes("import LinkPanel from") && app.includes("<LinkPanel") && app.includes("bottom-zone"));
 ok("点位执行页不再各自挂载 RcReadyCard（已收进底栏浮层，避免出现第二份）",
   !pointView.includes("<RcReadyCard />") && !pointView.includes("import RcReadyCard from"));
 // ★ 程序执行页已按现场要求把「真机链路卡 + 控制权限卡」合成一个就绪提示盒：
@@ -172,8 +178,8 @@ ok("分拣空跑不判色、不因检测不到停（跳过 _capture）",
   /if not judge:/.test(sortApi) && sortApi.includes("空跑·未判色"));
 ok("分拣真实下发前校验确实到达 C 检测点",
   /_camera_deviation/.test(sortApi) && sortApi.includes("CAM_ARRIVE_TOL_DEG"));
-ok("MonitorLayout 日志面板已纳入分拣视图（sort）",
-  read("src/components/MonitorLayout.vue").includes("props.view === 'sort'"));
+ok("运行日志已并入底部状态区（StatusStrip 的「运行日志」片，各页共用）",
+  read("src/components/StatusStrip.vue").includes("运行日志"));
 ok("分拣页写运行日志（exec.logLine）", /\[分拣\]/.test(sortView) && /exec\.logLine\(/.test(sortView));
 
 // 卡片语义：实测档位反转 —— AUTO/远程可动，T1/T2 拒绝

@@ -28,7 +28,7 @@ import { useRcReadyStore } from "./rcReady.js";
 import { setGhostPose, setGhostPoseB, showGhost, showGhostB, highlightJoint,
          evalSafety } from "../three/manager.js";
 import { STATE_RANK } from "../three/safety.js";
-import { DEFAULT_ONLY_JOINT, JOINT_LOCK_TOL_DEG, SPEED_MIN }
+import { DEFAULT_ONLY_JOINT, JOINT_LOCK_TOL_DEG, SPEED_DEFAULT }
   from "../core/safetyConst.js";
 
 export const JOG_STEPS = [0.1, 1, 5, 10];
@@ -69,20 +69,19 @@ export const useExecStore = defineStore("exec", {
     //     ① **下限必须与后端 `SPEED_MIN` 一致**（=5）。旧代码这里放行 `>= 1`、
     //        顶栏滑块也是 `min="1"` —— 操作员拖到 1~4 时，后端 `ge=5` 会**直接拒绝**
     //        （或按 5 夹取），表现就是"我设了 1% 但它按 5% 跑"。
-    //     ② **不再持久化**：以前拖过一次 35% 就会"每次启动都是 35%"（见下方注释）。
-    //        现在**每次启动一律 5%**。
-    //   ★ 改这里的任何一个数，都要同步 `App.vue` 的滑块 min 与后端 SPEED_MIN，
-    //     有回归脚本 tools/verify_speed.mjs 盯着三者一致。
+    //     ② **不再持久化**：以前拖过一次 35% 就会"每次启动都是 35%"。
+    //   ★ 2026-10-11 用户口径（以这次为准）：**每次启动默认 10%、下限仍 5%**。
+    //     下限由滑块 `min = SPEED_MIN(5)` 保证（需要更慢还能往下拖）；
+    //     启动初值 = SPEED_DEFAULT(10)。★ 5%→10% 属**真机提速一倍**，是用户明确要求。
+    //   ★ 改这里的任何一个数，都要同步 `App.vue` 的滑块 min/max 与后端 SPEED_MIN，
+    //     有回归脚本 tools/verify_speed.mjs 盯着。
     speed: (() => {
-      // ★★ 2026-10-09 用户口径（第二次纠正，以这次为准）：
-      //   "速度每次启动怎么默认是35%？**默认必须是5%**，看一下代码逻辑"
-      //   原因：以前把滑块值**持久化到 localStorage** —— 操作员拖过一次 35%，
-      //   之后**每次启动都从 35% 开始**（现场看到的就是"默认变成 35%"）。
-      //   现在：**不读也不写 localStorage**，每次启动一律从 SPEED_MIN（5%）起步。
+      // ★★ 2026-10-09 用户口径：**不读也不写 localStorage**，每次启动一律从默认档起步。
+      //   ★ 2026-10-11 默认档由 SPEED_MIN 改为 SPEED_DEFAULT（10%）。
       //   ★ 为什么这样更安全：速度是**每次开机最该保守**的参数 ——
-      //     上一次调试时的高速不该被"继承"到下一次（尤其是在别人接手、
-      //     或隔天开机时）。当前会话内拖到多少就一直是多少，刷新即归 5%。
-      return SPEED_MIN;
+      //     上一次调试时的高速不该被"继承"到下一次（尤其是在别人接手、或隔天开机时）。
+      //     当前会话内拖到多少就一直是多少，刷新即归 SPEED_DEFAULT。
+      return SPEED_DEFAULT;
     })(),
     dryRun: true,
     fileName: "",
@@ -318,7 +317,7 @@ export const useExecStore = defineStore("exec", {
     saveSpeed() {
       if (!this._speedPersistWarned) {
         this._speedPersistWarned = true;
-        console.info("[speed] 速度不再持久化：每次启动从 5% 起步（用户口径）。"
+        console.info("[speed] 速度不再持久化：每次启动从 10%（SPEED_DEFAULT）起步（用户口径）。"
           + "本次会话内调整仍即时生效。");
       }
     },

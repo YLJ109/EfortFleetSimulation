@@ -663,10 +663,17 @@ def _steps_from(items, db) -> List[dict]:
         if not isinstance(it, dict):
             out.append({"index": idx, "ok": False, "error": "步骤格式非法"})
             continue
-        # ★ P1-B1：步骤未显式指定速度时用 None（= 由调用方/请求决定）。
-        #   原实现缺省写死 100，导致 run-file 请求的 speed_pct=5 被完全覆盖，
-        #   真实执行恒 100% —— 这与"速度硬下限 5%"的安全承诺直接冲突。
-        sp = int(it["speed_pct"]) if it.get("speed_pct") else None
+        # ★★ 2026-10-11 速度口径（请求级优先）：**忽略 item 自带的速度**，一律留空。
+        #   为什么（用户口径）：右上角滑块是**唯一速度权威**，任何下发路径都必须读它。
+        #   DB 保存的"点位序列"程序里，item 可能带 speed_pct（历史遗留，默认 5）——
+        #   执行端 `sp = int(st.get("speed_pct") or body.speed_pct)` 会让它**压过请求值**，
+        #   于是滑块明明拖到 30%，真机仍按 5% 跑。
+        #   这里把步骤速度恒置 None，执行端自然回落到请求级 body.speed_pct。
+        #   选"直接忽略 item 速度"而不是"给 _steps_from 传请求值"：更简单、更可解释，
+        #   且与既有 XPL 解析器 `_parse_xpl_xml` 的既定意图完全一致
+        #   （那段注释明写"不写死 speed_pct，让后端回落到前端全局速度"）。
+        #   注：`_point_steps` / `_norm_seq_items` 本就不带 item 速度，行为不受影响。
+        sp = None
         dw = int(it.get("dwell_ms") or 0)
         pid = it.get("point_id", it.get("point"))
         if pid is not None and str(pid).strip() != "":
@@ -2097,9 +2104,10 @@ class JogStepIn(BaseModel):
     amount: Optional[float] = Field(default=None, gt=0, le=1800)
     # ★ 2026-09-29 速度口径统一：**只认右上角全局速度的百分比** speed_pct。
     #   speed_dps 保留仅为兼容旧前端/脚本（按 max_speed_dps 折算成 %），新代码别再用。
+    #   ★ 2026-10-11：原来这里 speed_pct **重复定义了两行**（Pydantic 后定义覆盖前定义，
+    #     结果虽相同，但读起来像有两条口径）—— 删掉重复行，只保留一条。
     speed_pct: Optional[int] = Field(default=None, ge=5, le=100)
-    speed_pct: Optional[int] = Field(default=None, ge=5, le=100)
-    speed_dps: float = Field(default=15.0, gt=0, le=1000)   # 已废弃，仅兼容   # 已废弃，仅兼容
+    speed_dps: float = Field(default=15.0, gt=0, le=1000)   # 已废弃，仅兼容
     frame: str = Field(default="joint", max_length=16)      # joint | base | tool | user
     user_frame: Optional[str] = Field(default=None, max_length=16)
     slow: bool = False                            # 慢速模式（速度 ÷slow_ratio，官方是 ÷10）
@@ -2108,7 +2116,13 @@ class JogStepIn(BaseModel):
 class JogStartIn(BaseModel):
     joint: int = Field(..., ge=1, le=6)
     dir: int = 1
-    speed_dps: float = Field(default=15.0, gt=0, le=1000)
+    # ★★ 2026-10-11 修复（唯一确凿未绑滑块的下发路径）：
+    #   前端连续点动一直发 speed_pct（= 右上角滑块），但本模型**没有这个字段** ——
+    #   Pydantic 会**静默丢弃**未知字段 → _jog_speed_pct 回落到 speed_dps(=15) →
+    #   固定按 50% 下发，滑块怎么拖都没用。
+    #   现在与 JogStepIn 对齐：认 speed_pct（唯一权威口径），speed_dps 仅作旧前端兼容折算。
+    speed_pct: Optional[int] = Field(default=None, ge=5, le=100)
+    speed_dps: float = Field(default=15.0, gt=0, le=1000)   # 已废弃，仅兼容
     frame: str = Field(default="joint", max_length=16)
     user_frame: Optional[str] = Field(default=None, max_length=16)
     slow: bool = False
@@ -2273,12 +2287,16 @@ def api_jog_start(body: JogStartIn, tok: str = Depends(require_control)):
                     frame=frame, user_frame=body.user_frame, slow=body.slow)
     unit = jf.unit_of(frame, body.joint)
     name = _axis_name(frame, body.joint)
+    # ★ 2026-10-11 文案如实化：_jog_speed_pct 在**给了 speed_pct** 时用的才是"全局速度"；
+    #   只有旧前端/脚本只给 speed_dps 时，它是按 max_speed_dps **折算**出来的 —— 两者不能混称。
+    _sp = _jog_speed_pct(body)
+    _sp_src = "全局速度" if getattr(body, "speed_pct", None) is not None else "由 speed_dps 折算"
     _jog_emit(tok, "control.jog_start", bool(res.get("ok")),
               (f"连续点动[{_frame_label(frame, body.user_frame)}] "
-               f"{name}{'+' if body.dir > 0 else '-'} 起，{_jog_speed_pct(body)}%（全局速度）"
+               f"{name}{'+' if body.dir > 0 else '-'} 起，{_sp}%（{_sp_src}）"
                + ("（慢速）" if body.slow else "")
                if res.get("ok") else f"连续点动被拒：{res.get('error')}"),
-              {"joint": body.joint, "dir": body.dir, "speed_pct": _jog_speed_pct(body),
+              {"joint": body.joint, "dir": body.dir, "speed_pct": _sp,
                "frame": frame, "user_frame": body.user_frame, "slow": body.slow,
                "blocked": bool(res.get("blocked"))})
     _jog_mode_note(tok, res)

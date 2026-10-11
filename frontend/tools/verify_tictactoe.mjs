@@ -216,6 +216,13 @@ console.log("== H. 前端输入路径（键盘 ↑↓←→ + Enter / 鼠标点�
   ok("卡片：鼠标点击可用（按钮 @click）", /@click=/.test(cardVue));
 
   ok("分拣页挂载了 2D 棋盘浮层", /<TicTacToeBoard/.test(viewVue));
+  // ★ 防回归钉（2026-10-11 用户口径）：2D 棋盘浮层**只在「井字棋」tab 下出现** ——
+  //   执行/点位 tab 不该被游戏棋盘挡住分拣画面。渲染条件 = 内建判据(store.gameVisible，
+  //   **复用、不在此重写**) && 本页 tab === "ttt"；这里钉住"模板按该条件条件渲染"，
+  //   并钉住"条件里确有 tab === ttt"（改回常显 / 漏判 tab 都会立刻红）。
+  ok("★ 浮层 TicTacToeBoard 的渲染条件含 tab === 'ttt'（且复用 store.gameVisible）",
+    /<TicTacToeBoard\s+v-if="showTttBoard"/.test(viewVue)
+    && /ttt\.gameVisible\s*&&\s*tab\.value === "ttt"/.test(viewVue));
   ok("分拣页挂载了井字棋卡片", /<TicTacToeCard/.test(viewVue));
   ok("分拣页进出启停井字棋轮询", /ttt\.startPolling\(\)/.test(viewVue)
     && /ttt\.stopPolling\(\)/.test(viewVue));

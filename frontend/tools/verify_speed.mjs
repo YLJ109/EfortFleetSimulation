@@ -69,19 +69,25 @@ console.log("== A. 顶栏滑块与后端边界一致 ==");
 console.log("");
 console.log("== B. exec.speed 的默认值与夹取范围 ==");
 {
-  // 默认值：出现在 `localStorage.getItem("exec.speed") || "N"` 与兜底 return 里
-  // ★★ 2026-10-09 用户口径（以这次为准）："**默认必须是 5%**，每次启动都要 5%"。
-  //   原因：以前把滑块值持久化到 localStorage —— 拖过一次 35%，之后每次启动都是 35%。
-  //   现在：不读不写存储，每次启动一律从 SPEED_MIN 起步。
+  // ★★ 2026-10-11 用户口径（以这次为准）："**每次启动默认 10%**，下限仍是 5%"。
+  //   —— 默认值来自唯一来源 SPEED_DEFAULT（core/safetyConst.js），**不再等于工程下限**。
+  //   注意：5%→10% 属**真机提速一倍**，是用户明确要求。
   const usesStorage = /localStorage\.getItem\("exec\.speed"\)/.test(exec)
                    || /localStorage\.setItem\("exec\.speed"/.test(exec);
-  ok("★ 不再读写 localStorage（否则又会\"记住上次的 35%\"）", !usesStorage);
-  ok("★ 默认值 == SPEED_MIN（用户明确要求：每次启动从 5% 起步）",
-     /return SPEED_MIN;/.test(exec) || new RegExp(`return ${SPEED_MIN};`).test(exec),
+  ok("★ 不再读写 localStorage（否则又会\"记住上次的值\"）", !usesStorage);
+  const FE = read("src/core/safetyConst.js");
+  const feDefault = FE.match(/export const SPEED_DEFAULT\s*=\s*(\d+)/);
+  ok("★ safetyConst 定义了 SPEED_DEFAULT（默认档的唯一来源）", !!feDefault,
+     feDefault ? feDefault[1] : "未找到");
+  const DEF = feDefault ? Number(feDefault[1]) : NaN;
+  ok(`★ 启动默认值 == SPEED_DEFAULT(${DEF})（用户明确要求：每次启动 10%）`,
+     /return SPEED_DEFAULT;/.test(exec) || new RegExp(`return ${DEF};`).test(exec),
      "未找到默认返回");
-  ok("旧的宽松校验（`v >= 1`）已不存在",
-     !/v\s*>=\s*1\s*&&\s*v\s*<=\s*100/.test(exec));
-  // （不再有"读取历史值后夹取"这一步 —— 既然不读存储，就没有越界的历史值可夹）
+  ok(`★ 默认值(${DEF}) > 工程下限 SPEED_MIN(${SPEED_MIN}) —— 默认档 ≠ 下限（否则像被写死）`,
+     Number.isFinite(DEF) && DEF > SPEED_MIN, `${DEF} vs ${SPEED_MIN}`);
+  // ★ 用户口径的硬数字：下限 = 5、启动默认 = 10（写死这两个数，防漂移）
+  ok("★ 工程下限 SPEED_MIN === 5", SPEED_MIN === 5, String(SPEED_MIN));
+  ok("★ 启动默认 SPEED_DEFAULT === 10", DEF === 10, String(DEF));
   ok("旧的宽松校验（`v >= 1`）已不存在",
      !/v\s*>=\s*1\s*&&\s*v\s*<=\s*100/.test(exec));
 }

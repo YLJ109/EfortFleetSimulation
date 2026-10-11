@@ -81,14 +81,25 @@ export const useUiStore = defineStore("ui", {
       /** 执行页叠加的摄像头窗口是否展开（点位执行 / 程序执行共用） */
       camVisible: s.camVisible !== false,
       /**
-       * 底栏状态灯当前展开的浮层 key（"" = 全部收起）。
+       * 底栏状态区（五选一）当前展开的片 key（"" = 全部收起）。
+       * 片顺序：log(运行日志) / robot / camera / run_mode / link(真机链路)。
        *
        * ★ 放在 store 而不是 StatusStrip 的局部 ref：App.vue 的全局键盘处理要知道
-       *   "现在有没有浮层开着"，才能在按 Esc 时先关浮层而不是直接急停。
-       * ★ **不持久化**：浮层是瞬时状态，刷新后自动重开一个浮层只会让人莫名其妙。
+       *   "现在有没有**用户主动打开的**浮层"，才能在按 Esc 时先关浮层而不是直接急停。
+       * ★ **不持久化**：这是瞬时状态，刷新后回到默认（见初值 "log"）。
+       * ★★ 2026-10-11 用户口径：**进入页面默认开「运行日志」**（运行日志在最左侧）。
        */
-      statusPopover: "",
+      statusPopover: "log",
     };
+  },
+  getters: {
+    /**
+     * 当前展开的是否算"弹层"（Esc 应先关它，而不是急停）。
+     * ★★ "log" 不算：它是**默认常开**的被动读数面板，不是用户主动打开的浮层 ——
+     *   若把它也算弹层，则 Esc 会被永久吃掉、再也触发不了急停（安全回归）。
+     *   其余四片（robot/camera/run_mode/link）是用户主动点开的 → 算弹层。
+     */
+    popoverModal: (s) => !!s.statusPopover && s.statusPopover !== "log",
   },
   actions: {
     _persist() {

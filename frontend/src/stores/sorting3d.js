@@ -37,6 +37,11 @@ export const useSorting3dStore = defineStore("sorting3d", {
     loaded: false,   // 摆位是否已灌进 3D
     busy: false,     // 正在装填（防重复请求）
     overlapLogged: false,
+    // ★ 2026-10-11：**全局"是否有执行在跑"**（分拣/AI/文件等后端执行）。
+    //   来源：/control/scene-state 的 running 字段（= 后端 _RUN_ACTIVE 是否非空）。
+    //   用途：底部状态区"运行中自动打开运行日志"的判据之一（另一个是 exec.running）。
+    //   为什么放这里：scene-state 的唯一轮询者就是本 store（各页共用），不新增轮询者。
+    running: false,
   }),
   getters: {
     /** 画不出来的槽位原因（未示教 / 重叠风险 / 共面性偏差）。 */
@@ -115,6 +120,8 @@ export const useSorting3dStore = defineStore("sorting3d", {
         const r = await apiControl("/control/scene-state");
         if (!r.ok) return;
         const d = await r.json();
+        // ★ 2026-10-11：把"是否有执行在跑"记下来，供底部状态区自动开日志用。
+        this.running = !!d.running;
         updateSortingState(d.state || null);
       } catch (e) { /* 轮询失败不影响其它页面 */ }
     },

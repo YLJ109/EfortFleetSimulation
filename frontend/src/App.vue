@@ -27,7 +27,6 @@ import AboutView from "./components/AboutView.vue";
 import AnnouncePanel from "./components/AnnouncePanel.vue";
 import GuideBar from "./components/GuideBar.vue";
 import StatusStrip from "./components/StatusStrip.vue";
-import LinkPanel from "./components/LinkPanel.vue";
 import { announce, unlockAudio, annCfg } from "./services/announcer.js";
 import { BRAND, brandSubtitle } from "./brand.js";
 import {
@@ -56,10 +55,8 @@ const cam = useCameraStore();   // ★ 2026-10-09 用户需求："每次启动�
 // 底栏状态灯与引导条都只是它的消费者 —— 两个轮询者必然出现自相矛盾的界面。
 const link = useLinkStore();
 
-// ★ 真机链路面板的展开/隐藏开关。面板浮在 3D 视口上（fixed），
-//   LinkPanel 只是 link store 的消费者（App 级统一轮询），这里只控制显隐。
-const showLinkPanel = ref(false);
-function toggleLinkPanel() { showLinkPanel.value = !showLinkPanel.value; }
+// ★ 2026-10-11：真机链路面板已并入底部状态区"五选一"（StatusStrip 的「真机链路」片，
+//   面板内容仍是 RcReadyCard）—— 原来独立的 showLinkPanel / 切换按钮 / LinkPanel 浮窗已移除。
 
 // ★ 权限相关的页面，没拿到权限时**不显示入口**（定义与门控逻辑见 src/tabs.js）：
 //   - needAuth  (点位执行 / 程序执行)：要有控制令牌（管理员或操作员都行）。
@@ -117,8 +114,10 @@ function flashKeyHint(text) {
   keyHintTimer = setTimeout(() => { keyHint.value = ""; }, 2000);
 }
 
-/** 有弹层开着时 Esc/Enter 归弹层，不归机器人。 */
-const anyModalOpen = computed(() => !!auth.uiLogin || showAnnounce.value || !!ui.statusPopover);
+/** 有弹层开着时 Esc/Enter 归弹层，不归机器人。
+ *  ★ 2026-10-11：底部状态区默认开着「运行日志」（被动读数面板，不算弹层）——
+ *    这里用 ui.popoverModal（"log" 除外），保证 Esc 仍能触发急停。 */
+const anyModalOpen = computed(() => !!auth.uiLogin || showAnnounce.value || ui.popoverModal);
 
 /** 动作分派表：id → 处理函数。表里没有的 id 一律忽略（新增快捷键时不会静默失效）。 */
 const KEY_ACTIONS = {
@@ -560,21 +559,35 @@ onBeforeUnmount(() => {
            这个 tab 条通过具名插槽塞进两页的右栏（内容在本组件作用域，直接调 setView）。 -->
       <PointExecView v-show="robot.activeView === 'point'">
         <template #sidebarTop>
-          <div class="seg mini exec-tabs">
-            <button :class="{ on: robot.activeView === 'point' }"
-                    @click="setView('point')">点位执行</button>
-            <button :class="{ on: robot.activeView === 'program' }"
-                    @click="setView('program')">程序执行</button>
+          <!-- ★ 2026-10-11 用户需求：与「智能分拣」页的 tab 栏**统一** —— 改用全局
+               .srt-tabs/.srt-tab（同一套视觉：字号/间距/选中态青色发光 + 底部指示条），
+               不再各写一套 .seg.mini（两页样式会各自漂移）。 -->
+          <div class="srt-tabs" role="tablist">
+            <button class="srt-tab" :class="{ on: robot.activeView === 'point' }"
+                    @click="setView('point')">
+              <Icon name="target" :size="13" /><span>点位执行</span>
+            </button>
+            <button class="srt-tab" :class="{ on: robot.activeView === 'program' }"
+                    @click="setView('program')">
+              <Icon name="play" :size="13" /><span>程序执行</span>
+            </button>
           </div>
         </template>
       </PointExecView>
       <ProgramExecView v-show="robot.activeView === 'program'">
         <template #sidebarTop>
-          <div class="seg mini exec-tabs">
-            <button :class="{ on: robot.activeView === 'point' }"
-                    @click="setView('point')">点位执行</button>
-            <button :class="{ on: robot.activeView === 'program' }"
-                    @click="setView('program')">程序执行</button>
+          <!-- ★ 2026-10-11 用户需求：与「智能分拣」页的 tab 栏**统一** —— 改用全局
+               .srt-tabs/.srt-tab（同一套视觉：字号/间距/选中态青色发光 + 底部指示条），
+               不再各写一套 .seg.mini（两页样式会各自漂移）。 -->
+          <div class="srt-tabs" role="tablist">
+            <button class="srt-tab" :class="{ on: robot.activeView === 'point' }"
+                    @click="setView('point')">
+              <Icon name="target" :size="13" /><span>点位执行</span>
+            </button>
+            <button class="srt-tab" :class="{ on: robot.activeView === 'program' }"
+                    @click="setView('program')">
+              <Icon name="play" :size="13" /><span>程序执行</span>
+            </button>
           </div>
         </template>
       </ProgramExecView>
@@ -601,10 +614,6 @@ onBeforeUnmount(() => {
       <GuideBar />
     </div>
 
-    <!-- 真机链路面板：由底部「真机链路」按钮折叠切换。浮在 3D 视口上（fixed），
-         详面板内含三盏灯 + 重连 + 档位声明，数据与底栏共用同一份 link store。 -->
-    <LinkPanel :open="showLinkPanel" @close="showLinkPanel = false" @request-control="requestControl" />
-
     <!-- 快捷键反馈：只在按了键之后出现 2 秒。
          位置固定在 3D 视口底部居中偏上，不遮底栏状态灯，也不进主布局流。 -->
     <transition name="kh-fade">
@@ -613,24 +622,17 @@ onBeforeUnmount(() => {
       </div>
     </transition>
 
-    <!-- 底部状态栏：三盏常驻状态灯 + 连接引导 + 控制区。
-         ★ 顺序有讲究（左→右 = 说 → 动手）：
-             ① 三盏常驻状态灯：机器人 / 摄像头 / 示教器档位 —— **任何情况都在**
-             ② 引导条（flex:1 吃满中间，有问题才出现，只报最高优先级一条）
-             ③ 控制区（播报 + 请求控制/释放）：被 flex:1 顶到最右，窄屏换行也在右下
+    <!-- 底部状态区：五选一片条（运行日志 / 机器人 / 摄像头 / 示教器 / 真机链路）+ 连接引导 + 控制区。
+         ★ 顺序（左→右）：
+             ① StatusStrip：五选一片条 —— **任何情况都在**；点片开面板，点外部收起
+             ② 控制区（轴锁徽标 + 播报 + 请求控制/释放）：被顶到最右，窄屏换行也在右下
+         ★ 2026-10-11：原独立的「真机链路」按钮已并入 StatusStrip 的「真机链路」片
+           （面板内容仍是 RcReadyCard）；运行日志也从左下角浮动面板迁入「运行日志」片。
          ★ 安全围栏状态片**已移出底栏** → 现在浮在 3D 视口右下角，
            见 components/SafetyChip.vue（由 MonitorLayout 渲染）。
          ★ 放在 #main **之后**：视口紧贴 Tab 栏、高度稳定，引导条出现/消失不会挤动 3D。 -->
     <div id="bottom-zone">
-      <!-- 真机链路：切换按钮折叠底栏常驻三盏灯与重连/档位声明的完整面板 -->
-      <button class="link-toggle" :class="{ on: showLinkPanel }" @click="toggleLinkPanel"
-              :title="showLinkPanel ? '收起真机链路面板' : '展开真机链路面板（三盏灯 + 重连 + 档位声明）'">
-        <Icon name="plug" :size="14" />
-        <span>真机链路</span>
-        <Icon :name="showLinkPanel ? 'chevronUp' : 'chevronDown'" :size="12" />
-      </button>
-
-      <!-- 机器人链路 / 摄像头 / 示教器档位：常驻显示，点开可重连或声明档位 -->
+      <!-- 五选一状态片：运行日志(最左) / 机器人 / 摄像头 / 示教器 / 真机链路 -->
       <StatusStrip @request-control="requestControl" />
 
       <!-- 播报中心 + 控制权限（原顶栏 #control-zone，整块移到这里的最右侧） -->
@@ -783,14 +785,8 @@ onBeforeUnmount(() => {
   color: var(--ok); white-space: nowrap; padding: 3px 9px; border-radius: 999px;
   border: 1px solid var(--line); background: var(--bg); font-variant-numeric: tabular-nums; }
 .lock-badge.on { color: var(--warn); border-color: var(--warn-line); background: var(--warn-soft); }
-/* ---- 真机链路切换按钮（bottom-zone 左侧，与 StatusStrip 同款底栏风格） ---- */
-.link-toggle { display: inline-flex; align-items: center; gap: 6px; flex: none;
-  padding: 6px 10px; border-radius: 8px; font-size: 12px; cursor: pointer;
-  border: 1px solid var(--glass-line); background: var(--panel2); color: var(--muted);
-  user-select: none; transition: border-color .14s ease, background .14s ease, color .14s ease; }
-.link-toggle:hover { border-color: var(--accent); color: var(--txt); }
-.link-toggle.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
-.link-toggle > span { white-space: nowrap; }
+/* ---- 2026-10-11：原「真机链路」独立切换按钮的样式（.link-toggle）已随按钮移除，
+        该功能并入 StatusStrip 的「真机链路」片。 ---- */
 .ctrl-badge.op { color: var(--accent); }
 .ctrl-request, .ctrl-release { flex: none; width: auto; padding: 7px 10px;
   display: flex; align-items: center; gap: 6px; white-space: nowrap; }

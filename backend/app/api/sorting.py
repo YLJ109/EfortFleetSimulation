@@ -471,24 +471,74 @@ DUAL_FRAMES_PER_FACE = 2
 
 
 def _rotation_guard(name: str) -> None:
-    """★ 方案 §6-1 回归钉：**带 J6 翻转的下发只允许出现在白名单点位**。
+    """★ 方案 §6-1 回归钉（**2026-10-11 更新口径**）：**带 J6 翻转的下发只禁止落在原料位**。
 
-    在**原料位（A 区格位）**请求旋转 → `_Stop` 拒绝并写明原因（这条改不掉）。
-    现场口径（用户）："只允许在正上位、摄像头点位、起点旋转，严禁原料位进行旋转"。
-    白名单依据见 `S.rotation_point_allowed`。
+    口径（用户原话）：「J6 反正不能在**原位**进行旋转！其他的时候可以旋转」
+      —— 「原位」= **原料位（A 区格位本身，如 A1…A9）**。
+    判据是**黑名单**（见 `S.is_raw_material_slot`）：**只有原料位禁止，其余一切允许**
+    （正上位 / J6正面 / J6反面 / C检测 / 摄像头位 / 开始/结束点 / 起点 / home … 都放行）。
+
+    在**原料位（A 区格位本身）**请求旋转 → `_Stop` 拒绝并写明原因（这条改不掉）。
     """
     if not S.rotation_point_allowed(name):
-        raise _Stop("拒绝 J6 翻转：点位「%s」不在旋转白名单（只允许 正上位/摄像头点位/起点）" % name)
+        raise _Stop("拒绝 J6 翻转：点位「%s」为原料位（A 区格位）—— **原料位严禁旋转**（其余位置均可）" % name)
 
 
 def _move_flip(ctx, pmap, name, speed, dry, stage, st=None) -> None:
-    """**带 J6 翻转的下发**：先过旋转白名单（`_rotation_guard`）再走普通移动。
+    """**带 J6 翻转的下发**：先过旋转**黑名单**（`_rotation_guard`）再走普通移动。
 
     与 `_move` 的唯一区别就是那道护栏 —— 原料位翻转会被**拒绝在下发之前**，
     不会出现"已经写下去才后悔"。
     """
     _rotation_guard(name)
     _move(ctx, pmap, name, speed, dry, stage, st)
+
+
+def _move_flip_j6(ctx, pmap, name, speed, dry, stage, st=None) -> None:
+    """★ J6 双面翻转：**只覆盖第 6 轴**，J1~J5 保持**当前实时姿态**原样不动。
+
+    为什么不能直接下发该点的完整 6 关节（原来 `_move_flip`→`_move` 就是那样）：
+      · 用户口径（方案 §7-e / §3）：`J6正面`/`J6反面` 是"**同一姿态、只有 J6 不同**"；
+      · 但 `J6正面`/`J6反面` 是通过 `/sorting/teach` 存的普通点位 —— 示教时
+        **未指定轴就把"当时实时 6 轴整组"存下**（见 `api_teach`）。
+      · 于是直接下发该点 → 会把**录点当时**的 J1~J5 **一起**带到翻转动作里 →
+        现场表现为"只是翻个 J6，J1~J5 却也跑了/停的位置不对"（用户反馈："J6 的坐标不对"）。
+    ⇒ 所以这里改成：**基姿态 = 当前实时关节**（`_live_joints()`），**只把第 6 轴**替换成
+      该点存的 `joints[5]`，J1~J5 原样不动 —— 与 `jog._step_joint`「以当前姿态为基 + 只改某轴」
+      是同一套口径（可对照 `app/services/jog.py`）。
+
+    ★ 仍传 **6 个值** 给 `motion.command`（`motion.py` 强制 len==6，本函数不改那条铁律）。
+    ★ 旋转**黑名单**（`_rotation_guard`）**先过**：顺序、语义与 `_move_flip` 一致（**原料位禁止**）。
+    ★ 基姿态取不到时（空跑/离线/读不到实时关节）：**回退**为"该点自身的 6 轴姿态"，
+      并在日志里**如实标注**「基姿态不可得，改用点位自带姿态」—— 不许悄悄用。
+    """
+    _rotation_guard(name)
+    if ctx.wait_pause():
+        raise _Stop("已被停止", stage)
+    j6 = _joints_of(pmap, name)[5]      # 该点第 6 轴（用户示教的反面角）
+    base: Optional[List[float]] = None
+    try:
+        base = _live_joints()
+    except Exception as e:  # noqa: BLE001 —— 含 HTTPException(503)：读不到实时姿态
+        log.warning("翻转「%s」：基姿态不可得（%s），改用点位自带姿态（J1~J5 不再保持当前值）",
+                    name, e)
+    if base is None:
+        # ★ 回退路径：日志已如实标注原因（上面那条 warning），再做整点下发。
+        _move(ctx, pmap, name, speed, dry, stage, st)
+        return
+    target = [float(v) for v in base]
+    target[5] = float(j6)
+    if dry:
+        _set(st, stage=stage, last_point=name)
+        return
+    ok, reason, _snap = guard_check()
+    if not ok:
+        raise _Stop("安全围栏互锁：%s" % reason, stage)
+    r = motion.command(target, int(speed), 0,
+                       abort_check=lambda: ctx.cancelled())
+    _set(st, stage=stage, last_point=name)
+    if not r.get("ok"):
+        raise _Stop("运动到「%s」失败：%s" % (name, r.get("error")), stage)
 
 
 def _dual_drop(ctx, dry: bool, st=None, keep: bool = False) -> None:
@@ -815,7 +865,8 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
 
     一趟（= 最多两件）：
       ① 正上位 → 取 A{i}（**下板**吸住）→ 抬起；
-      ② 在**正上位**把 J6 转到用户示教的「J6反面」点（`_move_flip` 过旋转白名单）；
+      ② 在**正上位**把 J6 转到用户示教的「J6反面」点（`_move_flip_j6` 过旋转白名单，
+         且**只覆盖第 6 轴**、J1~J5 保持当前实时姿态 —— 见 `_move_flip_j6` 的说明）；
       ③ → 取 A{j}（**上板**吸住）：★ 这一步**绝不断真空**（一断第 1 件就掉，方案 §5.2）；
       ④ 到 C 检测位：**正面 N 帧 → 投票**，J6 转到反面 → **反面 N 帧 → 投票**（两个独立结论）；
       ⑤ **先放有效的那件**（按色落 B 槽）；无效件 → **原路放回它自己的 A 原位**（不消耗配额）；
@@ -869,8 +920,11 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
             _move(ctx, pmap, first + "上", speed, dry, "抬起")
 
             # ② 在正上位翻转 J6 → 用另一面（旋转白名单；只有两件趟才需要）
+            #   ★ 用 `_move_flip_j6`：**只覆盖 J6**、J1~J5 保持当前实时姿态
+            #     （用户反馈："J6 的坐标不对，只该存 J6" —— 见该函数说明）。
             if len(trip) >= 2:
-                _move_flip(ctx, pmap, DUAL_FACE_FLIP_POINT, speed, dry, "翻转·J6反面")
+                _move_flip_j6(ctx, pmap, DUAL_FACE_FLIP_POINT, speed, dry,
+                              "翻转·J6反面（仅J6）")
 
             # ③ 取第 2 件（上板）：★ 保持吸气，不碰气路（一断真空第 1 件就掉）
             if len(trip) >= 2:
