@@ -17,7 +17,7 @@ import random
 from typing import Dict, List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------- 常量
-O = "O"                      # 圆（来源 A1–A5）
+O = "O"                      # noqa: E741 —— 井字棋符号「圆」，领域术语；与 X 成对使用
 X = "X"                      # 叉（来源 A6–A9）
 SYMBOLS: Tuple[str, str] = (O, X)
 

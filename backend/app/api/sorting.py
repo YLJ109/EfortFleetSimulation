@@ -950,7 +950,9 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
             # 3) 停顿 + 判色
             _set(stage="停顿")
             if ctx.sleep(int(body.dwell_ms) / 1000.0):
-                stop_reason = "已被停止"; phase = "cancelled"; break
+                stop_reason = "已被停止"
+                phase = "cancelled"
+                break
             if not judge:
                 # ★ 空跑 / 双闸未开：机器人没动，方块不可能在相机前 →
                 #   绝不调相机、绝不判色、绝不因"检测不到"停（用户口径）。
@@ -1184,7 +1186,9 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
         _move(ctx, pmap, start, speed, dry, "回开始/结束点")
         for trip in trips:
             if ctx.cancelled():
-                stop_reason = "已被停止"; phase = "cancelled"; break
+                stop_reason = "已被停止"
+                phase = "cancelled"
+                break
             first = trip[0]
             _set(piece=done + 1, stage="取料", color="", conf=0.0, target="",
                  hold_lower=None, hold_upper=None, holding=False, suspect_pick=False,
@@ -1259,7 +1263,9 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
             cam_target = _move(ctx, pmap, cam, speed, dry, "送检", face=arrival_face)
             _set(stage="停顿")
             if ctx.sleep(int(body.dwell_ms) / 1000.0):
-                stop_reason = "已被停止"; phase = "cancelled"; break
+                stop_reason = "已被停止"
+                phase = "cancelled"
+                break
             if not judge:
                 # 空跑 / 双闸未开：不调相机、不判色，用轮换占位色把选槽+落料逻辑走通
                 ph = _DRY_PLACEHOLDER_COLORS
@@ -1281,11 +1287,13 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
                 _set(stage="判色")
                 _cur = {"face": arrival_face}   # 到 C 时 J6 已停在**到达面**（= 首个采集面，上面那次 _move 已摆好）
 
-                def _set_cam_face(slot):
+                def _set_cam_face(slot, _cur=_cur):
                     """每面拍照前把 J6 摆到该面对应姿态（lower→正面 / upper→反面）。
 
                     ★ 只在"面变了"时才下发（同姿态不重复写，省一次下发）；
                       仍是**同一点位、只改 J6**（`_move` + `face`），不是整姿态平移。
+                    ★ `_cur=_cur` 是**显式绑定**（B023）：`_cur` 在外层 `for` 里赋值，
+                      闭包引用它会被判"晚绑定"；绑定成默认参数后语义不变且更明确。
                     """
                     f = _face_of_slot(slot)
                     if S.norm_face(f) == _cur["face"]:

@@ -147,6 +147,10 @@ def test_logout_still_works_for_permanent_token(client):
 #     操作员在设置页改成 2 小时，一重启后端又回到 30 分钟
 #     （启动只读 .env 那一行；设置页的改动虽然会回写，但被旧值挡着）。
 # =====================================================================
+
+
+
+
 def test_env_default_ttl_is_two_hours(monkeypatch):
     """没有 EFORT_CONTROL_TTL 时，代码默认必须是 **7200 = 2 小时**（现场口径）。"""
     monkeypatch.delenv("EFORT_CONTROL_TTL", raising=False)
@@ -189,75 +193,6 @@ def test_control_ttl_endpoint_persists_to_env(client, monkeypatch, tmp_path):
     这里把 .env 路径指到临时文件，验证：① 接口写盘成功；② 写的是同一行（不追加重复键，
     不抹掉其它行）；③ 回报 persisted=true。
     """
-    import os
-    import app.api.settings as S
-
-    env = tmp_path / ".env"
-    env.write_text("# 注释要保留\nEFORT_OTHER=1\nEFORT_CONTROL_TTL=1800\n", encoding="utf-8")
-    monkeypatch.setattr(S, "_env_path", lambda: str(env), raising=True)
-
-    tok = _login(client)["token"]
-    r = client.post("/api/settings/control-ttl", json={"ttl_sec": 7200},
-                    headers={"X-Control-Token": tok})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["ttl"] == 7200 and body["persisted"] is True, body
-
-    txt = env.read_text(encoding="utf-8")
-    assert "EFORT_CONTROL_TTL=7200" in txt
-    assert txt.count("EFORT_CONTROL_TTL") == 1, "不能追加重复键：%r" % txt
-    assert "# 注释要保留" in txt and "EFORT_OTHER=1" in txt, "不能抹掉其它行：%r" % txt
-
-
-# =====================================================================
-# ★★ 2026-09-29：TTL 的"启动默认值"必须与现场口径一致，且改完要能落盘
-#   事故背景：.env 里长期写着 EFORT_CONTROL_TTL=1800 →
-#     操作员在设置页改成 2 小时，一重启后端又回到 30 分钟
-#     （启动只读 .env 那一行；设置页的改动虽然会回写，但被旧值挡着）。
-# =====================================================================
-def test_env_default_ttl_is_two_hours(monkeypatch):
-    """没有 EFORT_CONTROL_TTL 时，代码默认必须是 **7200 = 2 小时**（现场口径）。"""
-    monkeypatch.delenv("EFORT_CONTROL_TTL", raising=False)
-    assert auth_mod._env_ttl() == 7200, (
-        "代码默认必须是 7200（2 小时）；改这块前先确认现场口径，别改回 30 分钟")
-    # 垃圾值/负数也不该把后端起不来，且仍回落到 2 小时
-    monkeypatch.setenv("EFORT_CONTROL_TTL", "abc")
-    assert auth_mod._env_ttl() == 7200
-    monkeypatch.setenv("EFORT_CONTROL_TTL", "-1")
-    assert auth_mod._env_ttl() == 0            # 负值归 0 = 不限时（原设计）
-    monkeypatch.setenv("EFORT_CONTROL_TTL", "0")
-    assert auth_mod._env_ttl() == 0            # 0 = 不限时
-    monkeypatch.setenv("EFORT_CONTROL_TTL", "7200")
-    assert auth_mod._env_ttl() == 7200
-
-
-def test_env_example_ships_two_hours():
-    """★ `.env.example` 是**新部署的起点**：它写 1800 就会让新现场一路回到 30 分钟。
-
-    直接读文件断言，防止有人在模板里改回去（本仓 .env 不被 git 跟踪，
-    只有 .env.example 能作为"出厂默认"的证据）。
-    """
-    import os
-    import re as _re
-    from app.core.config import project_root
-
-    p = os.path.join(project_root(), ".env.example")
-    assert os.path.isfile(p), "缺少 .env.example（新部署的默认值来源）"
-    with open(p, "r", encoding="utf-8") as f:
-        txt = f.read()
-    m = _re.search(r"^\s*EFORT_CONTROL_TTL\s*=\s*(\d+)", txt, _re.M)
-    assert m, ".env.example 里缺少 EFORT_CONTROL_TTL"
-    assert m.group(1) == "7200", (
-        ".env.example 的 EFORT_CONTROL_TTL 必须是 7200（2 小时），实测=%s" % m.group(1))
-
-
-def test_control_ttl_endpoint_persists_to_env(client, monkeypatch, tmp_path):
-    """★ 设置页改 TTL 必须**真的落盘**（否则重启就回退，用户会以为设置没用）。
-
-    这里把 .env 路径指到临时文件，验证：① 接口写盘成功；② 写的是同一行（不追加重复键，
-    不抹掉其它行）；③ 回报 persisted=true。
-    """
-    import os
     import app.api.settings as S
 
     env = tmp_path / ".env"

@@ -688,11 +688,13 @@ class ReadinessService:
                 return {"ok": False,
                         "error": "停掉当前程序失败: %s（清报警前需先停机）" % sterr,
                         "steps": steps}
-            t0 = time.time(); stopped = False
+            t0 = time.time()
+            stopped = False
             while time.time() - t0 < 2.0:
                 s2, _ = mb.rc_snapshot()
                 if s2 and not s2["bits"].get("run"):
-                    stopped = True; break
+                    stopped = True
+                    break
                 time.sleep(0.1)
             self._step(steps, "stop", on_step, stopped,
                        "已停机（%.2fs），运行中程序会把报警顶回，必须先停再清"
@@ -703,7 +705,8 @@ class ReadinessService:
                         "error": "程序仍在运行（运行位未落下），无法可靠清报警",
                         "steps": steps}
         # ★ 重试清报警（0x1009 后控制器需时间落定报警位）
-        cleared = False; snap2 = None
+        cleared = False
+        snap2 = None
         for _ in range(3):
             _, cerr = mb.rc_command(CMD_CLEAR)
             if cerr:
@@ -712,9 +715,11 @@ class ReadinessService:
             time.sleep(0.6)
             snap2, _ = mb.rc_snapshot()
             if snap2 and not snap2["bits"]["alarm"]:
-                cleared = True; break
+                cleared = True
+                break
         if not cleared:
-            na1 = (snap2 or snap).get("alarm1", "?"); na2 = (snap2 or snap).get("alarm2", "?")
+            na1 = (snap2 or snap).get("alarm1", "?")
+            na2 = (snap2 or snap).get("alarm2", "?")
             hints = []
             for raw in (na1, na2):
                 try:

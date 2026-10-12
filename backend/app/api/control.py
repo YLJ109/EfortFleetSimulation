@@ -43,7 +43,7 @@ from app.services.limits import load_limits as _load_limits
 from app.services.limits import violations as _violations_of
 from app.core.safety_const import clamp_speed
 from app.services.motion import (
-    motion, real_write_enabled, servo_not_ready_reason, SERVO_NOT_READY_MSG,
+    motion, real_write_enabled, servo_not_ready_reason,
 )
 from app.services.rc_ready import ReadinessService
 from app.services.runmode import MODES as RUN_MODES
@@ -52,7 +52,7 @@ from app.services.safety_guard import check as guard_check
 # ★ 全维度审查 B-12：点位关节角解析的唯一 fail-safe 实现
 from app.utils.joints import parse_joints
 # ★ 全维度审查：速度/轴锁常量唯一来源
-from app.core.safety_const import SPEED_MIN, SPEED_MAX, clamp_speed
+from app.core.safety_const import SPEED_MIN, SPEED_MAX
 from app.core.logger import get_logger
 
 log = get_logger("control")
@@ -2642,7 +2642,7 @@ def api_jog_start(body: JogStartIn, tok: str = Depends(require_control)):
     reject_if_not_ready()
     res = jog.start(body.joint, body.dir, _jog_speed_pct(body),
                     frame=frame, user_frame=body.user_frame, slow=body.slow)
-    unit = jf.unit_of(frame, body.joint)
+    jf.unit_of(frame, body.joint)
     name = _axis_name(frame, body.joint)
     # ★ 2026-10-11 文案如实化：_jog_speed_pct 在**给了 speed_pct** 时用的才是"全局速度"；
     #   只有旧前端/脚本只给 speed_dps 时，它是按 max_speed_dps **折算**出来的 —— 两者不能混称。

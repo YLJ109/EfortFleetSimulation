@@ -91,7 +91,7 @@ def _reset_settings_overlay():
     这里在每个用例前后都清掉覆盖层文件并 reload 配置，保证任何用例都不继承
     上一个用例写下的差异。绝不碰 config/robot.yaml（只读合并来源）。
     """
-    from app.core.config import project_root, reload_config
+    from app.core.config import reload_config
     from app.core.app_settings import SETTINGS_PATH
 
     def _clean():

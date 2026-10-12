@@ -20,7 +20,7 @@ from app.core.config import get_config
 from app.core.logger import get_logger
 # ★ 全维度审查 2026-09-25：安全常量与轴锁策略的唯一来源
 from app.core.safety_const import (
-    SPEED_MIN, SPEED_MAX, ESTOP_RETRY, joint_lock_state,
+    ESTOP_RETRY, joint_lock_state,
     joint_lock_enabled, locked_joints, only_joint, joint_lock_tol,
     joint_lock_apply_in_sim, clamp_speed,
 )

@@ -15,11 +15,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Optional
 
 import websockets
 from fastapi import APIRouter, WebSocket
-from fastapi.responses import JSONResponse
 
 from app.api.ws import _deny, _origin_ok, _wait_token
 from app.core.logger import get_logger

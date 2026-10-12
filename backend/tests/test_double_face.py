@@ -203,7 +203,7 @@ def _second_piece_block(src):
 
 def _code_only(s):
     """去掉整行注释（注释里会写"以前是 xxx / 为什么这么写"，不该被当成还在用）。"""
-    return "\n".join(l for l in s.splitlines() if not l.strip().startswith("#"))
+    return "\n".join(ln for ln in s.splitlines() if not ln.strip().startswith("#"))
 
 
 def test_second_piece_air_sequence_source_pin():
@@ -1617,7 +1617,8 @@ def test_face_for_target_neutralizes_front_and_back_at_raw_slot():
     # 串联入口那一步：front → face_for_target → resolve_target_joints
     dirty = [1.0, 2.0, 3.0, 4.0, 5.0, 0.0]        # A2 自身正面 J6 = 0
     back = S.back_j6(0.0, 0.0)                      # -180
-    cur_back = lambda: [0, 0, 0, 0, 0, back]        # 站"反面"
+    def cur_back():
+        return [0, 0, 0, 0, 0, back]        # 站"反面"
     f = S.face_for_target("A2", S.FACE_FRONT)
     tgt, _, _ = S.resolve_target_joints("A2", dirty, cur_back, face=f)
     assert tgt[5] == back, "站在反面去原料位 → 必须保持反面（不得重算回正面 0）"
@@ -1639,7 +1640,8 @@ def test_resolve_target_joints_forces_keep_on_raw_slot():
     """
     # ---- A1：站"反面"（当前 J6 = −180），A1 自身正面 J6 = 0 ----
     dirty_a = [1.0, 2.0, 3.0, 4.0, 5.0, 0.0]
-    cur_back = lambda: [0, 0, 0, 0, 0, -180.0]
+    def cur_back():
+        return [0, 0, 0, 0, 0, -180.0]
     keep = S.resolve_target_joints("A1", dirty_a, cur_back, face=S.FACE_KEEP)[0]
     front = S.resolve_target_joints("A1", dirty_a, cur_back, face=S.FACE_FRONT)[0]
     back = S.resolve_target_joints("A1", dirty_a, cur_back, face=S.FACE_BACK)[0]
@@ -1649,7 +1651,8 @@ def test_resolve_target_joints_forces_keep_on_raw_slot():
 
     # ---- B5：站"正面"（当前 J6 = 10），B5 自身正面 J6 = 10 ----
     dirty_b = [6.0, 7.0, 8.0, 9.0, 10.0, 10.0]
-    cur_front = lambda: [0, 0, 0, 0, 0, 10.0]
+    def cur_front():
+        return [0, 0, 0, 0, 0, 10.0]
     k5 = S.resolve_target_joints("B5", dirty_b, cur_front, face=S.FACE_KEEP)[0]
     f5 = S.resolve_target_joints("B5", dirty_b, cur_front, face=S.FACE_FRONT)[0]
     b5 = S.resolve_target_joints("B5", dirty_b, cur_front, face=S.FACE_BACK)[0]

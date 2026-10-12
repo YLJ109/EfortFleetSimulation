@@ -18,7 +18,7 @@ import time
 import pytest
 
 from app.api import tictactoe as ttt_api
-from app.db.crud import create_point, delete_point, list_points
+from app.db.crud import create_point, delete_point
 from app.db.database import SessionLocal
 from app.services import sorting as S
 from app.services import tictactoe as TT

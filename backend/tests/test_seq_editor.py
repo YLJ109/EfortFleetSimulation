@@ -343,44 +343,8 @@ def test_jog_stop_not_blocked_by_run(client):
 
 
 # ---------------------------------------------------------------- 放气动作闸门
-def test_vacuum_accepts_blow_action(client):
-    """★ /control/vacuum 必须接受 suck / release / **blow**，其余入参一律 422。
-
-    坑（2026-09-29 差点漏掉）：VacuumIn.action 的正则是 `^(suck|release)$`，
-    新增的放气动作会被 Pydantic 直接 422 挡掉 —— 后端逻辑全对、前端按钮也画出来了，
-    但一按就"请求非法"。本条把这个入参闸门钉死。
-    """
-    h = _admin(client)
-    # ★★ 2026-10-11：动作集扩到 8 个（含反面那一路）—— 正则必须全部放行，否则前端点了就 422。
-    for act in ("suck", "release", "blow", "unblow",
-                "suck_back", "release_back", "blow_back", "unblow_back"):
-        r = client.post("/api/control/vacuum", json={"action": act}, headers=h)
-        assert r.status_code != 422, "%s 不该被入参拒：%s" % (act, r.text)
-        # 测试环境真实下发总闸关闭 → 403；有令牌但闸关是预期行为
-        assert r.status_code in (403, 409, 502), "%s 意外状态 %s" % (act, r.status_code)
-    r = client.post("/api/control/vacuum", json={"action": "purge"}, headers=h)
-    assert r.status_code == 422, "未知动作必须 422：%s" % r.text
 
 
-def test_vacuum_blow_maps_to_bit3(client):
-    """★ 位号必须与用户权威位表一致：下板 1~4 位 / 反面 5~8 位。
-
-    2026-10-11 起位号收敛到 `modbus.VAC_ACTIONS`（**单一映射口**）——
-    本钉改为**查表断言**（不再在 rc_vacuum 源码里找字面量，那正是要消灭的"散落硬编码"）。
-    """
-    from app.services.modbus import VAC_ACTIONS
-    bits = {k: v[0] for k, v in VAC_ACTIONS.items()}
-    assert bits["suck"] == 0x0002 and bits["release"] == 0x0004
-    assert bits["blow"] == 0x0008 and bits["unblow"] == 0x0010
-    assert bits["suck_back"] == 0x0020 and bits["release_back"] == 0x0040
-    assert bits["blow_back"] == 0x0080 and bits["unblow_back"] == 0x0100
-    import inspect
-    import app.services.modbus as M
-    src = inspect.getsource(M.ModbusRobot.rc_vacuum)
-    assert "VAC_ACTIONS" in src, "rc_vacuum 必须走单一映射口 VAC_ACTIONS（不得再写死位号）"
-
-
-# ---------------------------------------------------------------- 放气动作闸门
 def test_vacuum_accepts_blow_action(client):
     """★ /control/vacuum 必须接受 suck / release / **blow**，其余入参一律 422。
 

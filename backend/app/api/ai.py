@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 from app.api.auth import require_control
 from app.api.control import (new_run, register_scene_source, request_cancel,
                             reject_if_not_ready)
-from app.api.sorting import (_Stop, _air, _capture, _joints_of, _move,  # 复用同一套原语
+from app.api.sorting import (_Stop, _air, _capture, _move,  # 复用同一套原语
                             _set as _set_state)
 from app.core.logger import get_logger
 from app.db.crud import list_points
@@ -44,7 +44,7 @@ from app.services import placement as PL
 from app.services import sorting as S
 from app.services.collector import collector
 from app.services.events import emit as emit_event
-from app.services.motion import motion, real_write_enabled
+from app.services.motion import real_write_enabled
 
 log = get_logger("ai")
 router = APIRouter(prefix="/api/ai", tags=["ai"])

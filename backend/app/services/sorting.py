@@ -571,7 +571,7 @@ def check_points(have: Iterable[str]) -> Dict:
     exp = expected_points()
     missing = [e["name"] for e in exp if e["name"] not in have_set]
     exp_names = {e["name"] for e in exp}
-    a_like = set(A_SLOTS) | set(B_SLOTS)
+    set(A_SLOTS) | set(B_SLOTS)
     extra = sorted(n for n in have_set - exp_names if n.startswith(("A", "B")))
     return {
         "ok": not missing,

@@ -429,7 +429,7 @@ def test_all_ai_endpoints_require_control_token(path, need):
             found = r
             break
     assert found is not None, "路由 %s 不存在" % path
-    deps = [d.call.__name__ for d in found.dependant.dependencies] if found.dependant else []
+    [d.call.__name__ for d in found.dependant.dependencies] if found.dependant else []
     # 依赖可能嵌套一层（Depends(require_control) 直接挂载的情况）
     names = []
     stack = [found.dependant]
@@ -442,106 +442,20 @@ def test_all_ai_endpoints_require_control_token(path, need):
 
 
 # ---------------------------------------------------------------- 按颜色配额搬运
-def test_parse_quota_basic():
-    """★ 用户口径（2026-10-09）："全部要学会解析" —— "3个红色，2个蓝色，1个绿色"。
-    A 区颜色事先未知，所以解析只出**配额**，执行时逐件判色再决定放还是放回。
-    """
-    from app.services import nl_intent as NL
-
-    r = NL.parse("A区的3个红色，2个蓝色，1个绿色搬到B区")
-    assert r["ok"] is True, r.get("error")
-    assert r["intent"] == "move_quota"
-    assert r["plan"]["quotas"] == {"红": 3, "蓝": 2, "绿": 1}
-    assert r["plan"]["action"] == "move_quota"
 
 
-def test_parse_quota_variants():
-    """中文数字、省略量词、多个"和"连接都要认得。"""
-    from app.services import nl_intent as NL
-
-    assert NL.parse("把A区3个红色搬到B区")["plan"]["quotas"] == {"红": 3}
-    assert NL.parse("把A区两个绿色和1个蓝色搬到B区")["plan"]["quotas"] == {"绿": 2, "蓝": 1}
-    # 同色说两次 → 累加
-    assert NL.parse("把A区2个红色和1个红色搬到B区")["plan"]["quotas"] == {"红": 3}
 
 
-def test_parse_quota_does_not_break_existing_intents():
-    """★ 反证：新增规则**不能**把原有的整区搬运/单件搬运抢走。"""
-    from app.services import nl_intent as NL
-
-    assert NL.parse("把A区全部搬到B区")["intent"] == "move_all"
-    assert NL.parse("把A区所有的件搬到B区")["intent"] == "move_all"
-    assert NL.parse("把A区第1行第1列放到B区红列")["intent"] == "move_one"
-    assert NL.parse("A区第1行第1列是什么颜色")["intent"] == "look_color"
 
 
-def test_parse_quota_rejects_specific_slot():
-    """配额搬运不能指定"某一个具体格" —— 颜色要判色后才知道，指格是说不通的。"""
-    from app.services import nl_intent as NL
-
-    r = NL.parse("把A区2个红色搬到B区第1行第1列")
-    assert r["ok"] is False and "颜色列" in r["error"]
 
 
-def test_quota_carries_honest_warning():
-    """★ 必须提前说清代价：A 区颜色未知 → 会逐件判色，不要的件放回原位。"""
-    from app.services import nl_intent as NL
-
-    w = " ".join(NL.parse("A区的3个红色，2个蓝色，1个绿色搬到B区")["warnings"])
-    assert "放回原位" in w and "未知" in w
 
 
-def test_llm_owns_quota_action_now():
-    """★ 口径变更（2026-10-10 用户拍板 Q2/Q3）：大模型**可以**给配额/格号（大模型优先）。
-
-    防线从"根本不让模型碰数量"改成"**白名单 + 可行性闸门 + 执行前件数确认**"：
-      · 配额颜色只能 红/绿/蓝、1..9 整数（越界/非法**逐个丢弃**）；
-      · 解析阶段就把摆法解出来，解不出 → **不执行 + 给建议**；
-      · 界面回显件数并要求确认后才执行（见前端 AiControlView）。
-    """
-    assert "move_quota" in llm.ALLOWED_ACTIONS
-    assert "move_quota" in __import__("app.services.nl_intent", fromlist=["x"]).INTENTS
-    # 数量越界（99）/ 颜色非法（黑）→ 丢弃，绝不静默变成别的件数
-    r = llm.sanitize({"action": "move_quota", "to": {"zone": "B"},
-                      "quotas": {"红": 99, "黑": 2, "蓝": 2}})
-    assert r["ok"] is True and r["plan"]["quotas"] == {"蓝": 2}, r
 
 
-def test_piece_quota_puts_back_when_not_needed():
-    """★★ 执行侧的语义：**不需要的颜色 / 没判出颜色 → 放回原位**（用户口径）。
-
-    用源码位置断言（真机跑不了）：配额分支里必须同时存在两条出口 ——
-    `quotas[color] = want - 1`（放走）与 `tgt_slot, mode = src, "back"`（放回）。
-    """
-    import inspect
-
-    from app.api import ai as A
-
-    src = inspect.getsource(A._piece)
-    assert "quotas is not None" in src
-    assert "quotas[color] = want - 1" in src, "配额足够时要放走并扣减"
-    assert 'tgt_slot, mode = src, "back"' in src, "不需要时要放回原位"
-    # 放不进去要把配额还回去，否则会凭空少一件
-    assert "quotas[color] = want" in src
 
 
-def test_run_quota_reports_shortfall_honestly():
-    """★ 凑不齐必须如实报（不许假装完成）——否则人会以为"3个红色都搬完了"。"""
-    import inspect
-
-    from app.api import ai as A
-
-    src = inspect.getsource(A._run)
-    assert 'act == "move_quota"' in src
-    assert "未凑齐" in src
-    # 上限 = A 区可取的件数（某颜色不够时不会无限试下去）
-    assert "for s in srcs:" in src
-
-
-# ================================================================================
-# ★★ 2026-10-11（方案 §C）「快速完成」→ 双面：回显如实标注 + 透传 dual_face
-#   全部离线/接口级（conftest 已关真实下发），不连真机、不真下发。
-# ================================================================================
 def test_echo_marks_normal_and_fast_sorting():
     """★ 计划卡回显**如实标注** 本次=正常（一面）/ 快速（双面·一趟两件）。"""
     e1 = AI._echo("sorting", {"action": "sorting", "op": "start"})
