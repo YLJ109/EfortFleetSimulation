@@ -23,8 +23,17 @@ const canControl = computed(() => auth.controlActive && robot.connected && !robo
 // ★ 「已获得控制权限」只有一键就绪成功后显示
 const granted = computed(() => canControl.value && rc.ready);
 
-// ★ 急停/复位只看令牌（不能被机器人离线禁掉）
-const canEstop = computed(() => auth.controlActive);
+// ★★ 2026-10-12（用户口径「**如果没有就绪，把所有能执行到点、姿势、执行等等所有按钮禁止掉，
+//   不能点击的状态……控制权限的按钮也是！！**」+「**如果没有就绪急停 / 复位急停也用不了**」）：
+//   本卡**所有**真机动作按钮（吸/放两路 + 急停/复位）统一门控 = 控制权限 && 完整就绪。
+//   · 未就绪 = 伺服未上电 / 210 未运行 / 非 AUTO / 有报警 —— 此时机器人不可能因上位机指令
+//     运动（下发会被后端统一闸门 409 拒），故这些按钮**没有可作用的对象**，一律灰掉。
+//   · ★ 唯一"知道机器人现在到底能不能动"的判据是后端算出的 `rc.ready`（与 /api/rc-status 同源）。
+const canAct = computed(() => canControl.value && rc.ready);
+
+// ★ 急停/复位急停：★ 2026-10-12 起**也**受就绪门控（用户明确要求）。
+const canEstop = canAct;
+
 </script>
 
 <template>
@@ -60,23 +69,23 @@ const canEstop = computed(() => auth.controlActive);
     <hr class="sp-hr" />
     <div class="btns vac-btns">
       <button class="vac-suck" :class="{ 'is-on': exec.vacuumState === 'suck' }"
-              :disabled="!canControl || exec.vacuumBusy"
+              :disabled="!canAct || exec.vacuumBusy"
               @click="exec.vacuum('suck')"
               title="下板/正面 吸气（40135.Bit1）">
         <Icon name="download" :size="14" /> 吸气
       </button>
-      <button class="vac-release" :disabled="!canControl"
+      <button class="vac-release" :disabled="!canAct"
               @click="exec.vacuum('release')"
               title="下板/正面 停止吸气（40135.Bit2）">
         <Icon name="upload" :size="14" /> 停止吸气
       </button>
       <button class="vac-blow" :class="{ 'is-on': exec.vacuumState === 'blow' }"
-              :disabled="!canControl"
+              :disabled="!canAct"
               @click="exec.vacuum('blow')"
               title="下板/正面 放气（40135.Bit3）">
         <Icon name="eject" :size="14" /> 放气
       </button>
-      <button class="vac-unblow" :disabled="!canControl"
+      <button class="vac-unblow" :disabled="!canAct"
               @click="exec.vacuum('unblow')"
               title="下板/正面 停止放气（40135.Bit4）">
         <Icon name="close" :size="14" /> 停止放气
@@ -85,23 +94,23 @@ const canEstop = computed(() => auth.controlActive);
     <!-- 反面/上板那一路（与下板独立，放一件不影响另一件） -->
     <div class="btns vac-btns vac-btns-back">
       <button class="vac-suck vac-back" :class="{ 'is-on': exec.vacuumStateBack === 'suck' }"
-              :disabled="!canControl || exec.vacuumBusy"
+              :disabled="!canAct || exec.vacuumBusy"
               @click="exec.vacuum('suck_back')"
               title="反面/上板 吸气（40135.Bit5）">
         <Icon name="download" :size="14" /> 反面吸气
       </button>
-      <button class="vac-release vac-back" :disabled="!canControl"
+      <button class="vac-release vac-back" :disabled="!canAct"
               @click="exec.vacuum('release_back')"
               title="反面/上板 停止吸气（40135.Bit6）">
         <Icon name="upload" :size="14" /> 反面停止吸气
       </button>
       <button class="vac-blow vac-back" :class="{ 'is-on': exec.vacuumStateBack === 'blow' }"
-              :disabled="!canControl"
+              :disabled="!canAct"
               @click="exec.vacuum('blow_back')"
               title="反面/上板 放气（40135.Bit7）">
         <Icon name="eject" :size="14" /> 反面放气
       </button>
-      <button class="vac-unblow vac-back" :disabled="!canControl"
+      <button class="vac-unblow vac-back" :disabled="!canAct"
               @click="exec.vacuum('unblow_back')"
               title="反面/上板 停止放气（40135.Bit8）">
         <Icon name="close" :size="14" /> 反面停止放气

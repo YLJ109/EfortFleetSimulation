@@ -21,7 +21,7 @@ const ROOT = path.resolve(HERE, "..");
 //   scheme "d:" 而报 ERR_UNSUPPORTED_ESM_URL_SCHEME。
 const {
   TABS, HOME_VIEW, tabAllowed, visibleTabs, allowedKeys, safeView, isKnownView,
-  navTabs,
+  navTabs, TAB_KEY_COUNT,
 } = await import(pathToFileURL(path.join(ROOT, "src", "tabs.js")).href);
 
 let pass = 0, fail = 0;
@@ -99,8 +99,8 @@ section("D. 操作员令牌：执行页与系统设置出现，运维审计仍�
 //   + 右 4（模拟仿真 / 运维审计 / 系统设置 / 关于）；「程序执行」**与「点位执行」合并**
 //   成右栏 tab，不再占顶栏位置（hidden），但仍是合法页面（allowedKeys 里仍认它）。
 //   顺序 = src/tabs.js 的 TABS 顺序（guide.js 的模块清单与之同序，verify_about A3 钉着）。
-eq(keys(OP), ["live", "point", "program", "sort", "ai", "sim", "settings", "about"],
-   "D1 操作员可见 = 真实监控 + 点位执行(+程序执行) + 智能分拣 + AI 执行 + 模拟仿真 + 系统设置 + 关于");
+eq(keys(OP), ["live", "point", "program", "sort", "ai", "pad", "sim", "settings", "about"],
+   "D1 操作员可见 = 真实监控 + 点位执行(+程序执行) + 智能分拣 + AI 执行 + 手柄执行 + 模拟仿真 + 系统设置 + 关于");
 ok(keys(OP).includes("point"), "D2 拿到控制权限后「点位执行」页出现（不需要刷新）");
 ok(keys(OP).includes("program"),
    "D2a 「程序执行」仍是合法页面（与点位执行合并、靠右栏 tab 切换）");
@@ -108,6 +108,8 @@ ok(keys(OP).includes("settings"), "D2b 系统设置对操作员可见（可改�
 ok(keys(OP).includes("sort"), "D2c 智能分拣页对操作员可见（会下发运动，必须持控制令牌）");
 ok(keys(OP).includes("ai"),
    "D2d AI 执行页对操作员可见（会下发运动，但 AI 不是权限后门：仍需令牌）");
+ok(keys(OP).includes("pad"),
+   "D2e 手柄执行页对操作员可见（会下发真实运动 → 必须持控制令牌）");
 ok(!keys(OP).includes("ops"), "D3 运维审计对操作员隐藏（需管理员）");
 ok(OP.controlActive && !OP.isAdmin, "D4 快照自检：操作员有令牌但不是 admin");
 
@@ -116,13 +118,13 @@ section("D′. 顶栏布局（用户 2026-10-10 口径：左 4 / 右 4；点位+
 // ---------------------------------------------------------------------
 {
   eq(navTabs(ADMIN).map((t) => t.key),
-     ["live", "point", "sort", "ai", "sim", "ops", "settings", "about"],
-     "D′1 管理员顶栏 = 真实监控/点位执行/智能分拣/AI 执行 + 模拟仿真/运维审计/系统设置/关于");
+     ["live", "point", "sort", "ai", "pad", "sim", "ops", "settings", "about"],
+     "D′1 管理员顶栏 = 真实监控/点位执行/智能分拣/AI 执行/手柄执行 + 模拟仿真/运维审计/系统设置/关于");
   ok(!navTabs(ADMIN).some((t) => t.key === "program"), "D′2 「程序执行」不在顶栏（已与点位执行合并）");
   const nav = TABS.filter((t) => !t.hidden);
   eq(nav.filter((t) => t.side !== "right").map((t) => t.key),
-     ["live", "point", "sort", "ai"],
-     "D′3 标题**左侧** = 真实监控 + 点位执行 + 智能分拣 + AI 执行");
+     ["live", "point", "sort", "ai", "pad"],
+     "D′3 标题**左侧** = 真实监控 + 点位执行 + 智能分拣 + AI 执行 + 手柄执行");
   eq(nav.filter((t) => t.side === "right").map((t) => t.key),
      ["sim", "ops", "settings", "about"],
      "D′4 标题**右侧** = 模拟仿真 + 运维审计 + 系统设置 + 关于");
@@ -131,6 +133,10 @@ section("D′. 顶栏布局（用户 2026-10-10 口径：左 4 / 右 4；点位+
   eq(TABS.find((t) => t.key === "sort").label, "智能分拣", "D′6 「分拣」已改名「智能分拣」");
   ok(TABS.some((t) => t.key === "program" && t.hidden === true),
      "D′7 「程序执行」标了 hidden:true（不占顶栏，但仍合法）");
+  // ★ 2026-10-11 用户口径：新增「手柄执行」页 → 放标题**左侧**、排在 AI 执行之后。
+  ok(TABS.some((t) => t.key === "pad" && t.side === "left" && t.needAuth === true),
+     "D′8 「手柄执行」在标题左侧且 needAuth（会下发真实运动）");
+  eq(TAB_KEY_COUNT, 9, "D′9 数字键位数 = 9（= 顶栏可直达模块数）");
 }
 
 // ---------------------------------------------------------------------

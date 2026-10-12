@@ -78,7 +78,13 @@ export const useUiStore = defineStore("ui", {
       sideCollapsed: s.sideCollapsed === true,
       /** 当前页面 key（由 App.vue 校验是否在已知 tab 里，非法值回落到 live） */
       view: typeof s.view === "string" ? s.view : "live",
-      /** 执行页叠加的摄像头窗口是否展开（点位执行 / 程序执行共用） */
+      /**
+       * ★ 摄像头浮层的显隐（Q 键「显示 / 隐藏摄像头画面」）。
+       *   `CameraPanel` 根节点 `v-show="ui.camVisible"`（**v-show 保活**取流与拖拽/尺寸状态）。
+       *   ★★ 2026-10-11 修复：此前 `camVisible` **只有读写、没有任何组件消费** ——
+       *     按 Q 只弹一句"已隐藏"而画面照旧（假功能/编故事）。现在它真的生效。
+       *   默认 true（未持久化；`s.camVisible !== false`）。
+       */
       camVisible: s.camVisible !== false,
       /**
        * 底栏状态区（多选一）当前展开的片 key（"" = 全部收起）。

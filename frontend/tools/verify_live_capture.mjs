@@ -120,6 +120,13 @@ console.log("== E. 不删除既有能力：相机面板的手动开关/设备切
      panel.includes("onDeviceChange") && panel.includes("switchDevice"));
   ok("E3 相机面板仍有截图 / 重连",
      panel.includes("onSnap") && panel.includes("reconnectCam"));
+  // ★★ 2026-10-11 修复（"假功能 / 编故事"）：Q 键「显示 / 隐藏摄像头画面」原来只弹一句提示，
+  //   `ui.camVisible` **没有任何组件消费** → 画面照旧。现在面板自己真正响应它（v-show 保活）。
+  ok("E4 Q 键「显示/隐藏摄像头画面」**真生效**：相机面板读 ui.camVisible 并 v-show",
+     /useUiStore/.test(panel) && /<div class="cam-panel" v-show="ui\.camVisible"/.test(panel));
+  ok("E5 Q 键提示语与真实行为一致（不再是空话）",
+     /flashKeyHint\(ui\.camVisible \? "摄像头画面：已显示" : "摄像头画面：已隐藏"\)/.test(
+       read("src/App.vue")));
 }
 
 console.log("");

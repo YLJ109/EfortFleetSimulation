@@ -1,4 +1,4 @@
-﻿<script setup>
+﻿﻿<script setup>
 // =====================================================================
 // 「系统设置」页：config/robot.yaml 的界面化编辑（走 config/app_settings.json 覆盖层）。
 //

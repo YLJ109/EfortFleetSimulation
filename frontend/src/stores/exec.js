@@ -104,9 +104,11 @@ export const useExecStore = defineStore("exec", {
     // ---- 点动 ----
     jogStepDeg: 1,
     jogBusy: false,
+    // ★ 2026-10-11 如实注明：`jogState` 只被 getter `jogActive` 读、而 `jogActive` 当前**没有消费方**
+    //   （点动按钮的可用性用 `canJog`）—— 两者属预留口径，别误以为"已经在用点动状态做门控了"。
     jogState: null,
     holding: -1,                              // 当前按住的轴 1..6，-1 未按住
-    holdingDir: 0,
+    holdingDir: 0,                            // ★ 2026-10-11 注明：当前**只写不读**（预留，无界面消费方）
 
     // ---- 轴锁模式（来自后端 /api/system/health 的 joint_lock）----
     //   ★ null = 尚未拉取；enabled=false（默认）时 jointLocked() 恒返回 false → J1–J6 全轴可动。
@@ -141,6 +143,8 @@ export const useExecStore = defineStore("exec", {
     runPaused: false,
     _seqPoll: null,           // 进度轮询句柄
     vacuumBusy: false,
+    // ★ 2026-10-11 如实注明：`vacuumErr` 目前**只写 + 写进运行日志**，界面没有专用提示位
+    //   （原来容易被当成"页面上已有吸放失败提示"）。
     vacuumErr: null,
     // ★ 「停止吸气」/「放气」在上一发还飞时被按下 → 记下待补发的动作，
     //   收尾后立刻执行，绝不丢弃（"" = 无待补发）。
@@ -164,6 +168,14 @@ export const useExecStore = defineStore("exec", {
      */
     lastRunTarget: null,
     log: [],
+    /**
+     * ★★ 日志「水位」：**单调递增的序号**（每写一条 +1，清空归零）。
+     *   为什么不用 `log.length`：`logLine()` 超过 `LOG_MAX`(240) 会 `splice` 掉旧行 →
+     *   长度**恒为 240、不再变化** → 界面那个"来新消息就滚到底"的 watch 会**失效**
+     *   （偏偏日志越长越需要跟底，见 docs/方案-井字棋3D棋子视觉与复原… 的 §1⑧）。
+     *   序号只增不减，任何一次 push 都能被 watch 捕捉到。
+     */
+    logSeq: 0,
   }),
 
   getters: {
@@ -275,8 +287,9 @@ export const useExecStore = defineStore("exec", {
     logLine(level, text) {
       this.log.push({ t: hhmmss(), level, text: String(text) });
       if (this.log.length > LOG_MAX) this.log.splice(0, this.log.length - LOG_MAX);
+      this.logSeq += 1;      // ★ 水位只增不减（长度会被 LOG_MAX 截断，不能当水位用）
     },
-    clearLog() { this.log = []; },
+    clearLog() { this.log = []; this.logSeq = 0; },
 
     // ================= 清除示教器（控制器）报错 =================
     // ★ 只清报警（写 CMD_CLEAR 0x1009），不重新上电/加载/运行——
@@ -1529,6 +1542,12 @@ export const useExecStore = defineStore("exec", {
         return;
       }
       if (this.needAuth()) return;
+      // ★★ 2026-10-11：真实下发（dryRun=false）必须过与「直接运行」**同一道**就绪门控
+      //   （原来只靠按钮置灰，直接调 store / 按钮漏判时就会绕过 → 后端 409 兜底报错）。
+      if (!dryRun && !this.canExec) {
+        this.seqErr = this.blockReason || "机器人没有就绪，无法下发";
+        return;
+      }
       const name = (this.seqName || "").trim() || "未命名序列";
       this.seqBusy = true; this.seqErr = ""; this.seqMsg = "";
       this.runBusy = true; this.dryRun = !!dryRun;

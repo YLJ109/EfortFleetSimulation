@@ -18,7 +18,7 @@
 // ★ 这里只决定"显不显示入口"，绝不承担权限判定：每个写接口仍然由后端
 //   require_control(401) / require_admin(403) 把关。前端藏入口是体验，不是安全边界。
 //
-// ★ 数字键 1~8 对应「顶栏从左到右第 N 个**可见**模块」（hidden 的不占位）。
+// ★ 数字键 1~9 对应「顶栏从左到右第 N 个**可见**模块」（hidden 的不占位）。
 //   没权限时后面的不显示、序号顺延（解析与断言见 src/shortcuts.js）。
 // =====================================================================
 
@@ -48,6 +48,10 @@ export const TABS = [
   // ★ 用户 2026-10-10 二次口径：**智能分拣 / AI 执行 放在标题左侧**（模拟仿真留在右侧）。
   { key: "sort", icon: "layers", label: "智能分拣", needAuth: true, side: "left" },
   { key: "ai", icon: "megaphone", label: "AI 执行", needAuth: true, side: "left" },
+  // ★ 2026-10-11 用户口径：新增「手柄执行」页（2D 选点 + 单次气路 + 井字棋搬入），
+  //   放在标题**左侧**、排在「AI 执行」之后（"应该是左边吧"）。
+  //   会下发真实运动 → needAuth（与点位/分拣/AI 同一把令牌，不是权限后门）。
+  { key: "pad", icon: "gamepad", label: "手柄执行", needAuth: true, side: "left" },
   // ---------- 顶栏右侧 ----------
   { key: "sim", icon: "layers", label: "模拟仿真", side: "right" },
   { key: "ops", icon: "activity", label: "运维审计", needAdmin: true, side: "right" },
@@ -56,7 +60,7 @@ export const TABS = [
 ];
 
 /** 顶栏实际显示的 tab 数（数字键 1~N 直达）—— 与 src/shortcuts.js 的 TAB_KEY_COUNT 必须一致。 */
-export const TAB_KEY_COUNT = TABS.filter((t) => !t.hidden).length;     // = 8
+export const TAB_KEY_COUNT = TABS.filter((t) => !t.hidden).length;     // = 9
 
 /**
  * 某个 tab 对当前权限是否开放。

@@ -34,6 +34,8 @@ function ok(name, cond, extra = "") {
 const flow = read("src/components/SortFlow.vue");
 const view = read("src/components/SortingView.vue");
 const api = read("../backend/app/api/sorting.py");
+// ★ 2026-10-11：工艺时序常量的唯一来源（吸牢/放气/检测位停留），缺省值钉在这里
+const svc = read("../backend/app/services/sorting.py");
 
 // 去掉注释行再扫描（注释里会写"以前是 xxx"来解释历史，不该被当成还在用）
 const strip = (src) => src.split("\n").filter((l) => !l.trim().startsWith("//")
@@ -211,8 +213,11 @@ console.log("== E. 接进分拣页 + 参数不写死 ==");
     && /:suck-hold-ms="suckHoldMs"/.test(view) && /:frames="frames"/.test(view));
   ok("前端把 suck_hold_ms 一起下发给后端（界面与后端同一份参数）",
     /suck_hold_ms: suckHoldMs\.value/.test(view));
-  ok("后端 StartIn 有 suck_hold_ms（默认 500）",
-    /suck_hold_ms: int = Field\(default=500/.test(api));
+  // ★★ 2026-10-11：缺省值改从**工艺时序唯一来源** `services/sorting.py::SUCK_HOLD_MS` 取
+  //   （值仍是 500ms）。口径仍钉死"默认 500"，只是不再各处硬写 500。
+  ok("后端 StartIn 有 suck_hold_ms（缺省 = S.SUCK_HOLD_MS = 500ms）",
+    /suck_hold_ms: int = Field\(default=S\.SUCK_HOLD_MS/.test(api)
+    && /^SUCK_HOLD_MS = 500/m.test(svc));
   ok("★ 后端空跑分支保留语义化阶段名（否则空跑时流程高亮跳错步）",
     /stage=\("%s\(空跑\)" % stage\)/.test(api));
 }
@@ -237,45 +242,50 @@ console.log("== F. 分拣模式（正常 / 快速）→ 后端 dual_face ==");
   ok("反证：把 dual_face 写死 true/false 会被判失败（当前没有写死）",
     !/dual_face:\s*(true|false)\b/.test(view));
 
-  // 3) 缺 J6正面 / J6反面 时拦下启动（且沿用本页既有 isTaught，不另写查询）。
-  ok("★ 有拦截逻辑：canStart 含 dualFaceBlocked",
-    /canStart\b[\s\S]{0,240}dualFaceBlocked\.value/.test(view));
-  ok("★ 拦截用到两个点名 J6正面 / J6反面",
-    /DUAL_FACE_POINTS\s*=\s*\[\s*"J6正面"\s*,\s*"J6反面"\s*\]/.test(view));
-  ok("★ 拦截沿用既有 isTaught 判定点位是否已示教（不新造查询）",
-    /dualFaceMissing[\s\S]{0,120}isTaught\(/.test(view));
+  // 3) ★★ 2026-10-12 终版（用户口径「不用录制正反面」）：J6正面/反面已是**虚拟切面命令**
+  //    （正面 = 该点自身录制的 J6、反面 = 当前点 J6 − 180，按点名自动折算，不读点位库）
+  //    → 旧的"缺两行就拦下启动"护栏（dualFaceBlocked / DUAL_FACE_POINTS / dualFaceMissing）
+  //    整体删除。反向钉住：不许再有按"库里有没有这两行"拦启动的守卫（否则用户删掉
+  //    历史遗留行后，快速分拣会被 400 卡死 —— 界面守卫与后端口径脱节）。
+  ok("★ 旧护栏 dualFaceBlocked / DUAL_FACE_POINTS / dualFaceMissing 已整体移除",
+    !/dualFaceBlocked|DUAL_FACE_POINTS|dualFaceMissing/.test(view));
+  ok("★ 快速分拣文案明确「原地翻转 + 无需录制正反面」（自动折算，不要求库里有这两行）",
+    /原地翻转/.test(view) && /无需录制正反面/.test(view));
   ok("选快速时给了「首次使用请先空跑」的如实提示",
     /首次使用请先空跑/.test(view));
 }
 
 console.log("");
-console.log("== G. J6 正面/反面：界面只显示 J6（用户 2026-10-11 反馈） ==");
+console.log("== G. J6 正面/反面：虚拟切面命令（用户 2026-10-12 终版「不用录制正反面」） ==");
 {
-  // ★ 用户口径："J6 的坐标不对，你应该只存储 J6 的坐标，别的五个点不用"。
-  //   后端已把翻转改成**只覆盖第 6 轴**（`_move_flip_j6`）；界面这两行也必须**只报 J6**，
-  //   否则列表里还列着 6 个关节值 → 会让人误以为那 5 个轴也参与翻转（界面在编故事）。
-  //   做法：给这两项打 `j6Only: true`，模板按标记分支渲染（**不**用 sl.name === ... 散落硬编码）。
-  const j6Lines = view.split("\n")
-    .filter((l) => !l.trim().startsWith("//") && /j6Only:\s*true/.test(l));
-  ok("★ j6Only 标记只打在 J6 两项上（C检测 / 开始/结束点 未被影响）",
-    j6Lines.length === 2 && j6Lines.every((l) => /"J6/.test(l)),
-    "打到: " + JSON.stringify(j6Lines.map((l) => l.trim())));
-  ok("★ 坐标区有 j6-only 的分支渲染（v-if=\"sl.j6Only\"）",
-    /v-if="sl\.j6Only"/.test(view));
-  ok("★ 有 J6-only 取值函数（j6Text，只取 joints[5]）",
-    /function j6Text\(/.test(view) && /j\[5\]/.test(view));
+  // ★★ 2026-10-12 终版：这两项不再读点位库 —— 正面 = 该点自身录制的 J6、
+  //   反面 = 当前点 J6 − 180（自动折算）。界面绿点常亮（没有「未示教」态）、
+  //   按钮固定叫「切面」；旧的 j6Only 标记 / j6Text 函数 / 存点按钮全部退役
+  //   （虚拟命令没有"存的值"，列表里再列 6 个关节值就是在编故事）。
+  ok("★ extraSlots 仍按名字列出 J6正面 / J6反面（与后端点名一字不差）",
+    /\{\s*name:\s*"J6正面"/.test(view) && /\{\s*name:\s*"J6反面"/.test(view));
+  ok("★ 旧 j6Only 标记已整体退役（不再有按标记分支的渲染）",
+    !/j6Only/.test(view));
+  ok("★ 旧 j6Text 取值函数已删除", !/j6Text/.test(view));
+  ok("★ 界面如实标注「虚拟切面命令（无需录制）」", /虚拟切面命令/.test(view));
   // ★ 2026-10-11（方案 S2）：原来"只用 J6 / 其余轴不用 / J1~J5 保持实时姿态"在同一张卡讲了
-  //   三遍（坐标行内 + 两段说明）。现坐标行只留数值，语义统一收敛到卡底**一段**说明 —— 断言随之收敛。
+  //   三遍。语义统一收敛到卡底**一段**说明 —— 断言随之收敛。
   ok("★ 卡底一段说明「只用 J6；翻转时 J1~J5 保持当前实时姿态」",
     /只用 J6/.test(view) && /当前实时姿态/.test(view));
-  // 反证：非 j6-only 的点仍走完整 6 值渲染（coordText 未被整体替换掉）。
-  ok("★ 非 j6-only 行仍显示完整坐标（coordText 仍在）",
+  // 反证：普通点位仍走完整 6 值渲染（coordText 未被整体替换掉）。
+  ok("★ A/B 主列表仍显示完整坐标（coordText 仍在）",
     /coordText\(ptOf\(sl\.name\)\)/.test(view));
 
-  // ★★ 2026-10-11 本轮反馈：「正反面没有在原地啊，每次回去起点」——
-  //   分拣页这两行的按钮必须叫「切面」（语义=原地只改 J6），不能再叫「到点」（会让人以为整姿态到点）。
-  ok("★ j6-only 行的按钮是「切面」（不是「到点」）",
-    /sl\.j6Only \? "切面" : "到点"/.test(view));
+  // ★★ 2026-10-12 终版卡内专属断言：先圈出 extraSlots 的模板块（从终版注释到 </template>），
+  //   块内不许有「存点」（虚拟命令无需录制）也不许有「到点」（那是整姿态动作，这里是原地切面）。
+  const iJ6 = view.indexOf("终版：J6正面/反面");
+  const extraBlock = iJ6 >= 0 ? view.slice(iJ6, view.indexOf("</template>", iJ6)) : "";
+  ok("★ 卡内绿点常亮（虚拟命令没有「未示教」态，sdot on 静态渲染）",
+    extraBlock.length > 0 && extraBlock.includes("sdot on"));
+  ok("★ 卡内按钮是「切面」（原地只改 J6，不是整姿态「到点」）",
+    /切面\s*<\/button>/.test(extraBlock) && !/到点/.test(extraBlock));
+  ok("★ 卡内没有存点按钮（teach —— 虚拟命令无需录制）",
+    extraBlock.length > 0 && !/teach\(/.test(extraBlock));
 
   // ★★ 点位执行页：`J6正面`/`J6反面` 同样**只显示 J6**（后端已把下发转成"原地切面"），
   //   不把"其余 5 轴写 0"当成坐标列出来（否则界面像在说这 5 轴也参与）。

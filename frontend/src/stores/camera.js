@@ -47,7 +47,7 @@ export const useCameraStore = defineStore("camera", {
     status: null,          // 相机服务 /status 快照（服务不可达时为 null）
     error: "",
     serviceDown: false,    // 相机服务（8100）不可达 / 超时
-    failCount: 0,          // 连续失败次数（供界面显示退避状态）
+    failCount: 0,          // 连续探测失败次数（**仅内部计数**：`_markDown` 累加、`_markUp` 清零；界面当前无消费方）
     devices: [],           // 可用相机设备列表
     currentDevice: null,   // 当前已打开的设备信息
     // ★★ 2026-10-11 用户口径：「相机」与「实时捕捉」**默认都关** —— 启动不再自动开相机；
@@ -65,22 +65,23 @@ export const useCameraStore = defineStore("camera", {
     opened: (s) => !!(s.status && s.status.opened && !s.status.closing),
     /** 取流是否可用：服务在线 + 相机已开。画面链路的唯一判据。 */
     canStream: (s) => !s.serviceDown && !!(s.status && s.status.opened && !s.status.closing),
-    yoloEnabled: (s) => !!(s.status && s.status.ai_enabled),
-    yoloLoaded: (s) => !!(s.status && s.status.ai_loaded),
-    yoloLoading: (s) => !!(s.status && s.status.ai_loading),
+    /** ★★ 2026-10-11：`yoloEnabled/yoloLoaded/yoloLoading` 三个 getter 已**删除** ——
+     *   YOLO 检测已从项目移除（现场只用颜色检测），它们描述的功能**根本不存在**，
+     *   留着只会让维护者以为"界面已有目标检测开关"（同"假功能/编故事"一类）。 */
     colorEnabled: (s) => !!(s.status?.vision?.enabled),
     colorSupported: (s) => !!(s.status?.vision?.supported),
     /** 当前相机是否彩色（灰度相机无法做颜色识别）。 */
     colorCapable: (s) => !!(s.status?.vision?.color_capable),
     /** 三色识别置信度阈值（0~1），未生效默认 0.35。 */
     colorConf: (s) => s.status?.vision?.min_conf ?? 0.35,
-    // ★ 目标检测置信度阈值（YOLO）：/status 的 conf。误报多就往上调。
+    // ★ 检测置信度阈值（颜色检测）：/status 的 conf。误报多就往上调。
+    //   （原注释写"YOLO"—— 那是已移除的目标检测，与本字段无关。）
     detConf: (s) => s.status?.conf ?? 0.5,
     /** 可识别色（2026-10-10 七色重构）：七色调色板 + 黑（无彩色）。
      *  ★ "有效 / 无效"由**用户指令**决定，色片只展示"检测器能识别到哪些色"。 */
     colorTargets: (s) => s.status?.vision?.targets
       || ["红", "橙", "黄", "绿", "青", "蓝", "紫", "黑"],
-    /** 颜色识别累计次数（"目标"统计用；YOLO 关掉后 det_count 恒为 0）。 */
+    /** 颜色识别累计次数（"目标"统计用）。 */
     colorCount: (s) => s.status?.vision?.count ?? 0,
     /** 相机自身报的错（如"未找到相机"），与 serviceDown 区分开。 */
     deviceError: (s) => (s.status && s.status.error) || "",

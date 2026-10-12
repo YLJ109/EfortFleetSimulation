@@ -46,7 +46,11 @@ const rows = computed(() => {
     { k: "伺服", v: b.servo ? "上电" : "未上电", ok: !!b.servo },
     { k: "报警", v: b.alarm ? ("码 " + rc.snap.alarm1 + "/" + rc.snap.alarm2) : "无", ok: !b.alarm },
     { k: "急停", v: b.estop ? "按下" : "未按下", ok: !b.estop },
-    { k: "程序", v: rc.progText, ok: !!(b.prog_loaded && b.run) },
+    // ★★ 2026-10-12 修正（真 bug 同源）：原判据 `b.prog_loaded && b.run` 在**正常运行态**
+    //   （prog=210 / run=1 / prog_loaded=0）会显示"程序 ✗" —— 与后端 `ready` 的同一处错。
+    //   正确：程序号 = 常驻服务程序 且 **运行位 = 1**（"已加载"位 RUN 起来后会落下）。
+    { k: "程序", v: rc.progText,
+      ok: !!(rc.snap && rc.snap.prog === rc.snap.service_program && b.run) },
     { k: "点动", v: rc.jogTrig ? "上一发收尾中" : "触发位空闲", ok: !rc.jogTrig },
   ];
 });
@@ -100,7 +104,13 @@ const readyDisabled = computed(() => {
   // 发起就绪：需要令牌 + 机器人在线（遥测可信）+ 双闸开启
   if (!auth.controlActive) return true;
   if (!rc.realEnabled) return true;
+  // ★ `canControl` = 令牌 + 机器人已连接 + **遥测未冻结**（= 拿得到实时姿态）。
+  //   ★★ 2026-10-12（用户口径「**拿不到实时姿态禁止就绪**」）：这层就是它 ——
+  //   读不到实时姿态（离线/遥测冻结）时 `canControl` 为假 → 一键就绪直接灰掉。
   if (!canControl.value) return true;
+  // ★★ 2026-10-12（用户口径「**如果示教器不是 auto，禁止一键就绪**」）：
+  //   档位不在 AUTO/远程 → 上位机指令无效（后端就绪流程同样会拒），前端先灰掉、别白点一次。
+  if (!rc.joggable) return true;
   // ★★ 不再因为"点动触发位仍为 1"禁用就绪（现场事故：某次点动异常退出把触发位留在 1，
   //   按钮被永久禁用 → "一键就绪点不了"，用户彻底没救）。
   //   后端 _ready() 的第一步就是**撤触发**（写 40135=0，纯撤销意图、不产生运动），
@@ -131,7 +141,8 @@ async function onReadyToggle() {
     exec.logLine("err", "一键就绪未执行："
       + (!auth.controlActive ? "需要控制权限"
         : (!rc.realEnabled ? "真实下发（双闸）未开启"
-          : "机器人未连接或遥测过期")));
+          : (!rc.joggable ? "示教器不在 AUTO/远程档（T1/T2 下上位机指令无效），请先拨到 AUTO"
+            : "机器人未连接或拿不到实时姿态（遥测过期）"))));
     return;
   }
   doReady();

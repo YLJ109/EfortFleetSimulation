@@ -196,3 +196,26 @@ def _pin_collector_simulated():
     _pin()
     yield
     _pin()
+
+
+@pytest.fixture(autouse=True)
+def _reset_ui_speed():
+    """★★ 跨用例隔离：`services/ui_speed` 是**进程级全局状态**（"上位机当前速度"）。
+
+    为什么必须清：各流程**开始时会 `publish` 自己的速度**（分拣/井字棋/AI/文件执行…），
+    而 `_move` 每一步都读它 —— 若上一条用例留下的值不清理，**下一条用例的点位下发
+    会拿到上一条的速度**（现场表现为"速度莫名跟上次一样"；测试里就是莫名红）。
+
+    ★ 只清测试进程里的这个登记值，**不改任何生产逻辑**。
+    """
+    try:
+        from app.services import ui_speed
+        ui_speed.reset()
+    except Exception:  # noqa: BLE001
+        pass
+    yield
+    try:
+        from app.services import ui_speed
+        ui_speed.reset()
+    except Exception:  # noqa: BLE001
+        pass

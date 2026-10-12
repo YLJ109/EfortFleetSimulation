@@ -246,10 +246,14 @@ watch(() => auth.controlActive, (v) => {
                 @click="exec.applyTeach()">
           <Icon name="target" :size="13" /> 执行到位姿
         </button>
-        <button :disabled="!readyOk || exec.teachBusy" @click="exec.syncTeachFromRobot()">
+        <!-- ★★ 2026-10-12（用户口径「**没有就绪可以录点，但是不能移动**」）：
+             「取当前位姿」只**读**实时姿态（不动机器人）→ 只要遥测可信即可；
+             「存为点位」只**写配置**（点位库里多一行）→ 只要持有控制令牌即可 ——
+             **未就绪也能录点**（不能点的永远是"移动/执行"那类）。 -->
+        <button :disabled="!canControl || exec.teachBusy" @click="exec.syncTeachFromRobot()">
           <Icon name="refresh" :size="13" /> 取当前位姿
         </button>
-        <button :disabled="!readyOk" @click="saveTeachAsPoint">
+        <button :disabled="!auth.controlActive" @click="saveTeachAsPoint">
           <Icon name="file" :size="13" /> 存为点位
         </button>
       </div>

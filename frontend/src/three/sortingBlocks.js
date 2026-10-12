@@ -39,11 +39,36 @@ import { sceneFromBaseMm } from "./sceneCoords.js";
 import { suckerLocalMmForSide } from "./endEffector.js";
 
 /** 四色 → 十六进制（与视觉/后端同名同色，避免"3D 里的红"与识别出的"红"不是一回事）。
+ *  ★★ 2026-10-11 修复：`绿` 原来是 `0x2e9e4f`，与**权威色卡**（`camera/vision_color.py` 的
+ *    `#1FA74A`、前端流程色标 `SortFlow.vue` 的 `#1FA74A`）**不是同一个绿** ——
+ *    而本行注释自称"与视觉/后端同名同色"。现改为与色卡一致，止住这处颜色分叉
+ *    （井字棋「叉=绿」复用本表，也一并纠正）。
  *  ★ 「黑」= **无效颜色**（第 4 色）：识别到了但不进分拣，原路放回原位。 */
-export const SORT_COLOR_HEX = { "红": 0xe02020, "绿": 0x2e9e4f, "蓝": 0x1f4fd8, "黑": 0x1c1f24 };
+export const SORT_COLOR_HEX = { "红": 0xe02020, "绿": 0x1fa74a, "蓝": 0x1f4fd8, "黑": 0x1c1f24 };
 /** 未判色 = 未知灰；疑似没取到 = 警示红（与"红方块"区分：更亮 + 描边）。 */
 export const HEX_UNKNOWN = 0x8a8f95;
 export const HEX_SUSPECT = 0xff3b30;
+/** ★ 井字棋：符号 → 显示色（用户 2026-10-11 口径「**蓝色是圆，绿色是叉**」）。
+ *  ★ 复用 `SORT_COLOR_HEX` 的「蓝/绿」，避免出现两种不一样的蓝/绿。
+ *  ★ 这是**棋子身份色**（圆 O / 叉 X），**不是**该格料的实测颜色（自证模式判出的红/绿/蓝）——
+ *    默认模式根本不判色，没有实测色可显示（口径见 docs/方案-井字棋3D棋子视觉与复原…§2A）。 */
+export const TTT_SYM_HEX = { O: SORT_COLOR_HEX["蓝"], X: SORT_COLOR_HEX["绿"] };
+const HEX_MARK = 0xeaf2fb;             // 顶面符号标记（圆环/十字）的亮色
+
+/** A 区来源格 → 它代表的符号（A1–A5 = 圆 O、A6–A9 = 叉 X）。
+ *  与后端 `services/tictactoe.py::O_SOURCES/X_SOURCES` **同口径**（改一处必须同步另一处）。 */
+export function tttSymForASlot(name) {
+  const m = /^A(\d+)$/.exec(String(name || "").trim().toUpperCase());
+  if (!m) return "";
+  const n = Number(m[1]);
+  if (n >= 1 && n <= 5) return "O";
+  if (n >= 6 && n <= 9) return "X";
+  return "";
+}
+
+/** 落子「坠落」动画（纯视觉，**不参与任何安全/碰撞判定**）。 */
+const FALL_H_MM = 60;                  // 从格子上方 60mm 处落下
+const FALL_DUR = 0.32;                 // 下落时长（秒）
 const HEX_EMPTY = 0xdfe3e8;             // B 区空槽底框（灰白）
 const HEX_CAM_BODY = 0x2b3038;
 const HEX_LENS = 0x11151a;
@@ -91,6 +116,16 @@ export function createSortingBlocks(liftY = 0) {
   }
   const matUnknown = mkMat(new THREE.MeshLambertMaterial({ color: HEX_UNKNOWN }));
   const matSuspect = mkMat(new THREE.MeshLambertMaterial({ color: HEX_SUSPECT }));
+  // ★ 井字棋符号色：O=蓝、X=绿；`Pend` = **预告态**（机器人先手时"已显示、待搬子"，
+  //   半透明，不下落）—— 与后端 `stage` 文案「已显示，待搬子」一字对应。
+  const matSym = {}, matSymPend = {};
+  for (const [sym, hex] of Object.entries(TTT_SYM_HEX)) {
+    matSym[sym] = mkMat(new THREE.MeshLambertMaterial({ color: hex }));
+    matSymPend[sym] = mkMat(new THREE.MeshLambertMaterial({
+      color: hex, transparent: true, opacity: 0.42 }));
+  }
+  // 顶面符号标记（圆环 / 十字）：不受光照影响，深色场景里也一眼看出是圆还是叉
+  const matMark = mkMat(new THREE.MeshBasicMaterial({ color: HEX_MARK }));
   const matEdge = mkMat(new THREE.LineBasicMaterial({ color: HEX_BLOCK_EDGE }));
   const matSocket = mkMat(new THREE.LineBasicMaterial({ color: HEX_EMPTY }));
   const matCamBody = mkMat(new THREE.MeshLambertMaterial({
@@ -104,6 +139,8 @@ export function createSortingBlocks(liftY = 0) {
 
   let blockGeo = null;      // 方块几何（按尺寸建一次，全体共用）
   let socketGeo = null;     // 空槽/描边线框几何
+  let symRingGeo = null;    // ★ 井字棋「圆」标记：圆环
+  let symBarGeo = null;     // ★ 井字棋「叉」标记：一根横杠（两根交叉）
   let camBodyGeo = null;    // 摄像头机身
   let camLensGeo = null;    // 摄像头镜头
   let camGroup = null;      // C 区摄像头模型
@@ -132,7 +169,10 @@ export function createSortingBlocks(liftY = 0) {
   // ★ 井字棋棋盘覆盖（2026-10-10）：null = 不干预（分拣照旧）；给出时按棋盘
   //   显隐 B 区方块、按 used 隐藏 A 区料。**只是"多显示一份已落子"**，
   //   不改任何分拣字段 —— 对局期间分拣不会跑，两者天然不打架（见方案 §6.3）。
-  let tttOverride = null;      // { board:[...9], used:[...], holding:bool }
+  let tttOverride = null;      // { board:[...9], used:[...], holding:bool, pending:[cell] }
+  // ★ 落子「坠落」动画：{ rec, t, baseY }（只在 step() 里推进，没调 step 就不动 → 位置即格子面）
+  const falling = [];
+  let firstUpdate = true;      // 刚装填后的第一次 update 不播动画（避免 9 块一起"砸"下来）
 
   /**
    * 摘掉所有已建节点并释放它们独占的几何。
@@ -153,10 +193,13 @@ export function createSortingBlocks(liftY = 0) {
     trays.splice(0).forEach((t) => { if (t.parent) t.parent.remove(t); });
     if (blockGeo) { disposeGeo(blockGeo); blockGeo = null; }
     if (socketGeo) { disposeGeo(socketGeo); socketGeo = null; }
+    if (symRingGeo) { disposeGeo(symRingGeo); symRingGeo = null; }
+    if (symBarGeo) { disposeGeo(symBarGeo); symBarGeo = null; }
     if (camBodyGeo) { disposeGeo(camBodyGeo); camBodyGeo = null; }
     if (camLensGeo) { disposeGeo(camLensGeo); camLensGeo = null; }
     trayGeos.splice(0).forEach(disposeGeo);
     edgeGeos.splice(0).forEach(disposeGeo);
+    falling.length = 0;         // 坠落动画跟着方块一起作废（否则会去写已释放的节点）
   }
 
   /**
@@ -222,6 +265,45 @@ export function createSortingBlocks(liftY = 0) {
   }
 
   /**
+   * 井字棋**顶面符号标记**：O → 圆环、X → 两根交叉横杠；`sym=""` → 移除标记。
+   * ★ 挂在方块 group 下（随方块一起显隐/坠落）；`rec.markSym` 缓存当前符号，避免每帧重建。
+   */
+  function setMark(rec, sym) {
+    if (rec.markSym === sym) return;
+    rec.markSym = sym;
+    if (rec.mark) { rec.group.remove(rec.mark); rec.mark = null; }
+    if (!sym || !symRingGeo || !symBarGeo) return;
+    const g = new THREE.Group();
+    g.name = "sym-mark";
+    const dy = sizeM[2] / 2 + 0.0012;         // 贴在方块**顶面**之上一点点
+    if (sym === "O") {
+      const ring = new THREE.Mesh(symRingGeo, matMark);
+      ring.rotation.x = -Math.PI / 2;         // RingGeometry 默认在 XY 面 → 放平到 XZ 面
+      ring.position.y = dy;
+      g.add(ring);
+    } else if (sym === "X") {
+      for (const rotY of [0, Math.PI / 2]) {
+        const bar = new THREE.Mesh(symBarGeo, matMark);
+        bar.rotation.y = rotY;
+        bar.position.y = dy;
+        g.add(bar);
+      }
+    }
+    rec.group.add(g);
+    rec.mark = g;
+  }
+
+  /**
+   * 记一次「坠落」：把方块瞬移到格子上方 `FALL_H_MM`，之后由 `step(dt)` 落回 `baseY`。
+   * ★ 只在 `step()` 里推进 —— 没调 `step`（自检/回归）时位置就是格子面高，不破坏"同高"断言。
+   */
+  function startFall(rec) {
+    const baseY = rec.group.position.y;               // 静止高度 = 格子面
+    rec.group.position.y = baseY + FALL_H_MM / 1000;  // 先抬到上方，再落下来
+    falling.push({ rec, t: 0, baseY });
+  }
+
+  /**
    * 设定槽位（来自 `/api/sorting/blocks`）。
    * @param {{slots:Array,plane_h_mm:number,plane_z:number,block_mm:number[],camera:object,overlaps:Array,missing:Array,plane_spread:number,plane_tol:number}} d
    */
@@ -239,6 +321,9 @@ export function createSortingBlocks(liftY = 0) {
 
     blockGeo = new THREE.BoxGeometry(sizeM[0], sizeM[2], sizeM[1]);
     socketGeo = new THREE.EdgesGeometry(blockGeo);
+    // ★ 井字棋顶面标记：圆环（O）/ 十字的一根横杠（X）。尺寸随料尺寸走。
+    symRingGeo = new THREE.RingGeometry(sizeM[0] * 0.19, sizeM[0] * 0.30, 28);
+    symBarGeo = new THREE.BoxGeometry(sizeM[0] * 0.62, 0.0016, sizeM[0] * 0.10);
 
     // 重叠的槽位**不画**（宁可缺，也不叠在一起骗人）
     const badNames = new Set();
@@ -308,6 +393,8 @@ export function createSortingBlocks(liftY = 0) {
     if (Number(d.plane_spread) > Number(d.plane_tol)) {
       warned.push(`示教点共面性偏差 ${d.plane_spread}mm（>${d.plane_tol}mm）：仅提示示教精度，摆放已统一坐台面`);
     }
+    falling.length = 0;
+    firstUpdate = true;    // 刚装填 → 下一次 update 不播坠落动画（避免整盘一起"砸"）
     lastKey = "";
   }
 
@@ -337,8 +424,11 @@ export function createSortingBlocks(liftY = 0) {
 
   /**
    * 井字棋棋盘覆盖：给出时 B 区按格子显隐方块、A 区按 used 隐藏料。
-   * @param {{board?:Array, used?:Array, holding?:boolean}|null} o 传 null 清除覆盖。
+   * @param {{board?:Array, used?:Array, holding?:boolean, pending?:Array<number>}|null} o
+   *        传 null 清除覆盖。
    * ★ 只改可视化，不动分拣逻辑；重置 lastKey 让下一次 update() 立刻重画。
+   * ★ `board` 值 "O"/"X" 直接决定棋子颜色与顶面符号（蓝圆 / 绿叉）；
+   *   `pending` = 机器人先手"已显示、待搬子"的格子下标（0–8）→ 半透明、不坠落。
    */
   function setTtt(o) {
     tttOverride = (o && typeof o === "object") ? o : null;
@@ -354,6 +444,10 @@ export function createSortingBlocks(liftY = 0) {
     const tttOn = !!(tttOverride && Array.isArray(tttOverride.board));
     const tttB = tttOn ? tttOverride.board : null;
     const tttUsed = tttOn && Array.isArray(tttOverride.used) ? tttOverride.used : null;
+    // ★ 井字棋「预告态」：机器人先手时后端**提前把子写进棋盘**（stage="已显示，待搬子"），
+    //   此刻**尚未真搬** —— 这些格子渲染成半透明、不播坠落，别让人误以为"已经放好了"。
+    const tttPending = (tttOn && Array.isArray(tttOverride.pending))
+      ? new Set(tttOverride.pending.map((c) => "B" + (Number(c) + 1))) : null;
     const placed = tttOn ? 0 : (Array.isArray(s.placement) ? s.placement : [])
       .reduce((n, c) => n + (Number(c.filled) || 0), 0);
     const holding = tttOn ? !!tttOverride.holding : !!s.holding;
@@ -385,7 +479,8 @@ export function createSortingBlocks(liftY = 0) {
     const key = [placed, holding, suspect, piece, colorName, simColor,
                  s.stage, s.running, s.dry_run, holdKey,
                  tttB ? tttB.map((v) => v || ".").join("") : "",
-                 tttUsed ? tttUsed.join(",") : ""].join("|");
+                 tttUsed ? tttUsed.join(",") : "",
+                 tttPending ? [...tttPending].join(",") : ""].join("|");
     if (key === lastKey) return;
     lastKey = key;
 
@@ -404,30 +499,58 @@ export function createSortingBlocks(liftY = 0) {
       const idx = Number(String(name).slice(1));
       const taken = goneA.has(name);
       const isSuspect = name === suspectCell;
+      const wasVisible = b.group.visible;
       b.group.visible = !taken || isSuspect;
       b.group.userData.suspect = isSuspect;
-      const hot = isSuspect || (!!s.running && !heldCount && idx === piece);
-      b.mesh.material = isSuspect ? matSuspect : matBlack;
-      // 取料中的那格高亮（emissive 让"正在取这一格"一眼可见）
-      try {
-        const m = b.mesh.material;
-        if (m && m.emissive) m.emissive.setHex(hot && !isSuspect ? 0x2b3a52 : 0x000000);
-      } catch (e) { /* 忽略 */ }
+      if (tttOn) {
+        // ★ 井字棋：A 区料按**来源符号**上色（A1–A5 = 圆蓝 / A6–A9 = 叉绿）+ 顶面标记。
+        //   这就是用户说的"不是全部白色"—— 一眼看出哪几块是圆、哪几块是叉。
+        const sym = tttSymForASlot(name);
+        b.group.userData.sym = sym;
+        setMark(b, sym);
+        b.mesh.material = matSym[sym] || matBlack;
+      } else {
+        const hot = isSuspect || (!!s.running && !heldCount && idx === piece);
+        b.mesh.material = isSuspect ? matSuspect : matBlack;
+        // 取料中的那格高亮（emissive 让"正在取这一格"一眼可见）
+        try {
+          const m = b.mesh.material;
+          if (m && m.emissive) m.emissive.setHex(hot && !isSuspect ? 0x2b3a52 : 0x000000);
+        } catch (e) { /* 忽略 */ }
+      }
+      // ★ 井字棋：被"放回原位"时也走一次坠落（与落子同一套手感）
+      if (tttOn && !wasVisible && b.group.visible && !firstUpdate) startFall(b);
     });
 
     // B 区：已占位的槽显示实心彩色块，其余留空槽线框
-    // ★ 井字棋覆盖期间：按棋盘占位显示（用未知灰，符号以 2D 为准），不读分拣 placement
-    const usedSlot = new Map();      // slot -> 颜色名（井字棋占位记 "__ttt__"）
+    // ★ 井字棋覆盖期间：按**棋盘符号**上色（O=蓝圆 / X=绿叉）；预告态半透明且不坠落
+    const usedSlot = new Map();      // slot -> 颜色名（分拣模式）
+    const symSlot = new Map();       // ★ 井字棋：slot -> "O"|"X"
     if (!tttOn) {
       (Array.isArray(s.placement) ? s.placement : []).forEach((c) => {
         (c.used || []).forEach((nm) => usedSlot.set(nm, c.color));
       });
     } else if (tttB) {
-      for (let i = 0; i < 9; i++) {
-        if (tttB[i]) usedSlot.set("B" + (i + 1), "__ttt__");
-      }
+      for (let i = 0; i < 9; i++) if (tttB[i]) symSlot.set("B" + (i + 1), tttB[i]);
     }
     bBlocks.forEach((blk, name) => {
+      const wasVisible = blk.group.visible;
+      if (tttOn) {
+        const sym = symSlot.get(name) || "";
+        const pend = !!(sym && tttPending && tttPending.has(name));
+        const mkey = sym + (pend ? "!" : "");
+        if (blk.group.userData.tttKey !== mkey) {
+          blk.group.userData.tttKey = mkey;
+          blk.group.userData.sym = sym;
+          blk.group.userData.pending = pend;
+          setMark(blk, sym);
+          blk.mesh.material = sym ? (pend ? matSymPend[sym] : matSym[sym]) : matUnknown;
+        }
+        blk.group.visible = !!sym;
+        // 预告态（已显示、待搬子）**不播坠落**：还没真搬，动画不能"编故事"
+        if (!wasVisible && sym && !pend && !firstUpdate) startFall(blk);
+        return;
+      }
       const cn = usedSlot.get(name);
       const mat = cn && matByColor[cn] ? matByColor[cn] : matUnknown;
       if (blk.group.userData.colorName !== (cn || "")) {
@@ -455,6 +578,8 @@ export function createSortingBlocks(liftY = 0) {
 
     // 摄像头判色闪烁
     if (String(s.stage || "").includes("判色")) camFlash = 0.9;
+
+    firstUpdate = false;   // 只有"装填后的第一次"不播坠落动画
   }
 
   /**
@@ -468,6 +593,16 @@ export function createSortingBlocks(liftY = 0) {
    *          现象就是"一吸气工件就消失"。现在贴到吸盘口，并跟随工具姿态。
    */
   function step(dt, tcpMm, anchorMm) {
+    // ★ 落子「坠落」：把方块从格子上方缓动落到格子面（easeOutCubic，末态**严格**回格子面）。
+    //   纯视觉，不参与任何安全/碰撞判定；只在 step() 里推进（没调 step 就不动）。
+    for (let i = falling.length - 1; i >= 0; i--) {
+      const f = falling[i];
+      f.t += dt;
+      const p = Math.min(1, f.t / FALL_DUR);
+      const e = 1 - Math.pow(1 - p, 3);
+      f.rec.group.position.y = f.baseY + (FALL_H_MM / 1000) * (1 - e);
+      if (p >= 1) { f.rec.group.position.y = f.baseY; falling.splice(i, 1); }
+    }
     if (camFlash > 0) {
       camFlash = Math.max(0, camFlash - dt);
       if (camGroup) {

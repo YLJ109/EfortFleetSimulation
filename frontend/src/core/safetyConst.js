@@ -18,6 +18,9 @@ export const SPEED_MAX = 100;
 // ★ 2026-10-11 用户口径：**每次启动默认 10%**（原来 5%）。
 //   下限仍 SPEED_MIN(=5)：需要更慢时还能往下拖。★ 默认值 5%→10% = 真机**提速一倍**，
 //   属用户明确要求；滑块值 1:1 直通到 40103（由 robot.yaml 的 service_program_vperc=100 保证）。
+//   ★★ 与后端**故意不同**（不是漏改）：本值是**界面默认**（你要求的 10%），
+//     后端各请求模型的缺省一律 `SPEED_MIN(5)`——那是"客户端没带 speed_pct 时"的**安全兜底**
+//     （脚本/直连 API 不会因为界面口径而悄悄提速）。改这里**不要**顺手去改后端缺省。
 export const SPEED_DEFAULT = 10;
 export const JOG_SPEED_MIN = 5; // °/s
 export const JOG_SPEED_MAX = 10; // °/s

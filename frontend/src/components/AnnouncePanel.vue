@@ -1,4 +1,4 @@
-﻿<script setup>
+﻿﻿<script setup>
 // 播报中心设置面板：分级音效 + 中文语音 的总开关、音量/语速/音色、分类静音、
 // 一键试听与播报历史。
 import { computed, onMounted, ref } from "vue";

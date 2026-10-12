@@ -53,8 +53,10 @@ _job: Dict[str, object] = {"thread": None, "ctx": None, "state": None,
 #   "右上角多少，机器人速度多少"）。前端把 `exec.speed` 经 `speed_pct` 传进来；
 #   下面这个只是**客户端没带时**的兜底默认（5% 安全档）。
 DEFAULT_SPEED_PCT = 5
-SUCK_HOLD_MS = 500      # 吸牢再抬（与分拣同口径，2026-10-10 起 0.5 秒）
-BLOW_MS = 500           # 吹气时长
+# ★★ 2026-10-11：时序常量**取工艺时序的唯一来源** `services/sorting.py`，
+#   不在本模块再抄一份（原来 AI / 井字棋 / 分拣三处各写 500，改一处会漏两处）。
+SUCK_HOLD_MS = S.SUCK_HOLD_MS   # 吸牢再抬（0.5s）
+BLOW_MS = S.BLOW_MS             # 吹气/放气时长（0.5s）
 # ★ 拍照自证（2026-10-10 用户口径："要两种模式，一个是拍照自证，一个是默认的"）：
 #   默认模式**不判色、不去 C 位**（符号本来就由格位决定，A1–A5=圆 / A6–A9=叉）；
 #   自证模式取件抬起后先去 C 检测位拍照，颜色必须等于"该格应有的颜色"。
@@ -75,14 +77,15 @@ def is_game_running() -> bool:
 
 
 # ---------------------------------------------------------------- 点位
-def _needed_points(verify: bool = False, fast: bool = False) -> List[str]:
+def _needed_points(verify: bool = False) -> List[str]:
     """井字棋需要的点位（默认 = 分拣 38 点减去 C 检测位，共 37 个）。
 
     ★ 默认模式不判色 → 不需要 C 检测位；**拍照自证模式要送检 → 必须要有**。
       缺哪个就报哪个，不给"跑了但做不了"的假象。
-    ★★ 2026-10-11（方案 §D）：**快速模式**（一趟取两子、J6 双面）额外需要
-      `J6正面`/`J6反面` 两个可录入姿态（翻转用 `J6反面`，与分拣双面同一点名）；
-      缺了就不让开局 —— 与分拣页「快速缺点位 → 禁用」同一口径。
+    ★★ 2026-10-12 **终版**：快速模式（一趟两子）的翻转 = **虚拟切面命令**
+      （`J6正面`/`J6反面` 按点名驱动、**不再读库**，用户口径「不用录制正反面」）——
+      因此**不再**把这两个名字列进"必需点位"（旧实现会因库里没这两行而拒绝开局，
+      与"去掉录制值"直接矛盾）。
     """
     out: List[str] = []
     for s in S.A_SLOTS:
@@ -91,8 +94,6 @@ def _needed_points(verify: bool = False, fast: bool = False) -> List[str]:
         out += [s, s + "上"]
     if verify:
         out.append(S.CAMERA_POINT)
-    if fast:
-        out += list(S.OPTIONAL_EXTRA_POINTS)      # J6正面 / J6反面
     out.append(S.START_POINT)
     return out
 
@@ -129,6 +130,12 @@ def _new_state(dry: bool, difficulty: str, user_sym: str, robot_sym: str,
         "win_line": [],
         "voided": False,                  # 「停止」= 作废（不影响胜负）
         "holding": False, "suspect_pick": False,
+        # ★★ 预告态（2026-10-11 / 方案 §2C）：快速模式**机器人先手**时，机器人会**先把落子
+        #   写进棋盘**（2D/3D 同步显示）、提示「已显示，待搬子」，**此刻尚未真搬**。
+        #   这些格子下标（0–8）放这里，前端把对应棋子渲染成**半透明、不坠落** ——
+        #   免得"格子已有子 + 手上还挂着一块"被看成"棋子一直在跟着机器人走"。
+        #   真搬完成后立刻清空（`_play` / `_play_two` / 收尾 / 复原）。
+        "pending": [],
         "error": "", "finished": False, "ok": None,
     }
 
@@ -141,40 +148,55 @@ def _snap(st: Dict) -> Dict:
 # ---------------------------------------------------------------- 搬运原语
 def _carry(ctx, pmap, st, dry, src_slot: str, dst_slot: str, who_cn: str,
            via_start: bool = False, verify: bool = False, expect_color: str = "",
-           min_conf: float = 0.3) -> None:
+           min_conf: float = 0.3, face: str = S.FACE_FRONT) -> None:
     """把一件从 src_slot 搬到 dst_slot（= 分拣搬一件的**精简版**：无判色、无 C 检测）。
 
     取料：src上方 → src → 吸 → 等吸牢 → 抬起
     ★ 搬运行程（用户口径 2026-10-10）：**不许「正上方 → 正上方」直接平移**。
       A 区取到件抬起后，先回 **开始/结束点（起点）**，再从起点去 B 区正上方落子 ——
       避免抬着件在 A/B 两个"正上方"之间横扫（会扫过托盘/两侧工装）。
-      `via_start=True` 时启用（下棋 A→B 用；复位 B→A 保持原路，见 _reset_run）。
+      `via_start=True` 时启用（下棋 A→B 用；「复原」B→A 保持原路，见 `_restore_run`）。
     落子：dst上方 → 停止吸 → 放气 → 等 → 停止放气 → 回起点
+
+    ★★ 2026-10-11（用户口径「放回的时候也不要乱旋转」）**`face` 参数化**：
+      这一件**用哪个面取、就用哪个面放**（正面 → 下板气路 Bit1~4；反面 → 反面气路 Bit5~8）。
+      · 为什么必须参数化：井字棋「复原」要取回的那件**当初是用哪个面放下的**，就得用哪个面去取 ——
+        此前这里**写死正面**，于是"反面放下的那件"是"正面姿态 + 正面气路"去够 → 姿态不匹配、
+        吸不到/摆乱（现场反馈的"放回去时乱了"）。
+      · **翻转只发生在允许旋转的位置**：`src` 是**原料位**（`face_for_target` 强制 `keep`、严禁旋转），
+        所以这里**先在它的正上方（`src+"上"`，允许旋转）把 J6 摆到 `face`**，再 `keep` 下去取 ——
+        全程只有这一次必要翻转，不做多余的来回翻。
 
     ★ 速度一律取 `st["speed_pct"]`（= 右上角全局速度）——
       不在这里另立参数，避免"两条路各写一份速度"再出偏差。
     """
     speed = int(st.get("speed_pct") or DEFAULT_SPEED_PCT)
+    face = S.norm_face(face)
+    slot = "lower" if face == S.FACE_FRONT else "upper"
     if ctx.wait_pause():
         raise _Stop("已被停止", "暂停")
-    _move(ctx, pmap, src_slot + "上", speed, dry, "%s·取料上方" % who_cn, st)
+    # ★ 先在**正上方**（允许旋转）摆到该件的面 —— 再 keep 下去取（原料位严禁旋转）。
+    _move(ctx, pmap, src_slot + "上", speed, dry, "%s·取料上方" % who_cn, st, face=face)
     # ★★ 统一口径（2026-10-11 用户原话「我在正上位反面，去原料区是变成了正面」）：
     #   `src_slot` 是**原料位**（A 区取料格 / B 区棋盘格）→ 一律 `keep`（保持当前面、绝不翻面）。
-    #   井字棋取子/复位/真实复盘的"下落"都走这里（`_play`/`_reset_run`/`_replay_run` 共用 `_carry`）。
+    #   井字棋取子/复原的"下落"都走这里（`_play`/`_play_two`/`_restore_run` 共用 `_carry`）。
     _move(ctx, pmap, src_slot, speed, dry, "%s·下落取料" % who_cn, st,
-          face=S.face_for_target(src_slot, S.FACE_FRONT))
-    _air(ctx, "suck", dry, "%s·吸" % who_cn, st)
+          face=S.face_for_target(src_slot, face))
+    _air(ctx, "suck", dry, "%s·吸" % who_cn, st, face=face)
     if SUCK_HOLD_MS > 0:
         ctx.sleep(SUCK_HOLD_MS / 1000.0)
     _set_state(st, holding=True)
-    _move(ctx, pmap, src_slot + "上", speed, dry, "%s·抬起" % who_cn, st)
+    # ★★ 2026-10-11：把"哪一面吸着件"**如实登记**（与分拣双面同一口径 `S.face_slot_put`）——
+    #   以前只写 `holding=True`，3D 永远当成"下板那一件"，反面件会被画成正面件（显示与实际不符）。
+    S.face_slot_put(st, slot, piece=src_slot, ok=True)
+    _move(ctx, pmap, src_slot + "上", speed, dry, "%s·抬起" % who_cn, st, face=face)
     if verify and not dry:
         # ★★ 拍照自证（用户 2026-10-10 口径 · 两种模式里的"自证"那一种）：
         #    抬起后先去 C 检测位拍 3 帧 → 投票判色。
         #    · 判不出色      → **原路放回取料格 + 停止**（与分拣同一条统一口径）
         #    · 判出但不是该格应有的颜色 → 同样放回 + 停止，但文案点明"不符"
         #      （两句话必须分清，否则现场会往错的方向查：一个查相机、一个查装料）
-        _move(ctx, pmap, S.CAMERA_POINT, speed, dry, "%s·送检" % who_cn, st)
+        _move(ctx, pmap, S.CAMERA_POINT, speed, dry, "%s·送检" % who_cn, st, face=face)
         _set_state(st, stage="拍照自证", target="")
         if ctx.sleep(VERIFY_DWELL_MS / 1000.0):
             raise _Stop("已被停止", "自证")
@@ -186,25 +208,27 @@ def _carry(ctx, pmap, st, dry, src_slot: str, dst_slot: str, who_cn: str,
         if not v.get("ok"):
             _set_state(st, stage="自证失败·放回原位")
             _put_back(ctx, pmap, src_slot, speed, dry, blow_ms=BLOW_MS,
-                      prefix="放回原位 %s" % src_slot, st=st)
+                      prefix="放回原位 %s" % src_slot, st=st, face=face)
             raise _Stop("颜色无法识别（%s），已放回原位 %s"
                         % (v.get("reason") or "无有效判定", src_slot), "自证")
         if expect_color and v.get("color") != expect_color:
             _set_state(st, stage="自证不符·放回原位")
             _put_back(ctx, pmap, src_slot, speed, dry, blow_ms=BLOW_MS,
-                      prefix="放回原位 %s" % src_slot, st=st)
+                      prefix="放回原位 %s" % src_slot, st=st, face=face)
             raise _Stop("自证不符：该格应为 %s，实拍 %s，已放回原位 %s"
                         % (expect_color, v.get("color"), src_slot), "自证")
         _set_state(st, stage="自证通过")
     if via_start:
-        # ★ 经起点再过去：抬起后不直接横移到 dst 正上方，先回原点把"抬着件横扫"这段消掉
-        _move(ctx, pmap, S.START_POINT, speed, dry, "%s·经起点" % who_cn, st)
-    _move(ctx, pmap, dst_slot + "上", speed, dry, "%s·落子" % who_cn, st)
-    _air(ctx, "release", dry, "%s·停止吸" % who_cn, st)
-    _air(ctx, "blow", dry, "%s·放气" % who_cn, st)
+        # ★ 经起点再过去：抬起后不直接横移到 dst 正上方，先回原点把"抬着件横扫"这段消掉。
+        #   ★ 2026-10-11：**保持这一件的面**过去（起点是允许旋转的位置，但这里不需要翻面）。
+        _move(ctx, pmap, S.START_POINT, speed, dry, "%s·经起点" % who_cn, st, face=face)
+    _move(ctx, pmap, dst_slot + "上", speed, dry, "%s·落子" % who_cn, st, face=face)
+    _air(ctx, "release", dry, "%s·停止吸" % who_cn, st, face=face)
+    _air(ctx, "blow", dry, "%s·放气" % who_cn, st, face=face)
     if BLOW_MS > 0:
         ctx.sleep(BLOW_MS / 1000.0)
-    _air(ctx, "unblow", dry, "%s·停止放气" % who_cn, st)
+    _air(ctx, "unblow", dry, "%s·停止放气" % who_cn, st, face=face)
+    S.face_slot_take(st, slot)      # ★ 与 put 对称：登记"这面已放下"（3D 立刻不再显示手上那件）
     _set_state(st, holding=False)
     _move(ctx, pmap, S.START_POINT, speed, dry, "回起点", st)
 
@@ -231,8 +255,12 @@ def _play(ctx, pmap, st, dry, sym: str, cell: int) -> None:
     used.append(src)
     board[cell] = sym
     moves.append({"cell": int(cell), "sym": sym,
-                  "by": "user" if sym == st["user_sym"] else "robot", "src": src})
-    _set_state(st, piece_no=len(moves))
+                  "by": "user" if sym == st["user_sym"] else "robot", "src": src,
+                  # ★★ 2026-10-11：**记下这件是用哪个面放下的** —— 复原时必须用同一个面去取
+                  #   （单件趟永远是正面；没有这个字段的话复原只能瞎猜，见 `_restore_run`）。
+                  "face": S.FACE_FRONT})
+    # ★ 真搬已完成 → 该格不再是"预告态"（清空 pending，3D 恢复实心）
+    _set_state(st, piece_no=len(moves), pending=[])
 
 
 def _play_two(ctx, pmap, st, dry, robot_cell: int, user_cell: int) -> None:
@@ -240,10 +268,14 @@ def _play_two(ctx, pmap, st, dry, robot_cell: int, user_cell: int) -> None:
     用户子（反面/上板），复用分拣的双面原语（`_move_flip_j6` / `_dual_drop`）。
 
     物理顺序（与分拣双面同源）：
-      ① 取机器人子（**正面**）→ ② 在正上位**翻到反面（只覆盖 J6）** →
-      ③ 取用户子（**反面**，发**反面那一路吸气** Bit5）→
-      ④ 先落**机器人子**（正面，`_dual_drop(face=FACE_FRONT)`）→
-      ⑤ 再落**用户子**（反面，`_dual_drop(face=FACE_BACK)`）→ ⑥ 回起点。
+      ① 取机器人子（**正面**/下板）→ ② 在正上位**翻到反面（只覆盖 J6）** →
+      ③ 取用户子（**反面**/上板，发**反面那一路吸气** Bit5）→
+      ④ 先落**用户子**（反面，`_dual_drop(face=FACE_BACK)`）→
+      ⑤ 再落**机器人子**（正面，`_dual_drop(face=FACE_FRONT)`）→ ⑥ 回起点。
+    ★★ 2026-10-11 **更新口径（用户：「先放回第二次，然后放回第一次，中间不要乱反转」）**：
+      取完两件时 J6 **正停在反面** → **先落反面那件（用户子）不用翻面**，落完再翻到正面落机器人子。
+      这与分拣双面同一顺序（`S.order_for_drop`：upper 在前），全程只翻必要的那几次。
+      （旧实现是"先落机器人子（正面）"，会多绕一次"回起点 + 翻面"。）
     ★ 件与件之间经**起点**再走，避免抬着件在 A/B 正上方之间横扫（与 `_carry` 的 via_start 同口径）。
     ★ 人话口径：**用哪面取的就用哪面放**（机器人子=正面、用户子=反面），`face` 由 `_move(..., face=...)`
       贯穿全程 —— 不会被点位默认正面顶掉（与分拣 B 块同一根因修复）。
@@ -270,10 +302,11 @@ def _play_two(ctx, pmap, st, dry, robot_cell: int, user_cell: int) -> None:
     # ★★ 统一口径：`r_src` 是**原料位** → 用 `keep`（保持当前面、绝不翻面；此刻当前=正面 ← 上面那步）。
     _move(ctx, pmap, r_src, speed, dry, "机器人·下落取料", st,
           face=S.face_for_target(r_src, S.FACE_FRONT))
-    _air(ctx, "suck", dry, "机器人·吸", st)
+    _air(ctx, "suck", dry, "机器人·吸", st, face=S.FACE_FRONT)
     if SUCK_HOLD_MS > 0:
         ctx.sleep(SUCK_HOLD_MS / 1000.0)
     _set_state(st, holding=True)
+    S.face_slot_put(st, "lower", piece=r_src, ok=True)     # ★ 3D 如实显示"下板（正面）那件"
     _move(ctx, pmap, r_src + "上", speed, dry, "机器人·抬起", st, face=S.FACE_FRONT)
     # ② 翻到反面（只覆盖 J6）—— 此时上/下板角色互换
     _move_flip_j6(ctx, pmap, DUAL_FACE_FLIP_POINT, speed, dry, "翻转·J6反面（仅J6）", st)
@@ -287,15 +320,20 @@ def _play_two(ctx, pmap, st, dry, robot_cell: int, user_cell: int) -> None:
     _air(ctx, "suck", dry, "用户·吸", st, face=S.FACE_BACK)
     if SUCK_HOLD_MS > 0:
         ctx.sleep(SUCK_HOLD_MS / 1000.0)
+    S.face_slot_put(st, "upper", piece=u_src, ok=True)     # ★ 3D 如实显示"上板（反面）那件"
     _move(ctx, pmap, u_src + "上", speed, dry, "用户·抬起", st, face=S.FACE_BACK)
-    # ④ 先落机器人子（正面/下板）：经起点 → 落子 → **只放正面那一路**（不动还挂着的用户子）
-    _move(ctx, pmap, S.START_POINT, speed, dry, "经起点", st)
-    _move(ctx, pmap, r_dst + "上", speed, dry, "机器人·落子", st, face=S.FACE_FRONT)
-    _dual_drop(ctx, dry, face=S.FACE_FRONT, st=st)
-    _move(ctx, pmap, S.START_POINT, speed, dry, "回起点", st)
-    # ⑤ 再落用户子（反面/上板）：**只放反面那一路**
+    # ④ **先落用户子（反面/上板）**：此刻 J6 就停在反面（取完②件）→ **不用翻面**，
+    #    直接经起点 → 落子 → **只放反面那一路**（不动还挂着的下板那件）。
+    #   ★ 2026-10-11 更新口径（用户：「先放回第二次，然后放回第一次，中间不要乱反转」）：
+    #     拍完/取完停在反面 → 先放反面那件最省事；与分拣双面 `S.order_for_drop`（upper 在前）同序。
+    _move(ctx, pmap, S.START_POINT, speed, dry, "经起点", st, face=S.FACE_BACK)
     _move(ctx, pmap, u_dst + "上", speed, dry, "用户·落子", st, face=S.FACE_BACK)
     _dual_drop(ctx, dry, face=S.FACE_BACK, st=st)
+    S.face_slot_take(st, "upper")
+    # ⑤ 再落机器人子（正面/下板）：**翻到正面** → 落子 → **只放下板那一路**
+    _move(ctx, pmap, r_dst + "上", speed, dry, "机器人·落子", st, face=S.FACE_FRONT)
+    _dual_drop(ctx, dry, face=S.FACE_FRONT, st=st)
+    S.face_slot_take(st, "lower")
     _set_state(st, holding=False)
     _move(ctx, pmap, S.START_POINT, speed, dry, "回起点", st)
     # ---- 登记（就地更新，保持 list 引用稳定，供 /state 深拷贝读出）----
@@ -303,9 +341,14 @@ def _play_two(ctx, pmap, st, dry, robot_cell: int, user_cell: int) -> None:
     used.append(u_src)
     st["board"][robot_cell] = robot_sym
     st["board"][user_cell] = user_sym
-    st["moves"].append({"cell": int(robot_cell), "sym": robot_sym, "by": "robot", "src": r_src})
-    st["moves"].append({"cell": int(user_cell), "sym": user_sym, "by": "user", "src": u_src})
-    _set_state(st, piece_no=len(st["moves"]))
+    # ★★ 2026-10-11：**记下每件用哪个面放的**，且**按"实际放下的先后"追加**（先用户子/反面、后机器人子/正面）
+    #   —— 复原要按面取（`S.order_for_restore`）；两处口径一致，别各排一遍。
+    st["moves"].append({"cell": int(user_cell), "sym": user_sym, "by": "user", "src": u_src,
+                        "face": S.FACE_BACK})
+    st["moves"].append({"cell": int(robot_cell), "sym": robot_sym, "by": "robot", "src": r_src,
+                        "face": S.FACE_FRONT})
+    # ★ 两子都真搬完成 → 清空预告态（3D 由半透明恢复实心）
+    _set_state(st, piece_no=len(st["moves"]), pending=[])
 
 
 def _wait_move(ctx, q: "queue.Queue") -> Optional[int]:
@@ -335,6 +378,16 @@ def _release_air(ctx, dry, st) -> None:
 
 # ---------------------------------------------------------------- 主线程
 def _run(ctx, q: "queue.Queue", st: Dict, dry: bool, pmap: Dict[str, object]) -> None:
+    """★ 井字棋 = **旋转白名单④**（用户口径「J6 如果……**游戏过程中**可以旋转」）。
+
+    整局（含快速模式的两面翻 J6）都在 `with S.allow_rotate():` 里跑 —— 这是本流程**唯一**
+    的旋转授权声明；出了这个 with 立刻回到"默认不旋转"。外层再不动任何判据。
+    """
+    with S.allow_rotate():
+        return _run_body(ctx, q, st, dry, pmap)
+
+
+def _run_body(ctx, q: "queue.Queue", st: Dict, dry: bool, pmap: Dict[str, object]) -> None:
     difficulty = st.get("difficulty") or "normal"
     speed = int(st.get("speed_pct") or DEFAULT_SPEED_PCT)   # ★ 右上角全局速度
     board: List[Optional[str]] = st["board"]
@@ -381,6 +434,9 @@ def _run(ctx, q: "queue.Queue", st: Dict, dry: bool, pmap: Dict[str, object]) ->
                         break
                     # ★ 提前显示：后端棋盘先落子（2D/3D 与棋盘同源），**尚未真搬子**。
                     board[cell_r] = robot_sym
+                    # ★ 同时登记为**预告态**：前端把这格棋子画成半透明、不坠落 ——
+                    #   别让"格子已有子 + 手上还挂着一块"被看成"棋子跟着机器人走"。
+                    _set_state(st, pending=[int(cell_r)])
                     if TT.result_of(board, user_sym)["result"]:
                         # 机器人这一手直接定胜负 → 不必等用户；本趟只搬这一子（单件）
                         _set_state(st, stage="机器人落子", turn="robot")
@@ -474,7 +530,8 @@ def _run(ctx, q: "queue.Queue", st: Dict, dry: bool, pmap: Dict[str, object]) ->
             if not dry and st.get("holding"):
                 _release_air(ctx, dry, st)
             _set_state(st, stage="结束", error=stop_reason, finished=True,
-                       ok=(phase == "done"), phase=phase, turn="none", holding=False)
+                       ok=(phase == "done"), phase=phase, turn="none", holding=False,
+                       pending=[])      # ★ 收尾必清预告态（否则格子会一直半透明）
             emit_event("tictactoe", "info" if phase == "done" else "warn", "tictactoe.stop",
                        ("井字棋完成：%s" % st.get("result") or "已结束") if phase == "done"
                        else ("井字棋结束：%s" % stop_reason),
@@ -484,21 +541,36 @@ def _run(ctx, q: "queue.Queue", st: Dict, dry: bool, pmap: Dict[str, object]) ->
             log.exception("井字棋收尾异常（运行登记已注销，不影响后续指令）")
 
 
-# ---------------------------------------------------------------- 真实复盘线程
-def _replay_run(ctx, st: Dict, pmap: Dict[str, object]) -> None:
-    """★ 真实复盘（2026-10-11 用户口径）：机器人**真的动** —— 把 B 区已落的子
-    **按落子逆序（LIFO）逐个搬回各自来源 A 格（= 各子的「原位」）**。
+# ---------------------------------------------------------------- 「复原」线程
+def _restore_run(ctx, st: Dict, pmap: Dict[str, object]) -> None:
+    """★ 「复原」也是**游戏流程**（旋转白名单④）→ 整段在 `with S.allow_rotate():` 里跑
+    （复原要按每件**自己那个面**搬回去，必须允许翻 J6）。"""
+    with S.allow_rotate():
+        return _restore_run_body(ctx, st, pmap)
 
-    为什么选「落子逆序」：
-      · 与既有 `_reset_run`（复位）**同一口径**（不新造顺序，避免"两条路各写一份"）；
-      · 语义上就是"倒带 / 把整局倒着撤销"，最后一手先回，用户一眼能对上棋谱；
-      · 每格独立、不堆叠，顺序只为可读与一致，不是防撞（撞的风险由围栏/残影另管）。
 
+def _restore_run_body(ctx, st: Dict, pmap: Dict[str, object]) -> None:
+    """★「复原」（2026-10-11 用户口径：「**复原和复盘合并，就是复原，不用空跑啊，要真机移动**」）
+    —— 机器人**真的动**：把 B 区已落的子**按落子逆序（LIFO）逐个搬回各自来源 A 格（原位）**。
+
+    ★ 为什么只有**一个**实现：以前「复位」与「复盘」是**两条路**，而"复位"那条把 `dry`
+      **写死成 True** → 真实局点「复位」机器人**根本不动**（现场 bug）。
+      现在合并为一处，`/reset` 与 `/replay` 都走这里 —— **不新造顺序、不两条路各写一份**。
+    ★ 顺序（★★ 2026-10-11 **更新口径**，用户原话「先放回第二次，然后放回第一次，
+      放回的时候也不要乱旋转」）：**先反面那件、后正面那件** ——
+      · 唯一判据 = `S.order_for_restore`（与放料次序 `S.order_for_drop` **同序**，不在流程里再排一遍）；
+      · 同一面内保持**落子逆序**（后放的先回）；
+      · 每一件**用它自己当初那个面**去取（`moves[].face`）——
+        "反面放下的那件"必须用**反面姿态 + 反面气路(Bit5~8)** 取，否则姿态不匹配 → 吸不到/摆乱
+        （这正是现场反馈"放回去时乱了"的根因；此前 `_carry` 写死正面）。
+      · **不做多余的来回翻**：`_carry` 只在"原料位正上方"（允许旋转处）摆一次面，之后一路 `keep`。
+    ★ 每格独立、不堆叠。
     ★ 复用而非新造：搬子一律走 `_carry`（= 分拣同一套 `_move`/`_air`），
       **不新增任何下发通道**、不绕开 `motion.command`、不新增触发位。
     ★ 「原位」= 该手棋谱里的 `src`（取料来源 A 格，见 `services/tictactoe.py::pick_source`）。
     ★ 空跑（`st["dry_run"]`）：只走预演路径（`_carry(..., dry=True)` 全程只 `_set` 阶段、
-      不下发真实运动），但**流程与显示逐字一致**（便于排练 / 离线验证）。
+      不下发真实运动）—— 正常流程下 `_launch_restore` 已在**真实局**才起本线程，
+      这里保留 dry 分支只为自检/离线调用不炸。
     ★ 停止/异常沿用既有口径：步边界停止（`ctx.cancelled()`）、异常不收件就回起点，
       **不许悬空带料**（`holding` 为真时收尾 `_release_air` 先后关两路气）。
     ★ 收尾**必须先 `ctx.finish(...)`**（否则注销不到 → 手动指令被永久拒绝，见 test_run_recovery）。
@@ -509,23 +581,28 @@ def _replay_run(ctx, st: Dict, pmap: Dict[str, object]) -> None:
     try:
         moves = list(st.get("moves") or [])
         n = len(moves)
-        _set_state(st, stage="复盘：回开始/结束点", turn="none")
+        # ★ 顺序：先反面件、后正面件（同面内=落子逆序）；每件按自己的 face 取。
+        plan = S.order_for_restore(list(reversed(moves)))
+        _set_state(st, stage="复原：回开始/结束点", turn="none")
         # 空跑也走这一步的"预演路径"（dry=True → 只写阶段，不下发）
-        _move(ctx, pmap, S.START_POINT, speed, dry, "复盘·回开始/结束点", st)
-        for i, mv in enumerate(reversed(moves), start=1):
+        _move(ctx, pmap, S.START_POINT, speed, dry, "复原·回开始/结束点", st)
+        for i, mv in enumerate(plan, start=1):
             if ctx.cancelled():
                 stop_reason, phase = "已被停止", "cancelled"
                 break
             cell = int(mv.get("cell"))
             src = str(mv.get("src") or "")          # 「原位」= 来源 A 格
-            # ★ 回执（用现有 stage 机制）：第几个子 / 去向（原位 A?）
-            _set_state(st, stage="复盘：搬回第 %d/%d 个棋子 → %s（原位）" % (i, n, src),
+            face = S.norm_face(mv.get("face"))
+            # ★ 回执（用现有 stage 机制）：第几个子 / 去向（原位 A?）/ 用哪面取
+            _set_state(st, stage="复原：搬回第 %d/%d 个棋子 → %s（原位·%s）"
+                                % (i, n, src, S.face_zh(face)),
                        piece_no=n - i)
-            _carry(ctx, pmap, st, dry, TT.cell_to_slot(cell), src, "复盘")
+            _carry(ctx, pmap, st, dry, TT.cell_to_slot(cell), src, "复原", face=face)
         if phase == "done":
             # ★ 终态如实：子都回原位 → 棋盘清空/复位到初始（与 3D / 2D 一致）
             st.update({"board": TT.new_board(), "moves": [], "used": [],
-                       "result": "", "win_line": [], "voided": False, "piece_no": 0})
+                       "result": "", "win_line": [], "voided": False, "piece_no": 0,
+                       "pending": []})
     except _Stop as e:
         stop_reason = e.reason
         phase = "cancelled" if "停止" in e.reason else "error"
@@ -534,69 +611,37 @@ def _replay_run(ctx, st: Dict, pmap: Dict[str, object]) -> None:
             # ★ 手上没料（holding=False）才回起点：若正夹着件，别把它拖回起点（更危险）
             if not dry:
                 try:
-                    _set_state(st, stage="复盘异常·回开始/结束点", error=e.reason)
-                    _move(ctx, pmap, S.START_POINT, speed, dry, "复盘异常回原点", st)
+                    _set_state(st, stage="复原异常·回开始/结束点", error=e.reason)
+                    _move(ctx, pmap, S.START_POINT, speed, dry, "复原异常回原点", st)
                 except _Stop as e2:
-                    log.warning("井字棋复盘异常后回原点失败：%s", e2.reason)
+                    log.warning("井字棋复原异常后回原点失败：%s", e2.reason)
     except Exception as e:  # noqa: BLE001
-        log.exception("井字棋复盘异常")
+        log.exception("井字棋复原异常")
         stop_reason, phase = "内部异常：%s" % str(e)[:150], "error"
     finally:
-        # ★★ 注销运行登记必须最先做且不可跳过（与 _run/_reset_run 同一口径）
+        # ★★ 注销运行登记必须最先做且不可跳过（与 _run 同一口径）
         ctx.finish(phase)
         try:
             # ★ 收尾：气路绝不留在开着（停止时手上若还吸着件 → 先收气，不许悬空带料）
             if not dry and st.get("holding"):
                 _release_air(ctx, dry, st)
-            _set_state(st, stage="复盘结束", error=stop_reason, finished=True,
-                       ok=(phase == "done"), phase=phase, turn="none", holding=False)
-            emit_event("tictactoe", "info" if phase == "done" else "warn", "tictactoe.replay",
-                       "井字棋真实复盘%s%s" % ("完成" if phase == "done" else "结束",
-                                            "" if phase == "done" else "：" + stop_reason),
+            _set_state(st, stage="复原结束", error=stop_reason, finished=True,
+                       ok=(phase == "done"), phase=phase, turn="none", holding=False,
+                       pending=[])
+            emit_event("tictactoe", "info" if phase == "done" else "warn", "tictactoe.restore",
+                       "井字棋复原%s%s" % ("完成" if phase == "done" else "结束",
+                                        "" if phase == "done" else "：" + stop_reason),
                        {"phase": phase, "dry_run": dry}, actor="control")
         except Exception:  # noqa: BLE001
-            log.exception("井字棋复盘收尾异常（运行登记已注销，不影响后续指令）")
-
-
-# ---------------------------------------------------------------- 复位线程
-def _reset_run(ctx, st: Dict, pmap: Dict[str, object]) -> None:
-    """把 B 区已落的子**逆向搬回**各自来源 A 格（LIFO，避免互相碰撞）。"""
-    phase, stop_reason = "done", ""
-    try:
-        moves = list(st.get("moves") or [])
-        for i, mv in enumerate(reversed(moves), start=1):
-            if ctx.cancelled():
-                stop_reason, phase = "已被停止", "cancelled"
-                break
-            _set_state(st, stage="复位 %d/%d" % (i, len(moves)), piece_no=len(moves) - i)
-            cell = int(mv.get("cell"))
-            src = str(mv.get("src") or "")
-            _carry(ctx, pmap, st, True, TT.cell_to_slot(cell), src, "复位")
-        if phase == "done":
-            st.update({"board": TT.new_board(), "moves": [], "used": [],
-                       "result": "", "win_line": [], "voided": False, "piece_no": 0})
-    except _Stop as e:
-        stop_reason, phase = e.reason, "cancelled" if "停止" in e.reason else "error"
-    except Exception as e:  # noqa: BLE001
-        log.exception("井字棋复位异常")
-        stop_reason, phase = "内部异常：%s" % str(e)[:150], "error"
-    finally:
-        # ★★ 2026-10-10：**注销运行登记最先做且不可跳过**（与 ai.py 同名死机修复同因）
-        ctx.finish(phase)
-        try:
-            _set_state(st, stage="复位结束", error=stop_reason, finished=True,
-                       ok=(phase == "done"), phase=phase, turn="none")
-            emit_event("tictactoe", "info" if phase == "done" else "warn", "tictactoe.reset",
-                       "井字棋复位%s%s" % ("完成" if phase == "done" else "结束",
-                                         "" if phase == "done" else "：" + stop_reason),
-                       {"phase": phase}, actor="control")
-        except Exception:  # noqa: BLE001
-            log.exception("井字棋复位收尾异常（运行登记已注销，不影响后续指令）")
+            log.exception("井字棋复原收尾异常（运行登记已注销，不影响后续指令）")
 
 
 # ---------------------------------------------------------------- 接口
 class StartIn(BaseModel):
     difficulty: str = Field(default="normal", max_length=16)
+    # ★ 后端默认**仍是空跑**（脚本/直连 API 的兜底，不经界面也能安全调用）；
+    #   ★ 界面（`stores/tictactoe.js`）默认是**真实下发**（用户口径「不用空跑啊，要真机移动」）
+    #     —— 两层默认不同，**别把这里改成 False**（那会让不带 dry_run 的脚本突然真动机器人）。
     dry_run: bool = True
     # ★ 沿用右上角那份全局速度（与分拣同口径）：**右上角多少，机器人多少**。
     speed_pct: int = Field(default=DEFAULT_SPEED_PCT, ge=5, le=100,
@@ -649,8 +694,9 @@ def api_start(body: StartIn, tok: str = Depends(require_control)):
         pmap = {p.name: p for p in rows}
     finally:
         db.close()
-    # ★ 自证模式比默认模式**多要一个 C 检测位**；快速模式**多要 J6正面/J6反面**两个姿态。
-    miss = [n for n in _needed_points(need_verify, fast=fast) if n not in pmap]
+    # ★ 自证模式比默认模式**多要一个 C 检测位**；快速模式的翻转是虚拟切面命令（不查库，
+    #   2026-10-12 终版「不用录制正反面」），不列进必需点位。
+    miss = [n for n in _needed_points(need_verify) if n not in pmap]
     if miss:
         raise HTTPException(400, detail={
             "message": "点位不齐，缺 %d 个：%s（先在「点位」页补齐示教）"
@@ -760,47 +806,69 @@ def api_stop(tok: str = Depends(require_control)):
 
 
 class ResetIn(BaseModel):
-    # ★ 复位也沿用右上角那份全局速度（客户端可带；不带就用本局原速度）
+    # ★ 复原也沿用右上角那份全局速度（客户端可带；不带就用本局原速度）
     speed_pct: Optional[int] = Field(default=None, ge=5, le=100)
+
+
+def _launch_restore(st: Dict, speed_pct: Optional[int]) -> Dict:
+    """「复原」的**唯一实现**（`/reset` 与 `/replay` 共用，杜绝"两条路各写一份"）。
+
+    ★ 用户口径（2026-10-11）：「**复原和复盘合并，就是复原，不用空跑啊，要真机移动**」。
+    · 真实局 → 起 `_restore_run` 线程：机器人**真的动**，逐个把子搬回原位 A 格；
+      过统一"未就绪"闸门（伺服未上电 → 409 统一文案）与人机互斥。
+    · 空跑局 → **本局没有真实搬动过棋子**（没实体可搬）→ 只清棋盘并**如实说明**，
+      不假装搬过（本项目铁律：不知道/没做就说不知道）。
+    """
+    if speed_pct is not None:
+        _set_state(st, speed_pct=int(speed_pct))          # 用"此刻"的右上角速度
+    if bool(st.get("dry_run")):
+        st.update({"board": TT.new_board(), "moves": [], "used": [],
+                   "result": "", "win_line": [], "voided": False, "piece_no": 0,
+                   "pending": []})
+        emit_event("tictactoe", "info", "tictactoe.restore_skip",
+                   "井字棋复原：本局是空跑（没有真实搬动过棋子），只清空棋盘",
+                   {"dry_run": True}, actor="control")
+        return {"ok": True, "dry_run": True}
+    # ★ 真实复原 = 真实下发 → 伺服没上电一律拒绝（与 /start 同一文案）
+    reject_if_not_ready(dry=False)
+    _reject_if_run_active("井字棋复原")
+    pmap = _load_pmap()
+    ctx = new_run("井字棋复原", kind="tictactoe")
+    with _gate:
+        _job["ctx"] = ctx
+        th = threading.Thread(target=_restore_run, args=(ctx, st, pmap),
+                              name="tictactoe-restore", daemon=True)
+        _job["thread"] = th
+    th.start()
+    ctx.set_thread(th)     # ★ 绑定执行线程：让"卡死登记"能被 is_alive() 精确识别
+    emit_event("tictactoe", "info", "tictactoe.restore_start",
+               "井字棋复原（真机）：把 %d 颗棋子逐个搬回 A 区原位" % len(st.get("moves") or []),
+               {"dry_run": False, "pieces": len(st.get("moves") or [])}, actor="control")
+    return {"ok": True, "run_id": ctx.run_id, "dry_run": False}
 
 
 @router.post("/reset")
 def api_reset(body: Optional[ResetIn] = None, tok: str = Depends(require_control)):
-    """复位：把 B 区已落的子搬回对应 A 格。进行中先「停止」。"""
+    """★「复原」：把 B 区已落的子**按落地逆序逐个搬回各自原位 A 格**。
+
+    ★ 用户口径（2026-10-11）：「复原和复盘合并，就是复原，**不用空跑啊，要真机移动**」——
+      真实局**真机搬回**（见 `_launch_restore`）；空跑局没有实体可搬，只清棋盘并明说。
+    ★ 进行中先「停止」。停止沿用 `/tictactoe/stop`（步边界停止），不新造语义。
+    """
     with _gate:
         th = _job.get("thread")
         st = _job.get("state")
     if th and th.is_alive():
-        raise HTTPException(409, detail="对局进行中，先「停止」再复位")
+        raise HTTPException(409, detail="对局/复原进行中，先「停止」再复原")
     if not isinstance(st, dict) or not st.get("moves"):
-        raise HTTPException(400, detail="没有可复位的棋子")
-    if body is not None and body.speed_pct is not None:
-        _set_state(st, speed_pct=int(body.speed_pct))     # 用"此刻"的右上角速度
-    if st.get("dry_run"):
-        # 空跑：没真动过，直接清棋盘
-        st.update({"board": TT.new_board(), "moves": [], "used": [],
-                   "result": "", "win_line": [], "voided": False, "piece_no": 0})
-        return {"ok": True, "dry_run": True}
-    _reject_if_run_active("井字棋复位")
-    pmap = _load_pmap()
-    ctx = new_run("井字棋复位", kind="tictactoe")
-    with _gate:
-        _job["ctx"] = ctx
-        th2 = threading.Thread(target=_reset_run, args=(ctx, st, pmap),
-                               name="tictactoe-reset", daemon=True)
-        _job["thread"] = th2
-    th2.start()
-    ctx.set_thread(th2)     # ★ 绑定执行线程：让"卡死登记"能被 is_alive() 精确识别
-    emit_event("tictactoe", "info", "tictactoe.reset_start",
-               "井字棋复位：把 %d 颗棋子搬回 A 区" % len(st.get("moves") or []),
-               {}, actor="control")
-    return {"ok": True, "run_id": ctx.run_id}
+        raise HTTPException(400, detail="没有可复原的棋子")
+    return _launch_restore(st, body.speed_pct if body is not None else None)
 
 
 @router.get("/replay")
 def api_replay(tok: str = Depends(require_control)):
-    """复盘**棋谱数据**：只读返回 moves/result/win_line（前端按序做 2D 回放查看，
-    **本接口不动机器人** —— 本项目的"真实复盘"是 `POST /replay`）。"""
+    """**棋谱数据**：只读返回 moves/result/win_line（前端按序做 2D 回放查看，
+    **本接口不动机器人** —— 本项目的"真实复原"是 `POST /reset`）。"""
     with _gate:
         st = _job.get("state")
     if not isinstance(st, dict) or not st.get("moves"):
@@ -814,49 +882,25 @@ def api_replay(tok: str = Depends(require_control)):
 
 
 class ReplayIn(BaseModel):
-    # ★ 复盘也沿用右上角那份全局速度（客户端可带；不带就用本局原速度）
+    # ★ 复原也沿用右上角那份全局速度（客户端可带；不带就用本局原速度）
     speed_pct: Optional[int] = Field(default=None, ge=5, le=100)
 
 
 @router.post("/replay")
 def api_replay_run(body: Optional[ReplayIn] = None, tok: str = Depends(require_control)):
-    """★ 真实复盘（2026-10-11 用户口径："机器人复盘要真实复盘，机器人要动起来，
-    每一个棋子放到原位"）：起一条线程，把 B 区已落的子**按落子逆序逐个搬回各自来源
-    A 格（原位）**。复用 `_carry`（`_move`/`_air`）—— 不新增任何下发通道。
+    """★ **兼容别名**：本项目的"真实复盘"已并入「复原」（`POST /reset`），
+    两者**同一实现**（`_launch_restore` → `_restore_run`）—— 界面上已无「复盘」入口。
 
-    · 空跑局（`st.dry_run`）：只走预演路径（不下发真实运动），终态同样清空棋盘；
-    · 真实局：过统一"未就绪"闸门（伺服未上电 → 409 统一文案）与人机互斥；
-    · 停止：沿用 `/tictactoe/stop`（步边界停止），不用新语义。
+    保留本路由只为旧的脚本/调用方不 404；**不做第二份实现**。
     """
     with _gate:
         th = _job.get("thread")
         st = _job.get("state")
     if th and th.is_alive():
-        raise HTTPException(409, detail="对局/复盘进行中，先「停止」")
+        raise HTTPException(409, detail="对局/复原进行中，先「停止」")
     if not isinstance(st, dict) or not st.get("moves"):
-        raise HTTPException(400, detail="没有可复盘的棋子（先下完一局）")
-    if body is not None and body.speed_pct is not None:
-        _set_state(st, speed_pct=int(body.speed_pct))     # 用"此刻"的右上角速度
-    dry = bool(st.get("dry_run"))
-    # ★ 统一"未就绪"闸门：真实复盘（非空跑）= 真实下发 → 伺服没上电一律拒绝（同 /start 文案）。
-    reject_if_not_ready(dry=dry)
-    if not dry:
-        _reject_if_run_active("井字棋复盘")
-    pmap = _load_pmap()
-    ctx = new_run("井字棋复盘", kind="tictactoe")
-    with _gate:
-        _job["ctx"] = ctx
-        th2 = threading.Thread(target=_replay_run, args=(ctx, st, pmap),
-                               name="tictactoe-replay", daemon=True)
-        _job["thread"] = th2
-    th2.start()
-    ctx.set_thread(th2)     # ★ 绑定执行线程：让"卡死登记"能被 is_alive() 精确识别
-    emit_event("tictactoe", "info", "tictactoe.replay_start",
-               "井字棋真实复盘：把 %d 颗棋子逐个搬回 A 区原位%s" % (
-                   len(st.get("moves") or []),
-                   "（空跑：仅更新棋盘，不动机器人）" if dry else ""),
-               {"dry_run": dry, "pieces": len(st.get("moves") or [])}, actor="control")
-    return {"ok": True, "run_id": ctx.run_id, "dry_run": dry}
+        raise HTTPException(400, detail="没有可复原的棋子（先下完一局）")
+    return _launch_restore(st, body.speed_pct if body is not None else None)
 
 
 # ---------------------------------------------------------------- 工具

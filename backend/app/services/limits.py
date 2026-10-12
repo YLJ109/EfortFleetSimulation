@@ -49,6 +49,14 @@ DEFAULT_MIN = -180.0
 DEFAULT_MAX = 180.0
 #: 判定容差（角度 deg）。控制在 1e-6，纯粹为了吃掉浮点尾巴，不影响任何真实边界。
 TOL = 1e-6
+#: ★★ 控制器**角度表示范围**（有符号 int16 ×100）：±327.67° → 取 327.0 留余量。
+#   见 `services/modbus.py::ModbusRobot.encode_angle` —— **超出它会被直接拒绝下发**。
+#   2026-10-11 现场事故：`joint_limits.J6` 写成 ±360，**比可表示范围宽** →
+#   归一化后放行 −360 → 下发被拒 → **整个流程（井字棋/分拣）被终止**。
+#   故限位本身必须**收窄到可表示范围**（收窄永远是安全方向：
+#   它只会让更多目标被拒/被夹，绝不会凭空放行一个下发不出去的目标）。
+#   J6 是转动轴，去掉整圈是**同一姿态**，物理上无副作用、且更不容易绕线。
+ENCODE_LIMIT_DEG = 327.0
 
 #: 限位条目：{"name": "J1", "min": -170.0, "max": 170.0}
 Limit = Dict[str, Any]
@@ -83,6 +91,14 @@ def load_limits(n: int = JOINT_COUNT) -> List[Limit]:
         else:
             # 整条不是 dict（比如有人写成 `- -170, 170` 这种列表）→ 退回默认
             name, lo, hi = f"J{i + 1}", DEFAULT_MIN, DEFAULT_MAX
+        # ★★ 收窄到控制器可表示范围（见 ENCODE_LIMIT_DEG 的事故说明）——
+        #   现场 `J6: -360~360` 正是越界源头；收窄后 J6 = ±327，不会再算出下发不出去的目标。
+        if lo < -ENCODE_LIMIT_DEG:
+            lo = -ENCODE_LIMIT_DEG
+        if hi > ENCODE_LIMIT_DEG:
+            hi = ENCODE_LIMIT_DEG
+        if hi < lo:                       # 收窄后塌陷（配置太离谱）→ 退到默认保守区间
+            lo, hi = DEFAULT_MIN, DEFAULT_MAX
         out.append({"name": name, "min": lo, "max": hi})
     while len(out) < n:
         out.append({"name": f"J{len(out) + 1}", "min": DEFAULT_MIN, "max": DEFAULT_MAX})

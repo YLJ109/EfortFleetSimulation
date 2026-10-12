@@ -43,12 +43,15 @@ ok("后端有统一闸门函数 servo_not_ready_reason(dry)",
   /def servo_not_ready_reason\(dry:\s*bool\s*=\s*False\)/.test(motionPy));
 ok("闸门判据 = 伺服上电位 bits.servo",
   /\.get\("bits"\)[\s\S]{0,120}?get\("servo"\)/.test(motionPy));
+// ★★ 2026-10-12：窗口大幅放宽（400/600/1400 → 2200/2400/3400）——
+//   闸门升级为"完整就绪"后 `servo_not_ready_reason` 的 docstring 变长（写清了 5 类原因），
+//   闸门调用本身**仍在**（只是更靠后）。断言意图完全不变。
 ok("闸门：空跑 dry → 放行（不在空跑上拦）",
-  /def servo_not_ready_reason[\s\S]{0,400}?if dry:\s*\n\s*return None/.test(motionPy));
+  /def servo_not_ready_reason[\s\S]{0,2200}?if dry:\s*\n\s*return None/.test(motionPy));
 ok("闸门：模拟模式（双闸未开）→ 放行",
-  /def servo_not_ready_reason[\s\S]{0,600}?if not real_write_enabled\(\):\s*\n\s*return None/.test(motionPy));
+  /def servo_not_ready_reason[\s\S]{0,2400}?if not real_write_enabled\(\):\s*\n\s*return None/.test(motionPy));
 ok("闸门：读不到状态按「未就绪」拒绝（fail-safe）",
-  /def servo_not_ready_reason[\s\S]{0,1400}?snap is None[\s\S]{0,200}?机器人没有就绪/.test(motionPy));
+  /def servo_not_ready_reason[\s\S]{0,3400}?snap is None[\s\S]{0,200}?机器人没有就绪/.test(motionPy));
 
 // A. control.py：统一 raise 帮助函数 + 各入口调用
 ok("control 有统一前置校验 reject_if_not_ready（一处实现）",
@@ -97,10 +100,28 @@ ok("前端统一文案常量 NOT_READY_HINT 以「机器人没有就绪」开头
   /export const NOT_READY_HINT\s*=\s*"机器人没有就绪/.test(rcReadyJs));
 ok("点位执行页未就绪旁注引用 NOT_READY_HINT",
   pointView.includes("NOT_READY_HINT") && pointView.includes("import { useRcReadyStore, NOT_READY_HINT }"));
-ok("程序执行页未就绪结论引用 NOT_READY_HINT",
-  progView.includes("NOT_READY_HINT") && /return NOT_READY_HINT/.test(progView));
+// ★★ 2026-10-11：程序执行页的"为什么不就绪"改为**复用统一判据** `exec.blockReason`
+//   （文案本身仍在 exec.js 里由 NOT_READY_HINT 给出）—— 原来该页自己拼了一句
+//   `NOT_READY_HINT + "（伺服 / 档位 / 报警 / 急停待检查）"`，与同页「直接运行」按钮的
+//   判据不是同一处，导致"横幅说可以执行、按钮却是灰的"。
+ok("程序执行页未就绪结论复用统一判据 exec.blockReason（文案在 exec.js 内含 NOT_READY_HINT）",
+  /exec\.blockReason/.test(progView) && !/NOT_READY_HINT/.test(progView));
 ok("exec.blockReason 引用 NOT_READY_HINT",
   execJs.includes("NOT_READY_HINT") && /return NOT_READY_HINT/.test(execJs));
+
+// ★★ 2026-10-11 修复（"同一页多个判据打架 / 门控漏项 / 假显示"）：
+{
+  const appVue = read("src/App.vue");
+  ok("★ 程序执行页：就绪横幅与「直接运行」按钮**同一判据**（exec.canExec）",
+    /isReady = computed\(\(\) => exec\.canExec\)/.test(progView));
+  ok("★ 程序执行页：序列「执行」按钮也走同一门控（原来漏了就绪判据，可点但被 409 拒）",
+    /runSeqDisabled = computed\(\(\) => !exec\.canExec/.test(progView));
+  ok("★ store：非空跑的 runSeq 也要过同一道就绪门控（不只靠按钮置灰）",
+    /if \(!dryRun && !this\.canExec\)/.test(execJs));
+  ok("★ 底栏「控制中」按控制器就绪区分（未就绪显示「待就绪」，不再只显示角色）",
+    /class="ctrl-badge" :class="\{ pending: !rc\.ready \}"/.test(appVue)
+    && /待就绪/.test(appVue));
+}
 
 // C. 各入口必须把后端 message 解析出来显示（不许 undefined）
 ok("exec.startJog 读 d.message（后端 409 文案能显示）",

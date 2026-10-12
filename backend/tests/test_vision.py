@@ -342,6 +342,35 @@ def test_rules_default_and_save(client, fake_camera):
     assert r.json()["rules"] == []
 
 
+def test_rules_missing_speed_defaults_to_safe_min(client):
+    """★★ 2026-10-11 修复（"参数写死 → 安全缺省失效"这一类）：
+
+    没写 `speed_pct` 的视觉规则**不许落盘成 100%** —— 视觉链路是"相机事件**无人值守**触发"，
+    缺省跑满速是最危险的默认值。原实现是 `int(it.get("speed_pct") or 100)`，于是
+    `execute_rule` 里的 `clamp_speed(rule["speed_pct"])`（注释声称"缺省改为安全下限"）
+    **从未生效**：拿到 100 还是 100。现在缺省/非法 → `SPEED_MIN`，越界仍夹到工程上限。
+    """
+    from app.core.safety_const import SPEED_MIN
+    r = client.put("/api/vision/rules",
+                   json={"rules": [
+                       {"color": "红", "program_id": 1},                    # 没设速度
+                       {"color": "绿", "program_id": 2, "speed_pct": 999},  # 越界
+                       {"color": "蓝", "program_id": 3, "speed_pct": 30},   # 显式
+                       {"color": "黑", "program_id": 4, "speed_pct": 0},    # 非法/0
+                   ]},
+                   headers=_h(client))
+    assert r.status_code == 200, r.text
+    got = {x["color"]: x["speed_pct"] for x in r.json()["rules"]}
+    assert got["红"] == SPEED_MIN, ("没设速度必须回落安全下限，不能是 100%%：%r" % got)
+    assert got["绿"] == 100, "越界仍夹到工程上限"
+    assert got["蓝"] == 30, "显式设的速度要原样保留"
+    assert got["黑"] == SPEED_MIN, "0/非法也要回落安全下限（绝不静默归零或归百）"
+    # 再读一次：落盘的值就是安全下限（不是"读时才算对"）
+    again = {x["color"]: x["speed_pct"] for x in client.get("/api/vision/rules",
+                                                            headers=_h(client)).json()["rules"]}
+    assert again["红"] == SPEED_MIN, "落盘值也必须是安全下限"
+
+
 def test_rule_not_executed_without_global_switch(client, fake_camera, tmp_rules_path):
     """★ 安全底线：全局开关为关时，命中规则也绝不运动，只记录。"""
     from app.services import vision_rules as vr

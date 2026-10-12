@@ -473,62 +473,87 @@ def test_plan_trips_per_trip_guard_avoids_infinite_loop():
     assert S.plan_trips(["A1", "A2"], per_trip=0) == [["A1"], ["A2"]]
 
 
-def test_invalid_piece_placed_last_and_not_counted():
-    """★（2026-10-11 **更新口径**）落料顺序 = **先正面那件、再反面那件**（不再"先有效后无效"）。
+def test_invalid_piece_drop_order_by_face_and_not_counted():
+    """★（2026-10-11 **更新口径**）落料顺序 = **先反面那件、再正面那件**（不再"先有效后无效"）。
 
-    用户原话：「先送正面，然后送反面……顺序不能混乱」→ 顺序由**面**决定；
-    有效/无效只决定"放到哪"（B 槽 / 原路回自己 A 原位），**不改变先后**。
-    这里只测上层用的**排序函数**与 vote_color_per_face 的结论（编排本身靠源码钉）。
+    用户原话：「第一次检测正面（第一次），第二次检测反面（第二次），**先放回第二次，然后放回第一次**，
+    中间不要乱反转」→ 顺序由**面**决定；有效/无效只决定"放到哪"（B 槽 / 原路回自己 A 原位），
+    **不改变先后**。这里只测上层用的**排序函数**与 vote_color_per_face 的结论（编排本身靠源码钉）。
     """
     vs = S.vote_color_per_face([[_f("绿")] * 2, [_f("黑", 0.5)] * 2], 0.3)   # slot: lower, upper
     assert [v["slot"] for v in vs] == ["lower", "upper"]
     ordered = S.order_for_drop(vs)
-    assert ordered[0]["slot"] == "lower" and ordered[0]["ok"] is True
-    assert ordered[-1]["slot"] == "upper" and ordered[-1]["ok"] is False
+    assert ordered[0]["slot"] == "upper" and ordered[0]["ok"] is False, "先放反面那件（本例是无效件）"
+    assert ordered[-1]["slot"] == "lower" and ordered[-1]["ok"] is True
     # 配额只对有效件扣：无效件不进 build_piece_plan/place
     pl = S.new_placement()
-    plan = S.build_piece_plan(pl, ordered[0]["color"])
+    plan = S.build_piece_plan(pl, ordered[-1]["color"])
     assert plan["ok"] is True
-    S.place(pl, ordered[0]["color"], plan["slot"])
+    S.place(pl, ordered[-1]["color"], plan["slot"])
     assert sum(len(v) for v in pl.values()) == 1, "只有 1 件进了配额表"
 
 
 # ---------------------------------------------------------------- ★ 固定顺序（本轮）
-def test_capture_faces_order_is_back_then_front():
-    """★★（本轮）拍照面序固定：**先反面、后正面**（用户口径：顺序不能乱）。
+def test_capture_faces_order_is_front_then_back():
+    """★★（2026-10-11 更新口径）拍照面序固定：**先正面、后反面**。
 
-    · 两件趟 → ["upper"(反面), "lower"(正面)]；
+    用户原话：「第一次检测正面（第一次），第二次检测反面（第二次）」。
+    · 两件趟 → ["lower"(正面), "upper"(反面)]；
     · 单件趟 → ["lower"]（只有正面那件）。
     """
-    assert S.faces_for_capture(2) == ["upper", "lower"], "两件趟必须「先反面后正面」"
+    assert S.faces_for_capture(2) == ["lower", "upper"], "两件趟必须「先正面后反面」"
     assert S.faces_for_capture(1) == ["lower"], "单件趟只有正面那件"
     assert S.faces_for_capture(0) == []
-    # 面序唯一口径：lower < upper
+    # 自然面序（拍照基准）：lower < upper
     assert S.face_rank("lower") == 0 and S.face_rank("upper") == 1
     assert S.face_rank("middle") == 2 and S.face_rank(None) == 2
+    # ★ 落料/复原面序**刻意与它不同**（先反面后正面）—— 唯一判据 `face_order_for_drop`
+    assert S.face_order_for_drop("upper") == 0 and S.face_order_for_drop("lower") == 1
+    assert S.face_order_for_drop(None) == 9 and S.face_order_for_drop("") == 9
 
 
-def test_drop_order_is_front_then_back_regardless_of_validity():
-    """★★（本轮）落料顺序固定：**先正面那件、再反面那件**（顺序不能乱）。
+def test_drop_order_is_back_then_front_regardless_of_validity():
+    """★★（2026-10-11 更新口径）落料顺序固定：**先反面那件、再正面那件**（顺序不能乱）。
 
     有效/无效**不改变先后**（只决定放到 B 槽还是原路回 A 原位）。
     """
     vs = [{"slot": "upper", "ok": True}, {"slot": "lower", "ok": True}]
-    assert [v["slot"] for v in S.order_for_drop(vs)] == ["lower", "upper"]
-    # 正面那件无效 → 也仍先处理它
-    vs2 = [{"slot": "upper", "ok": True}, {"slot": "lower", "ok": False}]
-    assert [v["slot"] for v in S.order_for_drop(vs2)] == ["lower", "upper"]
+    assert [v["slot"] for v in S.order_for_drop(vs)] == ["upper", "lower"]
+    # 反面那件是无效件 → 也仍先处理它
+    vs2 = [{"slot": "lower", "ok": True}, {"slot": "upper", "ok": False}]
+    assert [v["slot"] for v in S.order_for_drop(vs2)] == ["upper", "lower"]
     # 不改入参顺序（返回新列表）
-    assert [v["slot"] for v in vs] == ["upper", "lower"]
+    assert [v["slot"] for v in vs2] == ["lower", "upper"]
+
+
+def test_restore_order_is_back_then_front_keep_reverse_within_face():
+    """★★（2026-10-11 新增）**复原**顺序：**先反面件、后正面件**；同一面内保持传入的相对顺序。
+
+    用户原话：「先放回第二次，然后放回第一次」→ 复原也按面排（与 `order_for_drop` 同序），
+    且每件必须用**它自己当初那个面**取（`moves[].face`），否则姿态不匹配会吸不到 / 摆乱。
+    """
+    # 传入"落子逆序"（后放的在前）
+    rev = [{"cell": 3, "face": "front", "src": "A2"},     # 后放的是正面件
+           {"cell": 1, "face": "back", "src": "A7"}]      # 先放的是反面件
+    got = S.order_for_restore(rev)
+    assert [m["face"] for m in got] == ["back", "front"], "复原必须「先反面、后正面」"
+    assert [m["src"] for m in got] == ["A7", "A2"]
+    # 同一面内保持传入顺序（稳定性）
+    two_front = [{"cell": 1, "face": "front"}, {"cell": 2, "face": "front"}]
+    assert [m["cell"] for m in S.order_for_restore(two_front)] == [1, 2]
 
 
 def test_dual_face_flow_uses_fixed_orders_source():
-    """★★ 编排钉：送检拍照面序、落料次序**都必须走唯一口径函数**（不许在流程里另排一遍排乱）。"""
+    """★★ 编排钉：送检拍照面序、落料次序、复原次序**都必须走唯一口径函数**（不许在流程里另排一遍排乱）。"""
     from app.api import sorting as API
+    from app.api import tictactoe as TTT
 
     src = inspect.getsource(API._run_sorting_dual_face)
-    assert "faces_for_capture" in src, "送检拍照面序没走唯一口径（先反面后正面）"
-    assert "order_for_drop" in src, "落料次序没走唯一口径（先正面后反面）"
+    assert "faces_for_capture" in src, "送检拍照面序没走唯一口径（先正面后反面）"
+    assert "order_for_drop" in src, "落料次序没走唯一口径（先反面后正面）"
+    # ★★ 2026-10-11 旋转管控：`_restore_run` 变成薄包装（`with S.allow_rotate():`），本体在 `_restore_run_body`。
+    tsrc = inspect.getsource(TTT._restore_run_body)
+    assert "order_for_restore" in tsrc, "复原次序没走唯一口径（先反面后正面）"
 
 
 # ---------------------------------------------------------------- ★ 送检到达面（本轮优化）
@@ -548,36 +573,34 @@ def _cam_face_flips(arrival, faces, face_of_slot):
     return n
 
 
-def test_dual_face_arrival_face_is_back_and_first_group_is_back():
-    """★★（本轮优化）双面（两件）趟：送检**到达面 = 反面**，且到达后**第一组帧就是反面**。
+def test_dual_face_arrival_face_is_front_and_first_group_is_front():
+    """★★（2026-10-11 更新口径）双面（两件）趟：送检**到达面 = 正面**（首个采集面），
+    拍完正面后切到反面拍 → **拍完停在反面** → 接着"先送反面那件"**不用翻面**。
 
-    · 到达面取"首个采集面"（`faces_for_capture(2)[0]` = upper → 反面）→ 到达即在反面；
+    · 到达面取"首个采集面"（`faces_for_capture(2)[0]` = lower → 正面）→ 到达即在正面；
     · 故"到达面 == 首个采集面" → 首组帧**不需要额外翻面**。
     """
     from app.api import sorting as API
 
     faces = S.faces_for_capture(2)
-    assert faces[0] == "upper", "两件趟首个采集面必须是反面(upper)"
+    assert faces[0] == "lower", "两件趟首个采集面必须是正面(lower)"
     arrival = API._face_of_slot(faces[0])
-    assert arrival == S.FACE_BACK, "两件趟送检到达面必须是反面（省掉那次多余翻面）"
+    assert arrival == S.FACE_FRONT, "两件趟送检到达面必须是正面"
     assert API._face_of_slot(faces[0]) == arrival, \
         "到达面必须 == 首个采集面（到达即开拍 → 第一组帧不用额外翻面）"
 
 
-def test_dual_face_flip_count_after_arrival_reduced_by_one():
-    """★★（本轮优化）到 C 后的**翻面次数**：新实现 = **1**（只用于从反面切回正面），旧实现 = 2。
+def test_dual_face_flip_count_after_arrival_is_one():
+    """★★ 到 C 后的**翻面次数** = **1**（只在"从正面切到反面"时翻）。
 
-    旧实现：到 C 停在正面 → 先翻反面(upper) → 再翻回正面(lower) = 2 次；
-    新实现：到 C 已在反面 → 首组帧不翻 → 只在切回正面时翻 1 次 → **比旧实现少 1 次**。
+    到达已在正面（= 首个采集面）→ 首组帧不翻 → 切到反面拍时翻 1 次 → 拍完停在反面
+    （于是"先送反面那件"零翻面）。
     """
     from app.api import sorting as API
 
     faces = S.faces_for_capture(2)
-    new = _cam_face_flips(API._face_of_slot(faces[0]), faces, API._face_of_slot)
-    old = _cam_face_flips(S.FACE_FRONT, faces, API._face_of_slot)   # 旧实现：到 C 停在正面
-    assert new == 1, "双面流程到 C 后只应翻 1 次（反面 → 正面），实际 %d" % new
-    assert old == 2, "旧实现是 2 次（正面 → 反面 → 正面），实际 %d" % old
-    assert new == old - 1, "新实现应比旧实现少 1 次翻面"
+    n = _cam_face_flips(API._face_of_slot(faces[0]), faces, API._face_of_slot)
+    assert n == 1, "双面流程到 C 后只应翻 1 次（正面 → 反面），实际 %d" % n
 
 
 def test_single_trip_arrival_face_unchanged_front():
@@ -841,9 +864,11 @@ class _PointRow:
 
 
 def test_flip_only_overrides_j6_keeps_other_five(monkeypatch):
-    """★★ 核心回归钉：翻转时 **J1~J5 与基姿态逐轴相同，只有 J6 变**。
+    """★★ 核心回归钉（2026-10-12 终版）：翻转时 **J1~J5 与当前实时姿态逐轴相同，只有 J6 变**。
 
-    断言传给 `motion.command` 的：第 1~5 个值 == 基姿态 1~5；第 6 个 == J6反面 点的 joints[5]。
+    终版口径（用户原话）：「正面就是之前录的 J6，反面就是**当前点 J6 的值减掉 180 度**」
+    ⇒ 翻转目标 J6 = **当前实时 J6 − 180**（66 − 180 = −114），**与库里那行的值无关**
+      （虚拟切面命令：点位库里的 J6正面/反面 旧行已被无视，`resolve_target_joints` 按点名驱动）。
     ★ 这里把旋转**黑名单** `_rotation_guard` 打桩成放行 —— 本用例只验证**"只覆盖 J6"这条纯逻辑**；
       **原料位**拒绝由另一条独立钉子 `test_flip_j6_rejects_raw_slot_before_motion` 负责
       （否则本条会被黑名单先拦下，测不到 J6 覆盖逻辑）。
@@ -861,7 +886,8 @@ def test_flip_only_overrides_j6_keeps_other_five(monkeypatch):
 
     monkeypatch.setattr(API.motion, "command", _fake_command)
     monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
-    # J6反面 点里存的是"录点时那一整组"（J1~J5 与 base 不同 —— 正是被误带过去的那 5 个）
+    # ★ 库里那行即使存在也是**脏行**（J1~J5 是旧录点值）—— 虚拟切面命令必须**无视**它，
+    #   只按"当前实时姿态 + 点名"驱动（传进来就是为了证明被无视）。
     pmap = {API.DUAL_FACE_FLIP_POINT: _PointRow([1.0, 2.0, 3.0, 4.0, 5.0, -180.0])}
 
     API._move_flip_j6(_FlipCtx(), pmap, API.DUAL_FACE_FLIP_POINT, 5, False,
@@ -869,21 +895,24 @@ def test_flip_only_overrides_j6_keeps_other_five(monkeypatch):
 
     assert len(cap["joints"]) == 6, "仍必须传 6 个值（motion.command 强制 len==6）"
     assert cap["joints"][:5] == base[:5], "J1~J5 必须 = 当前实时基姿态（不许被录点时的值顶替）"
-    assert cap["joints"][5] == -180.0, "第 6 轴 = J6反面 点里存的 joints[5]"
+    assert cap["joints"][5] == -114.0, "★ 第 6 轴 = 当前 J6 − 180（66 − 180 = −114），与库里那行的 −180 无关"
 
 
-def test_flip_falls_back_and_logs_when_base_unavailable(monkeypatch):
-    """★ 基姿态**取不到**（空跑/离线/读不到实时关节）：回退为该点自带 6 轴，**日志如实标注**。
+def test_flip_rejects_when_base_unavailable(monkeypatch):
+    """★★ 终版：翻转 = **当前实时姿态 − 180**，所以**拿不到实时姿态就必须拒绝**（真机），
+    **绝不**退回"点位自带的整姿态"（那是"切面跑回起点"事故的根因，已随虚拟切面命令一起删除）。
 
-    "不许悄悄用"：回退必须留一条可排查的日志（含「基姿态不可得」「改用点位自带姿态」）。
-    ★ 同样把旋转**黑名单**打桩放行（见上一条说明），只验证回退 + 日志口径。
+    · 真机（dry=False）：`_Stop`，文案含「拿不到当前实时姿态」—— 如实说"做不了"；
+    · 空跑（dry=True）：**不下发指令**、只记 stage 把流程走通
+      （用户口径「离线、空跑不会下达指令」）。
+    ★ 黑名单 `_rotation_guard` 打桩放行（本条只验证基姿态口径）。
     """
     from app.api import sorting as API
 
     monkeypatch.setattr(API, "_rotation_guard", lambda name: None)
 
     def _boom():
-        raise RuntimeError("拿不到当前姿态（机器人未连接/无实时数据），无法示教")
+        raise RuntimeError("拿不到当前姿态（机器人未连接/无实时数据）")
 
     monkeypatch.setattr(API, "_live_joints", _boom)
     cap = {}
@@ -893,33 +922,18 @@ def test_flip_falls_back_and_logs_when_base_unavailable(monkeypatch):
         return {"ok": True}
 
     monkeypatch.setattr(API.motion, "command", _fake_command)
-    monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
 
-    class _FakeLog:
-        def __init__(self):
-            self.warns = []
+    # ① 真机：拒绝（绝不整姿态下发）
+    with pytest.raises(API._Stop) as ei:
+        API._move_flip_j6(_FlipCtx(), {}, API.DUAL_FACE_FLIP_POINT, 5, False,
+                          "翻转·J6反面（仅J6）")
+    assert "拿不到当前实时姿态" in str(ei.value)
+    assert cap == {}, "真机拿不到基姿态 → 绝不下发（更不许用点位自带姿态整姿态下发）"
 
-        def warning(self, fmt, *a):
-            self.warns.append(fmt % a if a else fmt)
-
-        def info(self, *a, **k):
-            pass
-
-        def exception(self, *a, **k):
-            pass
-
-    fake = _FakeLog()
-    monkeypatch.setattr(API, "log", fake)
-
-    own = [1.0, 2.0, 3.0, 4.0, 5.0, -180.0]
-    pmap = {API.DUAL_FACE_FLIP_POINT: _PointRow(own)}
-
-    API._move_flip_j6(_FlipCtx(), pmap, API.DUAL_FACE_FLIP_POINT, 5, False,
+    # ② 空跑：不抛、不下发（流程走通）
+    API._move_flip_j6(_FlipCtx(), {}, API.DUAL_FACE_FLIP_POINT, 5, True,
                       "翻转·J6反面（仅J6）")
-
-    assert cap["joints"] == own, "基姿态不可得时应回退为该点自带的完整 6 轴姿态"
-    assert any("基姿态不可得" in m and "改用点位自带姿态" in m for m in fake.warns), \
-        "回退必须在日志里如实标注（不许悄悄用）"
+    assert cap == {}, "空跑绝不下发指令"
 
 
 def test_flip_j6_rejects_raw_slot_before_motion():
@@ -1033,16 +1047,16 @@ def test_is_j6_face_point_identifies_only_the_two():
 
 # ---------------------------------------------------------------- 切面原地：/sorting/goto
 def test_sorting_goto_face_point_is_in_place(client, monkeypatch, face_points):
-    """★★ 核心钉子：界面上 `J6反面` 的「切面」→ 传给下发的第 1~5 值 == **当前实时基姿态**，
-    第 6 值 == 该点 `joints[5]`（即使点位库里那 5 个轴是脏值，也只受 joints[5] 影响）。
+    """★★ 核心钉子（终版）：界面上 `J6反面` 的「切面」→ 传给下发的第 1~5 值 == **当前实时基姿态**，
+    第 6 值 == **当前 J6 − 180**（66 − 180 = −114）。
 
-    根因钉子：改前 `api_goto` 走 `motion.command(parse_joints(row.joints))` —— **整姿态**，
-    于是会把录点当时的 J1~J5 一起带过去（= 跑回起点）。
+    终版口径（用户原话）：「去掉 J6正面和反面录的 0 和 180 的值，只显示正面和反面进行旋转的按钮，
+    不用录制正反面」⇒ 虚拟切面命令：**不创建任何库行也能下发**（本用例故意不调 `_mk` 造行
+    —— 证明它根本不查库），目标完全由"当前实时姿态 + 点名"决定。
     """
     from app.api import sorting as API
 
-    _mk, h = face_points
-    _mk("J6反面", [1, 2, 3, 4, 5, -180])          # 脏 J1~J5（录点时那一整组）
+    _mk, h = face_points                          # 不造行 —— 虚拟切面命令不查库
     base = [11.0, 22.0, 33.0, 44.0, 55.0, 66.0]   # 当前实时基姿态
     monkeypatch.setattr(API, "_live_joints", lambda: list(base))
     monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
@@ -1056,35 +1070,41 @@ def test_sorting_goto_face_point_is_in_place(client, monkeypatch, face_points):
     r = client.post("/api/sorting/goto", json={"name": "J6反面", "speed_pct": 30}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json().get("j6_only") is True, "该点必须走原地切面（j6_only=True）"
-    assert cap["joints"][:5] == base[:5], "J1~J5 必须 = 当前实时基姿态（不许被录点时的脏值顶替）"
-    assert cap["joints"][5] == -180.0, "第 6 轴 = 该点 joints[5]"
+    assert cap["joints"][:5] == base[:5], "J1~J5 必须 = 当前实时基姿态（原地切面）"
+    assert cap["joints"][5] == -114.0, "★ 第 6 轴 = 当前 J6 − 180（66 − 180 = −114）"
 
 
 def test_sorting_goto_face_point_rejects_when_base_unavailable(client, monkeypatch, face_points):
-    """★★ 拿不到实时基姿态 → **拒绝**（409），绝不退回该点自带的 5 轴整姿态下发。"""
+    """★★ 拿不到实时基姿态 → **拒绝**（503），绝不退回该点自带的整姿态下发。
+
+    ★ 2026-10-12：只有**切面命令**需要"当前姿态为基" → 仍如实 503；
+      普通到点则**不再因"判不出位置"而拒绝**（用户口径「不要禁止，你直接自动补段」），
+      改由"未就绪闸门"兜底真实下发。
+    """
     from app.api import sorting as API
 
-    _mk, h = face_points
-    _mk("J6反面", [1, 2, 3, 4, 5, -180])
+    _mk, h = face_points                          # 不造行（虚拟命令不查库）
 
     def _boom():
         raise RuntimeError("拿不到当前姿态（机器人未连接/无实时数据）")
 
     monkeypatch.setattr(API, "_live_joints", _boom)
     r = client.post("/api/sorting/goto", json={"name": "J6反面", "speed_pct": 5}, headers=h)
-    assert r.status_code == 409, r.text
+    assert r.status_code == 503, r.text
     assert "原地切面" in r.text
 
 
 # ---------------------------------------------------------------- 切面原地：/control/move(point_id)
 def test_control_move_by_point_id_face_point_is_in_place(client, monkeypatch, face_points):
     """★★ `/control/move` 按 point_id（点位执行页「执行」、序列程序步骤）同样**禁止整姿态**：
-    一律转成"原地只改 J6"。这条封的是"除 /sorting/goto 之外的旁路"。
+    一律转成"原地只改 J6"。终版：目标 J6 由**点名 + 当前实时姿态**决定 ——
+    `J6正面` 且当前已在正面（66°，|66|≤90 → 正面）→ **原地零动作**
+    （tgt[5] = 当前 66.0，库里那行录的 0 被**无视**）。
     """
     import app.api.control as C
 
     _mk, h = face_points
-    pid = _mk("J6正面", [9, 9, 9, 9, 9, 0])       # 脏 J1~J5
+    pid = _mk("J6正面", [9, 9, 9, 9, 9, 0])       # 造行只为拿 point_id（其值将被无视）
     base = [11.0, 22.0, 33.0, 44.0, 55.0, 66.0]
     monkeypatch.setattr(C, "_live_joints_or_none", lambda: list(base))
     monkeypatch.setattr(C, "guard_check", lambda: (True, "", None))
@@ -1098,7 +1118,7 @@ def test_control_move_by_point_id_face_point_is_in_place(client, monkeypatch, fa
     r = client.post("/api/control/move", json={"point_id": pid, "speed_pct": 20}, headers=h)
     assert r.status_code == 200, r.text
     assert cap["joints"][:5] == base[:5], "按 point_id 也必须原地只改 J6"
-    assert cap["joints"][5] == 0.0
+    assert cap["joints"][5] == 66.0, "★ 已在目标面 → 原地零动作（J6 = 当前 66.0，库里那行的 0 被无视）"
 
 
 def test_control_move_by_point_id_face_point_rejects_without_base(client, monkeypatch, face_points):
@@ -1120,17 +1140,18 @@ def test_control_move_by_point_id_face_point_rejects_without_base(client, monkey
 #   —— 下面两条断言把"残影目标 == 实发目标"钉死（J6 正/反面 + 普通点位各一例）。
 def test_resolve_target_joints_pure_face_and_plain():
     """★★ 唯一解算入口的纯逻辑：
-      · J6 正/反面 → 只用基姿态覆盖第 6 轴（J1~J5 = 基姿态，J6 = 点位里的值）；
+      · J6 正/反面 → 只用基姿态覆盖第 6 轴（J1~J5 = 基姿态，J6 = **当前 J6 − 180**，
+        库里那行的值被**无视**）；
       · 普通点位   → 原样返回点位自带 6 值，且**不读基姿态**（base_provider 不该被调用）；
       · J6 正/反面但拿不到基姿态 → **明确拒绝**（target=None + 原因），绝不退回整姿态。
     """
     base = [11.0, 22.0, 33.0, 44.0, 55.0, 66.0]
-    dirty = [1.0, 2.0, 3.0, 4.0, 5.0, -180.0]     # 点位库里那 6 值（J1~J5 是"录点在起点"的脏值）
+    dirty = [1.0, 2.0, 3.0, 4.0, 5.0, -180.0]     # 点位库里那 6 值（将被无视的脏行）
 
     tgt, j6, why = S.resolve_target_joints("J6反面", dirty, lambda: list(base))
     assert j6 is True and why == ""
     assert tgt[:5] == base[:5], "J1~J5 必须 = 基姿态（不许被录点时的脏值顶替）"
-    assert tgt[5] == -180.0
+    assert tgt[5] == -114.0, "★ 第 6 轴 = 当前 J6 − 180（66 − 180 = −114）；库里的 −180 被无视"
 
     calls = []
     tgt2, j62, why2 = S.resolve_target_joints(
@@ -1156,7 +1177,7 @@ def test_ghost_target_equals_dispatch_target_face_point(client, monkeypatch, fac
     import app.api.control as C
 
     _mk, h = face_points
-    pid = _mk("J6反面", [1, 2, 3, 4, 5, -180])       # 录点在"起点"的脏整姿态
+    pid = _mk("J6反面", [1, 2, 3, 4, 5, -180])       # 造行只为拿 point_id（其值将被无视）
     base = [11.0, 22.0, 33.0, 44.0, 55.0, 66.0]      # 当前实时基姿态
     monkeypatch.setattr(C, "_live_joints_or_none", lambda: list(base))
 
@@ -1181,12 +1202,20 @@ def test_ghost_target_equals_dispatch_target_face_point(client, monkeypatch, fac
 
     assert dp["target"] == [round(v, 3) for v in cap["joints"]], \
         "★ 残影目标必须 == 实际下发目标（同源）；残影对不上就是这里分叉了"
-    assert cap["joints"][:5] == base[:5] and cap["joints"][5] == -180.0
+    assert cap["joints"][:5] == base[:5] and cap["joints"][5] == -114.0, \
+        "★ 第 6 轴 = 当前 J6 − 180（66 − 180 = −114）；库里那行的 −180 被无视"
 
 
-def test_ghost_target_unchanged_for_plain_point(client, monkeypatch, face_points):
-    """★ 普通点位的残影目标 **逐字不变**（= 点位自带 6 值），且与实发一致 ——
-    证明本轮"同源化"没有连带改动普通点位（回归保护）。
+def test_ghost_target_no_rotation_for_plain_point(client, monkeypatch, face_points):
+    """★★★ 旋转管控（2026-10-12 终版）：普通点位「到点 / 残影」**默认不旋转**（keep = 当前面的**自身变体**）。
+
+    —— 用户原话：「**其他时间一律不允许旋转**……不能出现乱转动」。
+
+    ★ 终版 keep 语义：正面变体 = **该点自身录制 J6**、反面变体 = **自身 − 180**；
+      按"当前在哪一面"取对应变体（绝不翻面）。本用例当前 J6 = 7.0、该点自身 = 60
+      → 两者同在正面（环形距离 53 < 127）→ 取**自身变体 60.0**。
+      （旧口径"逐字锁当前值 7.0"已被推翻 —— 那会把采集漂移/滞后吸进目标。）
+    ★ 同时保住"**残影与实发同源**"这条硬要求（两处都必须给出同一个 target）。
     """
     import app.api.control as C
 
@@ -1201,12 +1230,16 @@ def test_ghost_target_unchanged_for_plain_point(client, monkeypatch, face_points
     assert r.status_code == 200, r.text
     pid = r.json()["id"]
     try:
+        # ★ 固定"当前实时姿态"（J6 = 7.0，与该点自身 60 同在正面）→ 残影与实发的 J6 都取**自身变体 60**
+        monkeypatch.setattr(C, "_live_joints_or_none", lambda: [1.0, 2.0, 3.0, 4.0, 5.0, 7.0])
         rp = client.post("/api/control/point-target", json={"point_id": pid})
         assert rp.status_code == 200, rp.text
         dp = rp.json()
         assert dp["ok"] is True and dp["j6_only"] is False
-        assert dp["target"] == [10.0, 20.0, 30.0, 40.0, 50.0, 60.0], \
-            "普通点位残影目标必须逐字 == 点位自带 6 值"
+        assert dp["target"][:5] == [10.0, 20.0, 30.0, 40.0, 50.0], "J1~J5 = 该点自身"
+        assert dp["target"][5] == 60.0, \
+            "★ 默认不旋转：J6 = 当前面的**自身变体**（当前 7.0 在正面 → 取该点自身 60，" \
+            "绝不翻到反面 −120）"
 
         monkeypatch.setattr(C, "guard_check", lambda: (True, "", None))
         cap = {}
@@ -1219,31 +1252,26 @@ def test_ghost_target_unchanged_for_plain_point(client, monkeypatch, face_points
         rm = client.post("/api/control/move", json={"point_id": pid, "speed_pct": 20},
                          headers=h)
         assert rm.status_code == 200, rm.text
+        assert cap["joints"][5] == 60.0, "★ 实发同样不旋转（残影与实发必须同源）"
         assert dp["target"] == [round(v, 3) for v in cap["joints"]]
     finally:
         client.delete(f"/api/points/{pid}", headers=h)
 
 
 # ---------------------------------------------------------------- 只读 J6：存点归一化
-def test_sorting_teach_face_point_stores_only_j6(client, monkeypatch, face_points):
-    """★★ 存点钉：`J6正面`/`J6反面` **只写 J6**（其余 5 轴写 0）+ note 明确标注"仅 J6 有效"。
+def test_sorting_teach_rejects_j6_face_points(client, face_points):
+    """★★ 终版存点钉：`J6正面`/`J6反面` **不再可示教**（400 拒绝）——
 
-    用户原话：「正面和反面的别的五个（轴）移除掉，只 J6 就行了」。
+    用户原话：「去掉 J6正面和反面录的 0 和 180 的值……**不用录制正反面**」。
+    界面上的正面/反面按钮就是原地旋转（虚拟切面命令），目标由"当前实时姿态 + 点名"决定，
+    与库里那两行旧数据再无关系（历史遗留行可删可留）。
     """
-    from app.api import sorting as API
-
     _mk, h = face_points
-    monkeypatch.setattr(API, "_live_joints", lambda: [11.0, 22.0, 33.0, 44.0, 55.0, -175.5])
-    r = client.post("/api/sorting/teach", json={"name": "J6正面"}, headers=h)
-    assert r.status_code == 200, r.text
-    d = r.json()
-    assert d["j6_only"] is True
-    assert d["joints"][:5] == [0.0, 0.0, 0.0, 0.0, 0.0], "其余 5 轴必须写 0（「只留 J6」）"
-    assert d["joints"][5] == -175.5
-    # 库里也只写 J6 + note 标注
-    row = next(p for p in client.get("/api/points").json() if p["name"] == "J6正面")
-    assert row["joints"][:5] == [0.0] * 5 and row["joints"][5] == -175.5
-    assert "仅 J6 有效" in row["note"], "note 必须明确标注「仅 J6 有效」（否则界面像在编故事）"
+    for name in ("J6正面", "J6反面"):
+        r = client.post("/api/sorting/teach", json={"name": name}, headers=h)
+        assert r.status_code == 400, (name, r.text)
+        assert "无需示教" in r.text, "必须明说「无需示教」（界面据此如实提示）"
+        assert "不用录制" in r.text, "必须明说「不用录制」（= 用户终版口径）"
 
 
 # ---------------------------------------------------------------- 无旁路：源码断言
@@ -1263,7 +1291,8 @@ def test_no_full_pose_entry_for_j6_face_points_source():
       · `api/control.py::api_move`（点位执行页「执行」、/control/move 按 point_id）
       · `api/control.py::_run_file_job`（序列程序里若点名 J6 正/反面）
       · `services/vision_rules.py::execute_rule`（视觉规则自动执行，按点名下发）
-      · `api/sorting.py::_move_flip_j6`（分拣流程内翻转：直接 `compose_j6_only`，另有回退语义）
+      · `api/sorting.py::_move_flip_j6`（分拣流程内翻转：与其它入口同走
+        `resolve_target_joints` —— 终版 = 虚拟切面命令，"当前 J6 − 180"按点名折算）
     """
     from app.api import sorting as API
     from app.api import control as C
@@ -1275,8 +1304,8 @@ def test_no_full_pose_entry_for_j6_face_points_source():
         src = inspect.getsource(getattr(mod, fname))
         assert "resolve_target_joints" in src, \
             "%s 未接唯一解算入口 resolve_target_joints（可能整姿态下发）" % fname
-    # 分拣流程内翻转：直接 compose_j6_only（保留"基姿态不可得则回退整姿态"的既有语义）
-    assert "compose_j6_only" in inspect.getsource(API._move_flip_j6)
+    # 分拣流程内翻转：同样走唯一解算入口（不许绕开它各写一份 glue）
+    assert "resolve_target_joints" in inspect.getsource(API._move_flip_j6)
 
     # 唯一实现：resolve_target_joints 里才出现"识别 + 只改 J6"两件
     rs = inspect.getsource(S.resolve_target_joints)
@@ -1287,11 +1316,13 @@ def test_no_full_pose_entry_for_j6_face_points_source():
     assert "resolve_target_joints" in inspect.getsource(C.api_point_target)
 
 
-def test_flip_j6_face_note_constant_is_explicit():
-    """★ 存点 note 的固定文案必须"明说"仅 J6 有效（界面/接口据此如实标注）。"""
+def test_teach_rejects_j6_face_points_source():
+    """★★ 源码钉：示教接口必须对 `J6正面`/`J6反面` **明确拒绝**（终版 = 不用录制正反面）。"""
     from app.api import sorting as API
 
-    assert "仅 J6 有效" in API.FACE_J6_NOTE
+    src = inspect.getsource(API.api_teach)
+    assert "is_j6_face_point" in src, "示教接口必须先识别 J6 正/反面点名"
+    assert "无需示教" in src, "拒绝文案必须明说「无需示教」（界面据此如实提示）"
 
 
 # ================================================================================
@@ -1351,13 +1382,17 @@ def test_slot_face_mapping():
     assert API._face_of_slot(None) == S.FACE_FRONT
 
 
-def test_move_face_back_keeps_own_j1j5_and_flips_j6(monkeypatch):
-    """★★ B 块核心机制：`_move(..., face="back")` 实发 = 该点自身 J1~J5 + 该点自身 J6∓180。
+def test_move_face_back_needs_rotation_authorization(monkeypatch):
+    """★★★ 2026-10-11 **旋转管控**：`face="back"` **未授权时不许翻**（降级成 keep）；**授权后才真的翻**。
 
-    这正是"点到点移动不再把 J6 拉回该点默认正面"的判据（A 的 face-aware 解算 + B 的调用）。
+    用户原话：「J6 如果**用户在旋转、双面分拣、AI 快速分拣、游戏过程中**可以旋转，
+    **其他时间一律不允许旋转**」—— "想要某个面"**不足以**翻 J6，还必须拿到**旋转授权**。
+    ★ fail-safe 方向：**漏改 / 忘传授权 = 不旋转**（`_move` 的 `rotate` 缺省 / `effective_face` 默认）。
     """
     from app.api import sorting as API
 
+    # ★ 终版（2026-10-12）：面基准已删除 —— 每点自身 J6 即正面变体、自身 − 180 即反面变体，
+    #   判面用固定约定（`face_of_j6`）→ 断言完全确定，无需任何打桩。
     base = [11.0, 22.0, 33.0, 44.0, 55.0, 0.0]
     monkeypatch.setattr(API, "_live_joints_or_none", lambda: list(base))
     monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
@@ -1371,12 +1406,18 @@ def test_move_face_back_keeps_own_j1j5_and_flips_j6(monkeypatch):
     pmap = {"A1上": _PointRow([1.0, 2.0, 3.0, 4.0, 5.0, 0.0])}
     st = S.fresh_run_state(True, 9, False)
 
+    # ① 未授权 + face="back" → **不许翻**（J6 保持当前 0.0）
     API._move(_FlipCtx(), pmap, "A1上", 5, False, "取料·上方", st=st, face=S.FACE_BACK)
     assert cap["joints"][:5] == [1.0, 2.0, 3.0, 4.0, 5.0], "J1~J5 = 该点自身"
-    assert cap["joints"][5] in (-180.0, 180.0), "J6 = 该点自身 ∓180（真的翻了）"
+    assert cap["joints"][5] == 0.0, "★ 未授权 → 不许翻（J6 逐字保持当前值）"
+
+    # ② 授权（白名单流程，如双面分拣）→ 真的翻
+    with S.allow_rotate():
+        API._move(_FlipCtx(), pmap, "A1上", 5, False, "取料·上方", st=st, face=S.FACE_BACK)
+    assert cap["joints"][5] in (-180.0, 180.0), "★ 授权后 J6 = 该点自身 ∓180（真的翻了）"
     assert st.get("face") == "back", "运行时 state.face 必须如实记录当前面"
 
-    # 正面（默认）→ 该点自身 6 值逐字不变（零回归）
+    # ③ 未授权 + face="front" → 同样不翻（J6 保持当前）
     API._move(_FlipCtx(), pmap, "A1上", 5, False, "取料·上方", st=st, face=S.FACE_FRONT)
     assert cap["joints"] == [1.0, 2.0, 3.0, 4.0, 5.0, 0.0]
     assert st.get("face") == "front"
@@ -1455,24 +1496,36 @@ def test_keep_never_rotates_when_already_on_a_face():
         assert S.keep_face(f, b) == S.FACE_BACK
 
 
-def test_resolve_target_joints_keep_uses_point_own_joints():
-    """★★ 唯一解算入口 `face="keep"`：J1~J5 = 该点自身；J6 = 保持当前面（不主动翻面）。"""
+def test_resolve_target_joints_keep_locks_current_face_variant():
+    """★★★ 2026-10-12 **终版**：`keep` / `auto` = **取"当前所在面"的自身变体**（不翻面）。
+
+    终版口径（用户原话）：「正面就是之前录的 J6，反面就是**当前点 J6 的值减掉 180 度**」
+    ⇒ 正面变体 = 该点自身录制 J6；反面变体 = 自身 − 180；
+      按**当前在哪一面**（环形距离 `keep_j6`）取对应变体 —— **绝不翻面**。
+      （演进：旧口径"逐字锁当前实时值"会把采集漂移/滞后吸进目标 → 已废弃。）
+    ★ 拿不到当前 J6 → **拒绝**（判不了面 = 保证不了"不跨面"，绝不猜；
+      空跑/离线在 `_move` 里走"不下发指令"的回退，不会卡流程）。
+    """
     dirty = [1.0, 2.0, 3.0, 4.0, 5.0, 10.0]
-    # 当前 = 正面（该点自身 J6=10）→ 保持正面
+    # 当前 J6 = 164 → 在**反面**（|164|>90）→ 取反面变体 = 自身 10 − 180 = −170；
+    # `back_j6` 在 {−170, +190} 两个姿态等价的表示里取离当前更近的一侧
+    # （|190−164|=26 < |−170−164|=334，少绕线）→ +190
     tgt, j6_only, why = S.resolve_target_joints(
-        "A2", dirty, lambda: [0, 0, 0, 0, 0, 10.0], face=S.FACE_KEEP)
+        "A2", dirty, lambda: [0, 0, 0, 0, 0, 164.0], face=S.FACE_KEEP)
     assert why == "" and j6_only is False
-    assert tgt[:5] == dirty[:5], "keep 的 J1~J5 必须用该点自身"
-    assert tgt[5] == 10.0, "当前在正面 → 保持正面（该点自身 J6）"
-    # 当前 = 反面 → 保持反面
-    back = S.back_j6(10.0, 0.0)
+    assert tgt[:5] == dirty[:5], "keep 的 J1~J5 必须用该点自身（不然到不了该点）"
+    assert tgt[5] == 190.0, "★ 当前在反面 → 反面变体（10 − 180 = −170 ≡ +190，取少绕线的一侧）"
+    # 当前 J6 = −12 → 在**正面**（|−12|≤90）→ 取正面变体 = 该点自身 10（一字不动）
     tgt2, _, _ = S.resolve_target_joints(
-        "A2", dirty, lambda: [0, 0, 0, 0, 0, back], face=S.FACE_KEEP)
-    assert tgt2[:5] == dirty[:5]
-    assert tgt2[5] == back, "当前在反面 → 保持反面（该点自身 J6 ∓180）"
-    # 拿不到当前姿态 → 保守取正面（不报错、不翻面）
-    tgt3, _, _ = S.resolve_target_joints("A2", dirty, lambda: None, face=S.FACE_KEEP)
-    assert tgt3[5] == 10.0
+        "A2", dirty, lambda: [0, 0, 0, 0, 0, -12.0], face=S.FACE_AUTO)
+    assert tgt2[:5] == dirty[:5] and tgt2[5] == 10.0, "auto 与 keep 同义：正面 → 自身值"
+    # 当前 J6 = 350（≡ −10，同一姿态、仍在正面）→ 同样取自身变体 10
+    tgt3, _, _ = S.resolve_target_joints(
+        "A2", dirty, lambda: [0, 0, 0, 0, 0, 350.0], face=S.FACE_KEEP)
+    assert tgt3[5] == 10.0, "350° ≡ −10°（同一姿态、正面）→ 自身变体 10（不是乱转）"
+    # 拿不到当前姿态 → **拒绝**（不是退化成"该点自身值"）
+    tgt4, _j6o4, why4 = S.resolve_target_joints("A2", dirty, lambda: None, face=S.FACE_KEEP)
+    assert tgt4 is None and why4, "拿不到当前 J6 必须拒绝 —— 判不了面 = 保证不了不跨面"
 
 
 def test_move_keep_at_raw_slot_keeps_face_and_records_it(monkeypatch):
@@ -1623,7 +1676,13 @@ def test_resolve_target_joints_non_raw_unaffected_by_fallback():
 
 
 def test_every_raw_slot_entry_passes_keep_source():
-    """★★ **源码钉（逐入口）**：所有"会把目标点设为原料位"的入口，都必须把面归一成 keep。
+    """★★ **源码钉（逐入口）**：所有"会把目标点设为原料位"的入口，都必须把面归一。
+
+    ★★ 2026-10-11 旋转管控后，归一有**两个名字**：
+      · `face_for_target(name, want)` —— 直接声明"去原料位就 keep"（流程内直接用）；
+      · `effective_face(name, want, rotate=...)` —— **旋转闸门**：未授权 → 一律 keep；
+        授权 → 内部调 `face_for_target`（原料位仍强制 keep）。**HTTP 入口/无人值守路径走这条**。
+    两者都满足"去原料位必 keep"，所以断言接受**任一**。
 
     覆盖（含**用户实测命中的那条** `/sorting/goto`）：
       · `api/sorting.py::api_goto`            —— `/sorting/goto`（分拣页「到点」）= **用户实测那条**
@@ -1650,8 +1709,9 @@ def test_every_raw_slot_entry_passes_keep_source():
     )
     for mod, fname in entries:
         src = inspect.getsource(getattr(mod, fname))
-        assert "face_for_target" in src, \
-            "%s 未把面归一（去原料位可能被翻回正面，用户实测的现象会复现）" % fname
+        ok = ("face_for_target" in src) or ("effective_face" in src)
+        assert ok, \
+            "%s 未把面归一（走 keep / 旋转闸门任一都算；否则去原料位可能被翻回正面）" % fname
 
 
 def test_single_piece_at_a_slot_uses_keep_equivalent_to_front(monkeypatch):
@@ -1701,3 +1761,66 @@ def test_rotation_blacklist_and_guard_not_weakened_by_keep():
 
 
 
+
+
+# ---------------------------------------------------------------- ★★ J6 越界（2026-10-11 现场事故）
+# 现场实录（用户原话）：
+#   「[井字棋] 已停止：运动到「开始/结束点」失败：角度 -360.0° 超出 int16×100 表示范围
+#     (±327.67°)，拒绝下发」→ 本局被终止。用户要求"修复所有类似的问题"。
+def test_normalize_j6_never_exceeds_encodable_range():
+    """★★ 事故钉：软限位是 ±360，**比控制器可表示的 ±327.67 宽** ——
+    归一化窗口必须与之取交集，否则 −360 被放行 → 下发被拒 → 整个流程被杀。"""
+    lo, hi = S.j6_limits()
+    assert hi <= S._ENCODE_LIMIT_DEG and lo >= -S._ENCODE_LIMIT_DEG, \
+        "J6 归一化窗口必须 ⊆ 控制器可表示范围（±327），否则会放行 −360"
+    for v in (-1080.0, -720, -360.0, -350, -327.67, 0, 180, 327.67, 350, 360.0, 720):
+        got = S.normalize_j6(v)
+        assert -S._ENCODE_LIMIT_DEG <= got <= S._ENCODE_LIMIT_DEG, \
+            "normalize_j6(%s) = %s 仍越界（会被 encode_angle 拒绝）" % (v, got)
+        d = (float(v) - got) / 360.0
+        assert abs(d - round(d)) < 1e-9, "折出来的必须是**等价姿态**（相差整圈），不是改目的"
+
+
+def test_normalize_j6_zero_regression_for_legal_values():
+    """★ 零回归钉：窗口内的**合法值原样返回**（不许把 180 折成 −180）。"""
+    for v in (0.0, 30.0, -30.0, 90.0, 180.0, -180.0, 300.0, -300.0):
+        assert S.normalize_j6(v) == v
+
+
+def test_back_j6_never_returns_minus_360():
+    """★★ 事故复现钉：点自身 J6 = −180、当前 J6 靠近 −360 一侧时，旧实现返回 **−360**；
+    现在必须给出可表示的等价角（−360 ≡ 0）。"""
+    for cur in (-350.0, -359.0, 10.0, None):
+        got = S.back_j6(-180.0, cur)
+        assert -S._ENCODE_LIMIT_DEG <= got <= S._ENCODE_LIMIT_DEG, \
+            "back_j6(-180, %s) = %s 越界" % (cur, got)
+    assert S.back_j6(-180.0, -350.0) == 0.0, "−180 的反面 = 0（−360 与 0 是同一姿态）"
+
+
+def test_resolve_target_joints_j6_always_encodable():
+    """★★ 端到端钉：经**唯一解算入口**出来的 J6 一定可以 `encode_angle`（正面/反面/keep 三种）。"""
+    from app.services.modbus import ModbusRobot
+
+    base = [-180.0] * 5 + [-180.0]
+    cur = [-350.0] * 5 + [-350.0]
+    for face in (S.FACE_FRONT, S.FACE_BACK, S.FACE_KEEP):
+        tgt, _ok, reason = S.resolve_target_joints("A2上", base, lambda: list(cur), face=face)
+        assert tgt is not None and reason == "", "face=%s 不该被拒：%s" % (face, reason)
+        assert -S._ENCODE_LIMIT_DEG <= tgt[5] <= S._ENCODE_LIMIT_DEG, \
+            "face=%s → J6=%s 越界" % (face, tgt[5])
+        ModbusRobot.encode_angle(tgt[5])          # 真能编码（旧实现这里会抛）
+
+
+def test_compose_j6_only_normalizes_j6():
+    """★ 切面（`J6正/反面` 原地翻转）走同一条归一化 —— −360 要被折成 0。"""
+    got = S.compose_j6_only([1, 2, 3, 4, 5, 0], -360.0)
+    assert got[:5] == [1.0, 2.0, 3.0, 4.0, 5.0] and got[5] == 0.0
+
+
+def test_encode_angle_still_rejects_real_out_of_range():
+    """★★ 反证钉：**没有改松** —— 真正越界的角度（如 400°）依旧被拒绝。"""
+    import pytest
+    from app.services.modbus import ModbusRobot
+
+    with pytest.raises(ValueError):
+        ModbusRobot.encode_angle(400.0)

@@ -4,13 +4,19 @@
 //
 //   左侧：MonitorLayout 的 3D 视口（与其它页共用同一个 scene/canvas），
 //         示教时看着机器人动，右边点「存点 / 到点」。
-//   右侧：① 就绪（复用现成 RcReadyCard：一键就绪）
-//         ② 页签「井字棋 / 执行 / 点位」（★ 2026-10-11 由两栏改三栏，详见下方 tab 注释）
+//   右侧：① 页签「井字棋 / 执行 / 点位」（★ 2026-10-11 由两栏改三栏，详见下方 tab 注释）
 //         · 井字棋：井字棋卡片 + 手柄测试盒（原来常驻右栏，执行/点位两个 tab 都能看到，
 //                   现统一收进本 tab，只保留一份；棋盘 2D 浮层仍挂 #hud，不属 tab 内容）
 //         · 执行：参数 + 空跑/开始/暂停/继续/停止 + 进度 + 判色 + 三列占用
 //         · 点位：精简点动 + A/B 各 9 格 × 2 槽（正上位 & 料位）+ C + 开始/结束点
 //                 每个点位槽：存点（记当前位置）/ 到点（复核）/ 清空
+//
+// ★★ 2026-10-11 更正（原注释漂移）：本页**没有页内「一键就绪」入口** ——
+//   就绪由底部状态区的「真机链路」片（内含完整 RcReadyCard）统一承担，
+//   与点位执行页 `PointExecView` 同一口径（那边确有 `<RcReadyCard>`，本页没有，别再照抄旧注释）。
+//   本页「开始」的可点判据（`canStart`）★ 2026-10-12 起**已含就绪门控**（`rc.ready`）——
+//   未就绪时按钮直接灰掉（不再"按了才被后端 409 拒"）；后端统一闸门仍作兜底。
+//   ★ 「到点 / 切面」同样门控（`canGoto`），但「存点 / 删除」**保持可用**（未就绪也能录点）。
 //
 //   38 个点位：A1–A9+A1上–A9上(18) + B1–B9+B1上–B9上(18) + C检测(1) + 开始/结束点(1)
 //   方案：docs/方案-分拣页改版（左仿真·右点位设置与分拣操作）.md
@@ -29,12 +35,8 @@ import { useRobotStore } from "../stores/robot.js";
 import { useExecStore } from "../stores/exec.js";
 import { useRcReadyStore } from "../stores/rcReady.js";
 import { useSorting3dStore } from "../stores/sorting3d.js";
-import { useTicTacToeStore } from "../stores/tictactoe.js";
 import { speak, stageSpeech } from "../ai/speak.js";
 import SortFlow from "./SortFlow.vue";       // ★ 执行流程可视化（for 循环步骤条）
-import TicTacToeBoard from "./TicTacToeBoard.vue";   // ★ 井字棋 2D 棋盘浮层（挂 #hud）
-import TicTacToeCard from "./TicTacToeCard.vue";     // ★ 井字棋右侧卡片
-import GamepadTestCard from "./GamepadTestCard.vue"; // ★ 手柄测试盒（自检：连上没 / 谁触发什么）
 import { updateSortingState } from "../three/manager.js";
 
 const auth = useAuthStore();
@@ -44,23 +46,12 @@ const rc = useRcReadyStore();
 // ★ 分拣 3D 的**装填者**是全局 store（App 级驱动，各页共用同一份显示）；
 //   本页只做两件事：① 把轮询到的 state 喂给 3D；② 显示 store 的自检信息。
 const s3d = useSorting3dStore();
-// ★ 井字棋（机器人真实落子）：棋盘就是 B 区 3×3，与分拣同页、同一条搬运链路。
-//   轮询随本页（sort）进出：进入启、离开停（照 s3d/ai 的门控写法）。
-const ttt = useTicTacToeStore();
 
-// ★ 2026-10-11 用户需求：本页 tab 栏由「执行 / 点位」两栏改成「井字棋 / 执行 / 点位」三栏。
-//   改动动机：井字棋卡片（TicTacToeCard）与手柄测试盒（GamepadTestCard）原先是**常驻右栏**的，
-//   于是执行、点位两个 tab 下都会看到游戏内容。现在把这两张卡统一收进「井字棋」tab，
-//   执行/点位不再出现游戏内容 —— **只保留一份**（不复制任何井字棋逻辑，仍是同一个 store）。
-//   ★ 默认仍选中「执行」：本页主功能是分拣运行，一进页面先看到游戏不合适
-//     （用户原话把「井字棋」列在最前，这里按"主功能优先"取默认，可在回报中让用户纠正）。
-const tab = ref("run");           // ttt | run | point
-// ★ 井字棋 2D 棋盘浮层（挂 #hud）的显示口径（2026-10-11 用户口径："要"把它也收进 tab）：
-//   浮层只在**井字棋 tab 下**出现 —— 执行/点位 tab 不该被游戏棋盘挡住分拣画面。
-//   · 「有对局/复盘」内建判据**复用 store 的 gameVisible**（不在此重写，避免口径两处分叉）；
-//   · 「停在哪个 tab」只有本页知道，故在本地与内建判据取"与"。
-//   ★ 只改"显不显示"：不动浮层定位/尺寸，也不动对局逻辑与轮询进出规则。
-const showTttBoard = computed(() => ttt.gameVisible && tab.value === "ttt");
+// ★★ 2026-10-11 用户口径：「**井字棋要搬走**，放在新页面（手柄执行）」——
+//   故本页 tab 栏由「井字棋 / 执行 / 点位」三栏**收回两栏（执行 / 点位）**：
+//   井字棋卡片 + 2D 棋盘浮层 + 手柄测试盒**全部移走**（现挂 components/PadExecView.vue）。
+//   ★ 一处实现、一处入口：井字棋组件与 store 都不复制，只是换了挂载点。
+const tab = ref("run");           // run | point
 const chk = ref(null);            // 38 点位体检
 const chkErr = ref("");
 const st = ref(null);             // 分拣进度
@@ -100,6 +91,11 @@ const pointMsg = ref("");
 let timer = null;
 let authWatcher = null;    // controlActive 监听（用于令牌变化时启停轮询），卸载时解除
 
+// ★★ 2026-10-11 注明（防"改一处漏一处"）：这份槽位名单的**权威来源是后端**
+//   `backend/app/services/sorting.py::A_SLOTS/B_SLOTS`（`A%d/B%d` 1..9，行优先）。
+//   这里是**跨语言的副本**（前端不下载点位名单，只按同一命名约定渲染网格）——
+//   若改槽位规则（增删/改名），**必须同时改后端**，否则界面格子与后端点位校验会悄悄脱节。
+//   同口径的其它副本：`games/tictactoe.js`（cell i ↔ B(i+1)）、`three/sortingBlocks.js`（`B%d`）。
 const A_SLOTS = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9"];
 const B_SLOTS = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9"];
 
@@ -111,15 +107,13 @@ const bCells = B_SLOTS.map((s) => ({ key: s, slots: [
 const extraSlots = [
   { name: "C检测", label: "摄像头位" },
   { name: "开始/结束点", label: "开始/结束" },
-  // ★ 2026-10-10 用户口径：新增两个**只有 J6 不同**的可录入姿态，供 J6 双面分拣
-  //   在「正面 / 反面」之间切换（用同一位置覆盖左右两侧）。
-  //   名字必须与后端 services/sorting.py 的 OPTIONAL_EXTRA_POINTS、
-  //   api/sorting.py 的 DUAL_FACE_FLIP_POINT 完全一致（回归钉会比对源码）。
-  // ★ 2026-10-11 用户反馈："J6 的坐标不对，你应该只存储/使用 J6，别的五个轴不用"
-  //   → 这两项打 `j6Only: true`：坐标区**只显示 J6 一个值**，并如实标注"仅 J6 有效"。
-  //   （翻转的实际下发也已在后端 `_move_flip_j6` 里改成只覆盖第 6 轴，这里同步显示口径。）
-  { name: "J6正面", label: "J6 正面（下板 · 正常面）", j6Only: true },
-  { name: "J6反面", label: "J6 反面（上板 · 翻转面）", j6Only: true },
+  // ★ J6 正面/反面两个切面**按钮**（名字必须与后端 services/sorting.py 的
+  //   J6_FACE_FRONT_POINT/J6_FACE_BACK_POINT 一字不差，回归钉会比对源码）。
+  //   ★★ 2026-10-12 终版（用户口径「不用录制正反面」）：这两项是**虚拟切面命令** ——
+  //   不读点位库、按"当前实时姿态 + 点名"自动折算（正面 = 该点自身录制 J6、
+  //   反面 = 当前点 J6 − 180），无需示教、绿点常亮；库里历史遗留行可删可留。
+  { name: "J6正面", label: "J6 正面（下板 · 正常面）" },
+  { name: "J6反面", label: "J6 反面（上板 · 翻转面）" },
 ];
 
 /** 未示教名单（体检结果里就是"缺哪些"）→ 用来判断每个点位槽的状态。 */
@@ -139,16 +133,6 @@ const isTaught = (name) => {
   if (!chk.value) return false;                          // ★ 未体检 → 未知，不得当作已示教
   return !!chk.value.ok || !missing.value.has(name);
 };
-
-// ★ 快速分拣（双面）必须的两个可录入点 —— 名字与后端一致的唯一口径：
-//   services/sorting.py 的 OPTIONAL_EXTRA_POINTS / api/sorting.py 的 DUAL_FACE_FLIP_POINT。
-//   为什么两个都要查、且**沿用上面的 isTaught**：后端跑到翻转会按名字找点，
-//   少一个就是"跑到一半找不到点"；而这两个点不在 38 体检名单里，必须看点位库(exec.points)
-//   里是否真存过（isTaught 对可选点就是这个语义），不能另写一套查询。
-const DUAL_FACE_POINTS = ["J6正面", "J6反面"];
-const dualFaceMissing = computed(() => DUAL_FACE_POINTS.filter((n) => !isTaught(n)));
-// 选了快速、却缺点位 → 拦下启动（正常模式不拦，保持现状）。
-const dualFaceBlocked = computed(() => dualFace.value && dualFaceMissing.value.length > 0);
 
 // ---------- 点位坐标 与 残影 ----------
 // ★ 为什么接残影：只看一行数字看不出"这个点到底摆在哪"。悬停/点选让 3D 里的残影
@@ -171,22 +155,6 @@ function coordText(p) {
   const j = p.joints;
   if (!j || !j.length) return "无坐标";
   return j.map((v) => Number(v).toFixed(1)).join("  ");
-}
-
-/**
- * J6-only 点（`J6正面` / `J6反面`）的坐标显示：**只显示第 6 轴**。
- *
- * ★ 为什么这两行只显示 J6（用户 2026-10-11 反馈："J6 的坐标不对，你应该只存储 J6 的坐标，
- *   别的五个点不用"）：双面翻转**只用 J6** 切换用哪一面 —— J1~J5 由后端
- *   `_move_flip_j6` 保持"当前实时姿态"原样不动。列表里再列 6 个关节值会让人误以为
- *   那 5 个轴也参与翻转（界面在"编故事"），所以这里如实只报 J6。
- * ★ 存点仍走 `/sorting/teach`、仍存 6 值（**点位库格式不变**）—— 只是**使用/显示**只看 J6。
- */
-function j6Text(p) {
-  const j = p && p.joints;
-  if (!j || j.length < 6) return "未示教";
-  const v = Number(j[5]);
-  return Number.isFinite(v) ? "J6 = " + v.toFixed(1) + "°" : "未示教";
 }
 
 /**
@@ -324,8 +292,10 @@ let _logPrimed = false;   // ★ 首轮只对齐游标：不回放上一次分�
 function logTick() {
   const s = st.value;
   if (!s) return;
+  // ★★ 2026-10-11：签名补上 `last_point` —— 阶段名不变但点位变了时，
+  //   那条带点位名的日志（下面 `（${s.last_point}）`）原本会被整体跳过。
   const key = [s.stage, s.piece, s.color, s.conf, s.target, s.error,
-               s.finished, s.ok, s.sim_color].join("|");
+               s.finished, s.ok, s.sim_color, s.last_point].join("|");
   if (key === _logKey) return;
   const prev = _logPrev || {};
   _logKey = key;
@@ -506,7 +476,12 @@ async function goto(name) {
     });
     const d = await r.json().catch(() => ({}));
     pointMsg.value = r.ok
-      ? (d.j6_only ? ("已在原地切到 " + name + "（仅 J6，J1~J5 未动）") : ("已到 " + name))
+      ? (d.j6_only ? ("已在原地切到 " + name + "（仅 J6，J1~J5 未动）")
+         // ★ 2026-10-12：原位→另一原位 = 后端自动拆的**安全路径**（X → X上 → Y上 → Y），
+         //   如实把路径显示出来，别让人以为"怎么绕了一圈"是 bug。
+         : (Array.isArray(d.path)
+            ? ("已到 " + name + "（经正上位安全路径：" + d.path.join(" → ") + "）")
+            : ("已到 " + name)))
       : ((d.j6_only ? "切面失败：" : "到点失败：") + errText(d, r.status).base);
   } catch (e) { pointMsg.value = "到点异常：" + ((e && e.message) || e); }
   finally { pointBusy.value = ""; }
@@ -560,8 +535,13 @@ const trayText = computed(() => {
 const judgeOff = computed(() => !!(st.value && st.value.judge === false));
 const missingCount = computed(() => (chk.value ? chk.value.missing.length : 38));
 const canStart = computed(() => auth.controlActive && !busy.value && !running.value
-  && !!(chk.value && chk.value.ok) && !dualFaceBlocked.value);
+  && !!rc.ready && !!(chk.value && chk.value.ok));
 const canTeach = computed(() => auth.controlActive && !running.value);
+// ★★ 2026-10-12（用户口径「智能分拣的**执行**和**点位**可以预留，**不能到达**，但是**可以录点**」）：
+//   「开始」（真实下发）与「到点 / 切面」（真实运动）都必须**完整就绪**才可点；
+//   「存点 / 删除」只写配置、不下发运动 → 保持可用（**未就绪也能录点**）。
+//   判据唯一来源 = 后端算出的 `rc.ready`（伺服 + 210 已运行 + AUTO + 无报警/急停）。
+const canGoto = computed(() => canTeach.value && rc.ready);
 const bCell = computed(() => {
   const map = {};
   for (const c of placement.value || []) for (const s of (c.used || [])) map[s] = c.color;
@@ -577,34 +557,29 @@ watch(() => robot.activeView, (v) => {
     if (timer) { clearInterval(timer); timer = null; }
     // ★ 不再隐藏 3D：托盘盒/方块/摄像头是**执行状态的显示**，不是本页的装饰，
     //   离开本页后由全局 store（stores/sorting3d.js）的 1s 轮询继续喂 state。
-    ttt.stopPolling();             // 井字棋轮询也随本页离开停掉
   } else {
     if (!timer && auth.controlActive) { timer = setInterval(poll, 800); }
     if (auth.controlActive) exec.loadPoints();
     s3d.ensure();                  // 幂等：已装填就是零成本，未装填则补一次
-    ttt.startPolling();            // 进入本页启动井字棋轮询（未授权内部自发早退）
   }
 });
 onMounted(() => {
   if (auth.controlActive) { loadCheck(); exec.loadPoints(); }
   s3d.ensure();                    // 兜底：直接刷新落在本页时也要装填（App 级同时也会做）
   // ★ 未授权不启动轮询定时器（拿令牌后由下方 controlActive watch 兜底拉起）
-  if (auth.controlActive) { poll(); timer = setInterval(poll, 800); ttt.startPolling(); }
+  if (auth.controlActive) { poll(); timer = setInterval(poll, 800); }
   // ★ 令牌到手/失效 → 自动启停轮询（避免未授权时 800ms 一次 401 刷屏）
   authWatcher = watch(() => auth.controlActive, (on) => {
     if (on) {
       if (!timer) { loadCheck(); exec.loadPoints(); poll(); timer = setInterval(poll, 800); }
-      ttt.startPolling();
     } else {
       if (timer) { clearInterval(timer); timer = null; }
-      ttt.stopPolling();
     }
   });
 });
 onBeforeUnmount(() => {
   if (timer) clearInterval(timer);
   if (authWatcher) authWatcher();
-  ttt.stopPolling();
   exec.hideGhosts();
   // ★ 3D 不再在此隐藏（各页常显）；几何/材质仍由 manager.disposeAll 统一释放。
 });
@@ -625,21 +600,14 @@ watch(() => rc.readyTick, (n) => {
            views[0]='sort' 是本页（面板归属），带上 'live' 让真实监控页共用同一实例，
            避免"同一台相机被两个面板各开一路"。 -->
       <CameraPanel :views="['sort', 'live']" />
-      <!-- ★ 井字棋 2D 棋盘浮层：只在「井字棋」tab 且（有对局/复盘）时显示
-           （showTttBoard = store.gameVisible && tab==='ttt'，见上方计算属性）；
-           执行/点位 tab 不显示它，避免挡住分拣画面。无对局时组件自身也 v-if 隐藏，
-           键盘 ↑↓←→ + Enter / 鼠标点格落子（见 TicTacToeBoard.vue）。 -->
-      <TicTacToeBoard v-if="showTttBoard" />
     </template>
 
-    <!-- 功能 Tab：井字棋 / 执行 / 点位 —— 用带图标的 tab 栏切换，
+    <!-- 功能 Tab：执行 / 点位 —— 用带图标的 tab 栏切换，
          选中态青色发光 + 底部指示条（Sentinel 指挥中心风格），与顶栏语言一致。
          ★ 2026-10-11：样式 .srt-tabs/.srt-tab 已从本组件 scoped 提到全局（index.html），
-           供本页与「点位执行」页共用同一套视觉（用户要求两处 tab 栏一致）。 -->
+           供本页与「点位执行」页共用同一套视觉（用户要求两处 tab 栏一致）。
+         ★ 2026-10-11 二次：井字棋 tab 已**移走**（搬进「手柄执行」页）→ 本页只剩两栏。 -->
     <div class="srt-tabs" role="tablist">
-      <button class="srt-tab" :class="{ on: tab === 'ttt' }" @click="tab = 'ttt'">
-        <Icon name="grid" :size="13" /><span>井字棋</span>
-      </button>
       <button class="srt-tab" :class="{ on: tab === 'run' }" @click="tab = 'run'">
         <Icon name="play" :size="13" /><span>执行</span>
       </button>
@@ -689,13 +657,9 @@ watch(() => rc.readyTick, (n) => {
           </div>
         </div>
         <p v-if="dualFace" class="small muted">
-          双面一趟两件：在 <b>J6正面</b>/<b>J6反面</b> 之间翻转，用同一位置覆盖左右两侧。
-          <b>首次使用请先空跑。</b>
-        </p>
-        <!-- ★ 护栏：选了快速却缺 J6正面/J6反面 → 禁用启动并写明原因（绝不带着缺失硬跑）。 -->
-        <p v-if="dualFaceBlocked" class="small err">
-          <Icon name="alert" :size="12" /> 快速分拣需要先录入 <b>J6正面</b> / <b>J6反面</b> 两个点
-          （当前缺：{{ dualFaceMissing.join("、") }}）。切到「点位」页示教后再开跑。
+          双面一趟两件：在 <b>J6正面</b>/<b>J6反面</b> 之间原地翻转（J1~J5 不动），
+          用同一位置覆盖左右两侧。<b>无需录制正反面</b> —— 正面 = 该点自身录制的 J6、
+          反面 = 当前点 J6 − 180，由后端自动折算。<b>首次使用请先空跑。</b>
         </p>
         <div class="pf-row">
           <label>C 区停顿</label>
@@ -877,7 +841,7 @@ watch(() => rc.readyTick, (n) => {
                             title="把机器人当前位置存为该点位" @click="teach(sl.name)">
                       <Icon name="check" :size="11" />
                     </button>
-                    <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
+                    <button class="mini-btn" :disabled="!isTaught(sl.name) || !canGoto || pointBusy === sl.name"
                             title="移到该点位复核" @click="goto(sl.name)">
                       <Icon name="target" :size="11" />
                     </button>
@@ -920,7 +884,7 @@ watch(() => rc.readyTick, (n) => {
                             title="把机器人当前位置存为该点位" @click="teach(sl.name)">
                       <Icon name="check" :size="11" />
                     </button>
-                    <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
+                    <button class="mini-btn" :disabled="!isTaught(sl.name) || !canGoto || pointBusy === sl.name"
                             title="移到该点位复核" @click="goto(sl.name)">
                       <Icon name="target" :size="11" />
                     </button>
@@ -941,56 +905,42 @@ watch(() => rc.readyTick, (n) => {
 
       <div class="card">
         <h3><Icon name="camera" :size="15" /> C 区 与 开始/结束点 · J6 双面</h3>
+        <!-- ★★ 2026-10-12 终版：J6正面/反面 = **虚拟切面命令**（按点名驱动、不读库，
+             用户口径「不用录制正反面」）→ 绿点常亮（随时可用）、**没有「存点」**
+             （后端 /sorting/teach 对这两个名字直接 400）、切面不需要库行；
+             「删除」只用于清理历史遗留行（有行才可点）。 -->
         <div class="slot wide" v-for="sl in extraSlots" :key="sl.name"
              @mouseenter="hover(sl.name)" @mouseleave="unhover()">
-          <span class="sdot" :class="isTaught(sl.name) ? 'on' : ''"></span>
+          <span class="sdot on"></span>
           <span class="sname" :class="{ pinned: pinnedName === sl.name, pinnedb: pinnedBName === sl.name }"
-                :title="sl.name + ' · ' + (sl.j6Only ? j6Text(ptOf(sl.name)) : coordText(ptOf(sl.name)))"
+                :title="sl.name + ' · 虚拟切面命令（无需录制）'"
                 @click="pin(sl.name, $event)">{{ sl.label }}<span class="muted"> · {{ sl.name }}</span></span>
-          <button class="mini-btn" :disabled="!canTeach || pointBusy === sl.name"
-                  title="把机器人当前位置存为该点位" @click="teach(sl.name)">
-            <Icon name="check" :size="12" /> 存点
+          <button class="mini-btn" :disabled="!canGoto || pointBusy === sl.name"
+                  title="原地切面：只在当前位置转 J6（J1~J5 不动）" @click="goto(sl.name)">
+            <Icon name="target" :size="12" /> 切面
           </button>
           <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
-                  :title="sl.j6Only ? '原地切面：只在当前位置转 J6（J1~J5 不动）'
-                                    : '移到该点位复核'"
-                  @click="goto(sl.name)">
-            <Icon name="target" :size="12" /> {{ sl.j6Only ? "切面" : "到点" }}
-          </button>
-          <button class="mini-btn" :disabled="!isTaught(sl.name) || !canTeach || pointBusy === sl.name"
-                  title="删除该点位" @click="clearPoint(sl.name)">
+                  title="删除该点位（历史遗留行，可删可留）" @click="clearPoint(sl.name)">
             <Icon name="trash" :size="12" />
           </button>
         </div>
-        <div class="coord wide" v-for="sl in extraSlots" :key="'c-' + sl.name"
-             :title="sl.name + ' · ' + (sl.j6Only ? j6Text(ptOf(sl.name)) : coordText(ptOf(sl.name)))">
-          <b>{{ sl.name }}</b>
-          <!-- ★ J6 正面/反面：**只渲染 J6**（其余轴不参与翻转）；其余点位照旧显示完整 6 值。
-               ★ S2：原来"只用 J6 / 其余轴不用 / J1~J5 保持实时姿态"在本卡讲了三遍，
-                 现坐标行只留数值，语义统一收敛到卡片底部那**一段**说明。 -->
-          <template v-if="sl.j6Only">
-            {{ j6Text(ptOf(sl.name)) }}
-          </template>
-          <template v-else>{{ coordText(ptOf(sl.name)) }}</template>
+        <div class="coord wide" :title="'虚拟切面命令（无需录制，按点名自动折算）'">
+          <b>J6正面 / J6反面</b>
+          正面 = 该点自身录制的 J6；反面 = 当前点 J6 − 180（自动折算）
         </div>
         <p class="small muted">「开始/结束点」是一个点：一轮开始先去、结束与异常都回这里。</p>
-        <p class="small muted">J6 正面/反面<b>只用 J6</b>；翻转时 J1~J5 保持机器人<b>当前实时姿态</b>。</p>
+        <p class="small muted">J6 正面/反面<b>只用 J6</b>；翻转时 J1~J5 保持机器人<b>当前实时姿态</b>，<b>无需录制正反面</b>。</p>
       </div>
     </template>
 
-    <!-- ================= 井字棋 ================= -->
-    <!-- ★ 井字棋卡片 + 手柄测试盒：原先常驻右栏（执行/点位两个 tab 都能看到），
-         现统一收进本 tab（**只保留一份**，逻辑仍是同一个 store，不复制）。
-         棋盘 2D 浮层仍挂在 #hud（视口右上角）——它是"对局显示"不是 tab 内容，故不在此处。 -->
-    <template v-else>
-      <TicTacToeCard />
-      <GamepadTestCard />
-    </template>
+    <!-- ★ 井字棋卡片 / 2D 棋盘浮层 / 手柄测试盒：2026-10-11 已**整体搬走**到
+         「手柄执行」页（components/PadExecView.vue 的右栏「井字棋」tab）。
+         本页不再渲染任何游戏内容 —— 一处实现、一处入口。 -->
   </MonitorLayout>
 </template>
 
 <style scoped>
-/* ---- 功能 Tab（井字棋 / 执行 / 点位）----
+/* ---- 功能 Tab（执行 / 点位）----
    基础样式 .srt-tabs / .srt-tab （满宽分栏 + 选中态青色发光下划线）已提到**全局**
    index.html，供本页与「点位执行」页共用同一套视觉（用户要求两处 tab 栏一致）。
    本组件只保留下面这几条**行内尺寸覆盖**（分拣模式分段控件复用同一套视觉但不是满宽）。 */

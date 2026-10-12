@@ -1,31 +1,46 @@
 <script setup>
 // =====================================================================
-// 井字棋卡片（分拣页右侧栏）—— 难度 / 开始 / 暂停⇄继续 / 停止 / 复位 / 复盘
+// 井字棋卡片（**手柄执行页**右侧栏「井字棋」tab）—— 难度 / 开始 / 暂停⇄继续 / 停止 / 复原 / 回放
+//   ★ 2026-10-11：从「智能分拣」页**整体搬入**「手柄执行」页（用户口径"井字棋要搬走"）。
 //
 // 方案：docs/方案-井字棋对弈（机器人真实落子）.md §3.2
+//       docs/方案-井字棋3D棋子视觉与复原（颜色·圆叉·坠落·真机）.md（本轮「复原」合并 + 默认真机）
 //
 // ★ 安全口径：
-//   · **默认空跑**（dry_run=true）：只走 2D/3D 演示，不动机器人；
-//     切到「真实下发」要**二次确认**（会真的搬棋子）。
+//   · ★★ 2026-10-11（用户："**不用空跑啊，要真机移动**"）：**默认真实下发**（会真搬棋子），
+//     开局前**二次确认**；勾「空跑」才只走 2D/3D 演示（排练用）。硬安全网 = 后端未就绪闸门
+//     （伺服未上电 → 统一 409）+ 顶栏速度 + 停止/急停。
 //   · 全部控制走 store（带令牌）；未授权时按钮禁用，不发请求。
 //   · 暂停⇄继续**复用** SortingView 的琥珀色 .pause-btn 样式与 togglePause 语义：
-//     暂停=原地冻结可续；停止=作废本局（棋子留在棋盘，可点「复位」搬回 A 区）。
-//   · ★★ 2026-10-11 用户口径：「机器人复盘要真实复盘，机器人要动起来，每一个棋子放到原位」——
-//     **「复盘」= 真实复盘**：机器人真的动，逐个把棋子搬回**原位**（来源 A 格，落子逆序），
-//     完成后棋盘清空/复位到初始（与 2D/3D 同源）。真实局要**二次确认**（会真动机器人）。
-//   · 「回放」是**只读的棋谱查看**（逐手回看，不动机器人），与真实复盘分开、互不混淆。
+//     暂停=原地冻结可续；停止=作废本局（棋子留在棋盘，可点「复原」搬回 A 区）。
+//   · ★★ 「复原」= **复位 + 复盘合并**（用户 2026-10-11 口径）：机器人**真的动**，
+//     按落子逆序逐个把棋子搬回**原位**（来源 A 格）；真实局要**二次确认**。
+//     空跑局没有真实搬动过棋子 → 后端只清棋盘并**如实说明**（不假装搬过）。
+//   · 「回放」是**只读的棋谱查看**（逐手回看，不动机器人），与「复原」（真机）分开、互不混淆。
 // =====================================================================
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import Icon from "./Icon.vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useTicTacToeStore } from "../stores/tictactoe.js";
 import { useRobotStore } from "../stores/robot.js";
+import { useExecStore } from "../stores/exec.js";
+import { usePadStore, PAD_TAB_TTT } from "../stores/pad.js";
+import { useRcReadyStore } from "../stores/rcReady.js";
 import { diffCn, resultCn, symCn } from "../games/tictactoe.js";
 import { onGamepadConnection, subscribeGamepad } from "../games/gamepad.js";
 
 const auth = useAuthStore();
 const ttt = useTicTacToeStore();
 const robot = useRobotStore();
+// ★ 井字棋卡片现在挂在「手柄执行」页的右栏 tab 里 —— 手柄归属由 pad.tab 决定。
+const pad = usePadStore();
+// ★★ 2026-10-11：速度**实时跟随右上角滑块**（长流程下一步生效）——
+//   以前这里显示的是"**开局快照**"，跑起来后拖滑块不变，现场看到就是"我设 40 它按 10"。
+const exec = useExecStore();
+// ★★ 2026-10-12：井字棋的「执行类」按钮（**开始 / 复原**）在**未就绪**时也一律灰掉
+//   （用户口径「手柄的、井字棋的哪些执行按钮也不让点（没有就绪的话）」）。
+//   ★ 「停止 / 暂停继续」**不**加这道门 —— 它们是"刹车"，任何情况下都必须能按。
+const rc = useRcReadyStore();
 
 const DIFFS = ["easy", "normal", "hard"].map((k) => ({ k, cn: diffCn(k) }));
 // ★ 自证约定的可选颜色（2026-10-10 用户口径："也可以切换别的颜色，用户自己选吧"）
@@ -42,6 +57,9 @@ const modeText = computed(() => {
   return ttt.dryRun ? "拍照自证（空跑不判色）" : "拍照自证";
 });
 const canCtrl = computed(() => auth.controlActive && !ttt.busy);
+// ★★ 2026-10-12：**执行类**动作（开始 / 复原）额外要求**完整就绪**（`rc.ready`）。
+//   未就绪时机器人不可能动 → 按钮先灰掉，别让人"按了才被后端 409 拒"。
+const canRun = computed(() => canCtrl.value && rc.ready);
 
 const st = computed(() => ttt.st || {});
 const firstText = computed(() => {
@@ -61,36 +79,28 @@ const userSymText = computed(() => symCn(st.value.user_sym));
 const robotSymText = computed(() => symCn(st.value.robot_sym));
 
 async function doStart() {
+  // ★★ 2026-10-11 用户口径（原话「**这个不需要啊**」，附图 = 开局那个 confirm 弹窗）：
+  //   **去掉开局的动作确认弹窗** —— 点一下就开，不再每次挡一下。
+  //   ★ 真机保护一个都没少：统一「未就绪闸门」（伺服未上电一律 409）+ 安全围栏 +
+  //     界面上「真实下发 / 空跑」开关本身（状态肉眼可见）。
   await ttt.start(ttt.difficulty, ttt.dryRun);
 }
 
-/** 空跑 → 真实下发 的切换要二次确认（真实会动机器人）。 */
+/** 真实下发 ⇄ 空跑 的切换：**不再弹确认**（同一条用户口径）。 */
 function onDryChange(e) {
-  const want = !!e.target.checked;
-  if (!want) {
-    const ok = window.confirm("切到「真实下发」会真动机器人搬棋子（全程 5% 速度）。\n确认继续？");
-    if (!ok) { e.target.checked = true; ttt.dryRun = true; return; }
-  }
-  ttt.dryRun = want;
+  ttt.dryRun = !!e.target.checked;
 }
 
-/** 复位：把 B 区棋子搬回 A 区。force=true 跳过弹窗（手柄走"二次确认"，见下）。 */
-async function doReset(force = false) {
-  if (running.value) return;
-  if (!force && !window.confirm("把 B 区已落的棋子搬回 A 区（真实下发时机器人会逐个搬回）？")) return;
+/** ★「复原」（= 复位 + 复盘合并，用户 2026-10-11 口径）：把 B 区已落的子**逐个搬回原位**。
+ *  · 真实局 → **真机搬回**（后端真起线程；伺服未上电会被统一闸门 409）；
+ *  · 空跑局 → 本局没有真实搬动过棋子（无实体可搬）→ 后端只清棋盘并如实说明，无需确认。
+ *  ★ 2026-10-11：`window.confirm` 已按用户口径移除（「这个不需要啊」）。 */
+async function doRestore() {
+  if (running.value || !hasMoves.value) return;
   await ttt.reset();
 }
 
-/** ★ 复盘 = **真实复盘**：机器人真的动，逐个把棋子搬回原位（来源 A 格）。
- *  force=true 跳过弹窗（手柄走"二次确认"）。空跑局不动机器人，无需确认。 */
-async function doReplay(force = false) {
-  if (running.value || !canReplay.value) return;
-  if (!force && !st.value.dry_run
-      && !window.confirm("真实复盘：机器人会逐个把棋子搬回 A 区原位（落子逆序，跟顶栏速度）。\n确认开始？")) return;
-  await ttt.startReplay();
-}
-
-/** 回放 = **只读棋谱查看**（逐手回看，不动机器人）；与真实复盘分开。 */
+/** 回放 = **只读棋谱查看**（逐手回看，不动机器人）；与「复原」（真机）分开。 */
 function doViewReplay() {
   if (ttt.inReplay) ttt.stopReplay();
   else ttt.loadReplay();
@@ -98,33 +108,31 @@ function doViewReplay() {
 
 // ---------------------------------------------------------------- 手柄（Xbox）
 // ★ 与棋盘组件**分工不重叠**：棋盘接「方向 + A 落子」；本卡片接
-//   「Start 开始 / X 暂停⇄继续 / B 停止 / Y 复盘(真实) / View 复位」。
-// ★ 复盘/复位都会真动机器人：手柄没法点 window.confirm 弹窗，所以改成**二次确认** ——
-//   第一次按只提示"再按一次"，3 秒内再按才真的执行（等效于弹窗的确认动作）。
-//   （空跑局不动机器人 → 复盘无需二次确认。）
+//   「Start 开始 / X 暂停⇄继续 / B 停止 / Y、View 复原」。
+// ★ 复原会真动机器人：**界面已不再用弹窗做确认**（2026-10-11 用户口径「这个不需要啊」），
+//   但手柄**按不到任何弹窗**，所以这里保留手柄专有的**二次确认** ——
+//   第一次按只提示"再按一次"，3 秒内再按才真的执行；这是手柄这一路**唯一的**确认手段。
+//   （空跑局不动机器人 → 复原无需二次确认。）
+//   ★ 若哪天用户说"手柄也不要按两次"，把 `padRestoreArm` 这段删掉即可（一处，勿散开写）。
 const padOn = ref(false);
-let padResetArm = 0;
-let padReplayArm = 0;
+let padRestoreArm = 0;
 
 function onPad(action) {
-  if (robot.activeView !== "sort") return;      // 只在分拣页响应，别把全局手柄劫走
+  // ★★ 2026-10-11：井字棋已从「智能分拣」页**搬到「手柄执行」页**（右栏 tab），
+  //   手柄守卫随之改成"**本页 + 井字棋 tab**"。★ 否则会与同一页「执行」tab 抢按键
+  //   （一次按键两个动作 —— 危险）。
+  if (robot.activeView !== "pad" || pad.tab !== PAD_TAB_TTT) return;
   if (!auth.controlActive) return;
   if (action === "start") { if (!running.value) doStart(); return; }
   if (action === "pause") { if (running.value || paused.value) ttt.togglePause(); return; }
   if (action === "stop") { if (running.value || paused.value) ttt.stop(); return; }
-  if (action === "replay") {
-    if (!canReplay.value) return;
-    if (st.value.dry_run) { doReplay(true); return; }   // 空跑：不动机器人，直接复盘
-    const now = Date.now();
-    if (now - padReplayArm < 3000) { padReplayArm = 0; doReplay(true); }
-    else { padReplayArm = now; ttt.msg = "手柄复盘（真实）：请再按一次 Y 确认（3 秒内）"; }
-    return;
-  }
-  if (action === "reset") {
+  // ★ Y(复盘) 与 View(复位) **合并**为「复原」（用户口径：两者就是一个动作）
+  if (action === "replay" || action === "reset") {
     if (running.value || !hasMoves.value) return;
+    if (st.value.dry_run) { doRestore(); return; }   // 空跑：不动机器人，直接复位
     const now = Date.now();
-    if (now - padResetArm < 3000) { padResetArm = 0; doReset(true); }
-    else { padResetArm = now; ttt.msg = "手柄复位：请再按一次 View 确认（3 秒内）"; }
+    if (now - padRestoreArm < 3000) { padRestoreArm = 0; doRestore(); }
+    else { padRestoreArm = now; ttt.msg = "手柄复原（真机）：请再按一次确认（3 秒内）"; }
   }
 }
 
@@ -184,7 +192,8 @@ onBeforeUnmount(() => {
       快速模式：<b>先手随机</b>（不再强制你先下）；机器人先手时<b>先把它的落子显示在 2D/3D</b>
       （提示「机器人已下棋完成·已显示，待搬子」），再<b>等你落子</b> → <b>一趟两子</b>
       （机器人子用正面、你落的那子用反面，靠 J6 翻转）。
-      需先录入 <b>J6正面</b>/<b>J6反面</b> 两个姿态；本轮<b>不与「拍照自证」合并</b>（请二选一）；
+      无需录制正反面（翻转 = 虚拟切面命令：正面 = 该点自身录制的 J6、反面 = 当前 J6 − 180，
+      后端自动折算）；本轮<b>不与「拍照自证」合并</b>（请二选一）；
       「只剩一个空位」时<b>免等待、直接完成</b>（空跑不动机器人）。
     </div>
 
@@ -204,15 +213,15 @@ onBeforeUnmount(() => {
       需 C 检测位已示教、相机三色识别已开启；判不出 / 不符 → <b>放回原位并停止</b>（空跑不判色）。
     </div>
 
-    <!-- 空跑 / 真实下发：默认空跑 -->
+    <!-- 空跑 / 真实下发：★ 默认**真实下发**（用户口径："不用空跑啊，要真机移动"） -->
     <label class="dry-toggle">
       <input type="checkbox" :checked="ttt.dryRun" :disabled="locked" @change="onDryChange" />
-      空跑（<b>不下发运动、不动机器人</b>；取消勾选 = 真实下发）
+      空跑（<b>排练用：不下发运动、不动机器人</b>）；不勾选 = <b>真实下发</b>（默认）
     </label>
 
     <!-- 操作按钮 -->
     <div class="btns">
-      <button class="primary" :disabled="!canCtrl || running" @click="doStart">
+      <button class="primary" :disabled="!canRun || running" @click="doStart">
         <Icon name="play" :size="13" /> {{ st.result || running ? "重新开始" : "开始" }}
       </button>
       <!-- ★ 暂停⇄继续：琥珀色（同 SortingView .pause-btn 语义） -->
@@ -223,14 +232,10 @@ onBeforeUnmount(() => {
       <button v-if="running || paused" class="stop-btn" :disabled="!canCtrl" @click="ttt.stop">
         <Icon name="stop" :size="13" /> 停止
       </button>
-      <button class="mini-btn" :disabled="!canCtrl || locked || !hasMoves" title="把 B 区棋子搬回 A 区"
-              @click="doReset">
-        <Icon name="refresh" :size="13" /> 复位
-      </button>
-      <button class="mini-btn" :disabled="!canCtrl || !canReplay"
-              title="★ 真实复盘：机器人真的动，逐个把棋子搬回 A 区原位（落子逆序，跟顶栏速度）；空跑则只更新棋盘、不动机器人"
-              @click="doReplay">
-        <Icon name="history" :size="13" /> 复盘
+      <button class="mini-btn" :disabled="!canRun || locked || !hasMoves"
+              title="复原：机器人逐个把棋子搬回各自原位 A 格（真机，跟右上角速度）；空跑局只清棋盘、不动机器人"
+              @click="doRestore">
+        <Icon name="refresh" :size="13" /> 复原
       </button>
       <button class="mini-btn" :disabled="!canCtrl || !canReplay"
               title="回放：只按棋谱逐手回看（只查看、不动机器人）"
@@ -247,10 +252,14 @@ onBeforeUnmount(() => {
     <div class="ttt-row"><span class="k">难度</span>
       <span class="v">{{ diffCn(ttt.difficulty) }}</span>
     </div>
-    <!-- ★ 本局速度 = 右上角全局速度（用户口径："右上角多少，机器人速度多少"） -->
+    <!-- ★★ 2026-10-11：速度**实时跟随右上角滑块**（长流程"下一步生效"）——
+         以前显示的是**开局快照**（跑起来后拖滑块不变），现场看到就是"我设 40 它按 10"。
+         现在显示**当前滑块值**；若本局用的是别的值（开局时定下、还没走到下一步），如实并列标出来。 -->
     <div class="ttt-row"><span class="k">速度</span>
-      <span class="v">{{ ttt.speedPct ? ttt.speedPct + "%" : "—" }}
-        <span class="muted">（跟顶栏）</span></span>
+      <span class="v">{{ exec.speed }}%
+        <span class="muted">（跟顶栏滑块）</span>
+        <em v-if="ttt.speedPct && ttt.speedPct !== exec.speed" class="muted">
+          · 开局 {{ ttt.speedPct }}%</em></span>
     </div>
     <div class="ttt-row"><span class="k">模式</span>
       <span class="v">{{ modeText }}</span>
@@ -276,7 +285,7 @@ onBeforeUnmount(() => {
     <!-- ★ 手柄（Xbox / 标准映射）：插上即用；浏览器要求"按任意键"唤醒手柄后才上报 -->
     <div class="pad-row">
       <Icon name="gamepad" :size="12" :class="{ live: padOn }" />
-      <span v-if="padOn" class="pad-on">手柄已连接 · 左摇杆 移动 · 右摇杆 ↑下棋 →暂停 ↓停止 ←复盘 · A 落子 · Start 开始 · View×2 复位</span>
+      <span v-if="padOn" class="pad-on">手柄已连接 · 左摇杆 移动 · 右摇杆 ↑下棋 →暂停 ↓停止 ←复原 · A 落子 · Start 开始 · Y/View×2 复原</span>
       <span v-else>未检测到手柄：接上 Xbox 手柄后按任意键即可</span>
     </div>
 

@@ -213,10 +213,40 @@ console.log("== G. 「快速完成」→ 双面（一趟两件） ==");
      /plan\.get\("dual_face"\) is True/.test(llmSrc));
   ok("_echo 如实标注「本次 = 正常 / 快速」（计划卡/回显同源）",
      /本次 = 正常/.test(aiApi) && /本次 = 快速/.test(aiApi));
-  ok("/ai/exec 把 dual_face 真正传下去（不再恒 False）",
-     /StartIn\(dry_run=True, dual_face=dual\)/.test(aiApi));
+  // ★★ 2026-10-11 修复（"参数写死 → 开关失效 + 界面编故事"这一类）：
+  //   「开始分拣」原来写死 `StartIn(dry_run=True)` —— 于是 AI 页的「空跑」开关**完全不生效**
+  //   （机器人永远不动），而前端日志却按本地开关打印"真实下发"；速度也没传（掉到兜底 5%）。
+  //   现在三者都透传：`dry_run=dry`、`dual_face=dual`、`speed_pct=int(body.speed_pct)`。
+  const aiStore = read("src/stores/ai.js");
+  ok("★ /ai/exec 把 dual_face / dry_run / speed_pct 都真正传下去"
+     + "（dual_face 不再恒 False；dry_run 不再写死 True；速度不再掉 5%）",
+     /StartIn\(dry_run=dry, dual_face=dual,/.test(aiApi)
+     && /speed_pct=int\(body\.speed_pct\)/.test(aiApi)
+     && !/StartIn\(dry_run=True, dual_face=dual\)/.test(aiApi));
+  ok("★ AI 前端：空跑/真机口径以**后端回包**为准（不再只看本地开关 → 不再编故事）",
+     /typeof d\.dry_run === "boolean"/.test(aiStore)
+     && /usedDry \? "空跑" : "真实下发"/.test(aiStore));
   ok("前端计划卡步骤显示本次=正常/快速",
      /本次=快速/.test(chat) && /本次=正常/.test(chat));
+}
+
+console.log("");
+console.log("== G. 语音定稿句的「水位」用句次计数器（同文本不被吞） ==");
+{
+  const asr = read("src/stores/asr.js");
+  const view = read("src/components/AiControlView.vue");
+  // ★★ 2026-10-11 修复（"值当水位"这一类，与运行日志 `log.length` 同源病根）：
+  //   定稿句原来用 `finalText` 本身当变化判据 —— 连说两遍**一模一样**的话时，
+  //   赋的还是同一个字符串 → Vue 认为没变化 → watch 不触发 → **第二句被静默丢弃**。
+  ok("★ asr 新增单调递增 `finalSeq`（每定稿一句 +1）",
+     /finalSeq: 0/.test(asr) && /this\.finalSeq \+= 1/.test(asr));
+  ok("★ 消费方 watch 的是 `finalSeq`（文本仍从 finalText 读）—— 同文本的第二句不会再被吞",
+     /watch\(\(\) => asr\.finalSeq/.test(view) && /asr\.finalText/.test(view)
+     && !/watch\(\(\) => asr\.finalText/.test(view));
+  ok("★ 诊断（`_lastLogKey`/`SortingView`）也把「日志里会用到的字段」全部计入签名",
+     /s\.conf, s\.target, s\.error,\s*\n\s*s\.finished, s\.sim_color\]/.test(read("src/stores/ai.js"))
+     && /s\.finished, s\.ok, s\.sim_color, s\.last_point\]/.test(
+       read("src/components/SortingView.vue")));
 }
 
 console.log("");

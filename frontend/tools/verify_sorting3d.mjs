@@ -303,6 +303,13 @@ const PAYLOAD = {
   ok("四色映射齐全（红/绿/蓝 有效 + 黑 无效）且互不相同",
     colorNames.length === 4 && ["红", "绿", "蓝", "黑"].every((n) => !!SORT_COLOR_HEX[n])
     && new Set(Object.values(SORT_COLOR_HEX)).size === 4);
+  // ★★ 2026-10-11 修复（颜色分叉）：3D 的「绿」原来与**权威色卡**不是同一个绿，
+  //   而本表注释自称"与视觉/后端同名同色"。现与 camera/vision_color.py 的 #1FA74A 对齐；
+  //   前端流程色标 SortFlow.vue 也必须是同一个值（三处同色，改一处必须同步）。
+  ok("★★ 3D 的「绿」与权威色卡/流程色标同一值（#1FA74A）",
+    SORT_COLOR_HEX["绿"] === 0x1fa74a
+    && /"绿":\s*"#1FA74A"/.test(read("src/components/SortFlow.vue"))
+    && /1FA74A/i.test(read("../camera/vision_color.py")));
 
   // C7 空跑：占位色不冒充真实判色
   sb.update({ placement: [], holding: true, color: "红", sim_color: true, dry_run: true });
@@ -529,8 +536,10 @@ console.log("== E. 「每次运行必须从头开始」的界面契约（源码�
     iSuck > 0 && iRel > iSuck && iAtB > 0 && iRel > iAtB,
     `suck@${iSuck} release@${iRel} 放料@${iAtB}`);
   ok("★ 到 B 区先停止吸、再放气（release 在 blow 之前）", iRel > 0 && iRel < iBlow);
-  ok("★ 放气持续时间取自 blow_ms、默认 500ms",
-    /blow_ms: int = Field\(default=500/.test(api) && /int\(body\.blow_ms\)/.test(api));
+  // ★★ 2026-10-11：缺省值改从**工艺时序唯一来源** `services/sorting.py::BLOW_MS` 取（值仍是 500ms）
+  ok("★ 放气持续时间取自 blow_ms、缺省 = S.BLOW_MS = 500ms",
+    /blow_ms: int = Field\(default=S\.BLOW_MS/.test(api) && /int\(body\.blow_ms\)/.test(api)
+    && /^BLOW_MS = 500/m.test(svc));
   ok("★★ 放气**就地**停止（unblow 在回起点之前，不再保持到回起点）",
     iUnblow > iBlow && iBack > iUnblow, `unblow@${iUnblow} 回起点@${iBack}`);
   ok("★★ 异常/取消必须收掉两路气（suck_on 兜底，不许带着负压停在半路）",

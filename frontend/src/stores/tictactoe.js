@@ -47,7 +47,10 @@ export const useTicTacToeStore = defineStore("tictactoe", {
     busy: false,
     // 界面本地两档（开始前可改；开局后卡片锁定）
     difficulty: "normal",
-    dryRun: true,         // ★ 默认空跑（与全项目"默认空跑"安全口径一致）
+    // ★★ 2026-10-11（用户口径：「**不用空跑啊，要真机移动**」）：**默认 = 真实下发**。
+    //   勾上「空跑」才只走 2D/3D 演示、不动机器人（排练用；开局前会二次确认）。
+    //   硬安全网仍在：伺服未上电 → 后端统一 409 拒绝（未就绪闸门）。
+    dryRun: false,
     // ★ 两种模式（2026-10-10 用户口径）：false = 默认（不判色、不去 C 位）；
     //   true = 拍照自证（取件后到 C 位拍照核对颜色，不符/判不出 → 放回原位并停）
     verifyColor: false,
@@ -55,7 +58,8 @@ export const useTicTacToeStore = defineStore("tictactoe", {
     //   true = 快速（一趟两子：机器人子正面 + 用户子反面，J6 双面）。
     //   ★ 本轮：先手**随机**（不再强制用户先行）；机器人先手时**先提前显示**其落子
     //     （后端棋盘与 2D/3D 同源），提示「机器人已下棋完成（已显示，待搬子）」，再等你落子。
-    //   默认**正常**；快速需已录 `J6正面`/`J6反面`（缺 → 开局被拒并说明）。
+    //   默认**正常**；快速翻转 = 虚拟切面命令（2026-10-12 终版「不用录制正反面」，
+    //   不要求库里有 `J6正面`/`J6反面` 两行）。
     fast: false,
     // ★ 自证约定（2026-10-10 用户口径："也可以切换别的颜色，用户自己选吧"）
     //   圆/叉各自应有的颜色 —— 缺省 红/蓝，界面可改，开局随 colors 传给后端。
@@ -118,6 +122,8 @@ export const useTicTacToeStore = defineStore("tictactoe", {
         board: Array.isArray(s.board) ? s.board : null,
         used: Array.isArray(s.used) ? s.used : [],
         holding: !!s.holding,
+        // ★ 预告态：机器人先手"已显示、待搬子"的格子（半透明、不坠落）——与后端 stage 一字对应
+        pending: Array.isArray(s.pending) ? s.pending : [],
       });
     },
 
@@ -262,26 +268,31 @@ export const useTicTacToeStore = defineStore("tictactoe", {
       } finally { this.busy = false; }
     },
 
-    /** 复位：把 B 区棋子搬回对应 A 格（空跑则直接清棋盘）。进行中会 409。 */
+    /** ★「复原」：把 B 区已落的子**按落地逆序逐个搬回各自原位 A 格**。
+     *  ★ 用户口径（2026-10-11）：「复原和复盘合并，就是复原，**不用空跑啊，要真机移动**」——
+     *    真实局**真机搬回**（后端 `/reset` 走真实线程、过未就绪闸门）；
+     *    空跑局没有实体可搬 → 后端只清棋盘并**如实说明**（`dry_run: true`）。进行中会 409。 */
     async reset() {
       if (!this._authed()) return false;
       this.busy = true; this.err = "";
       try {
         const r = await apiControl("/tictactoe/reset", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          // ★ 复位也用"此刻"的右上角速度（中途调过滑块也算数）
+          // ★ 复原也用"此刻"的右上角速度（中途调过滑块也算数）
           body: JSON.stringify({ speed_pct: useExecStore().speed }),
         });
         if (r.status === 401 || r.status === 403) { this._needAuth(); return false; }
         const d = await r.json().catch(() => ({}));
         if (!r.ok || !d.ok) { this.err = errMsg(d, r.status); return false; }
         this.stopReplay();
-        this.msg = d.dry_run ? "已复位（空跑：直接清空棋盘）" : "已开始把棋子搬回 A 区";
+        this.msg = d.dry_run
+          ? "本局是空跑（没有真实搬动过棋子）→ 只清空棋盘"
+          : "已开始复原：机器人逐个把棋子搬回原位（来源 A 格）";
         useExecStore().logLine("info", "[井字棋] " + this.msg);
         await this.poll(false);
         return true;
       } catch (e) {
-        this.err = "复位异常：" + ((e && e.message) || e);
+        this.err = "复原异常：" + ((e && e.message) || e);
         return false;
       } finally { this.busy = false; }
     },
@@ -324,41 +335,10 @@ export const useTicTacToeStore = defineStore("tictactoe", {
     },
 
     /** ★ 真实复盘（2026-10-11 用户口径：「机器人复盘要真实复盘，机器人要动起来，
-     *  每一个棋子放到原位」）：机器人**真的动**，逐个把棋子搬回各自原位（来源 A 格）。
-     *
-     *  只发起后端真实复盘线程（POST /tictactoe/replay，复用 `_carry`，不新增下发通道）；
-     *  进度/回执走轮询到的 `state.stage`（"复盘：搬回第 N/共 M 个棋子 → A?（原位）"）。
-     *  · 空跑局：后端只更新棋盘、不动机器人（同一流程的预演路径），终态同样清空棋盘；
-     *  · 真实局：后端会过"未就绪"闸门（伺服未上电 → 409 统一文案，原样展示不美化）；
-     *  · 速度：沿用右上角那份全局速度（与本局 / 复位同口径）。
-     *  ★ 开始前 `stopReplay()` 退出 2D 回放查看器 —— 让 2D/3D 都跟随**真实**棋盘（不编故事）。 */
-    async startReplay() {
-      if (!this._authed()) return false;
-      this.busy = true; this.err = ""; this.msg = "";
-      try {
-        const r = await apiControl("/tictactoe/replay", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ speed_pct: useExecStore().speed }),
-        });
-        if (r.status === 401 || r.status === 403) { this._needAuth(); return false; }
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok || !d.ok) {
-          this.err = errMsg(d, r.status);
-          useExecStore().logLine("err", "[井字棋] 复盘被拒：" + this.err);
-          return false;
-        }
-        this.stopReplay();
-        this.msg = d.dry_run
-          ? "已开始复盘（空跑：只更新棋盘，机器人不动）"
-          : "已开始复盘：机器人逐个把棋子搬回原位（来源 A 格）";
-        useExecStore().logLine("info", "[井字棋] " + this.msg);
-        await this.poll(false);
-        return true;
-      } catch (e) {
-        this.err = "复盘异常：" + ((e && e.message) || e);
-        return false;
-      } finally { this.busy = false; }
-    },
+     *  每一个棋子放到原位」）—— ★ 本轮已**并入「复原」**：`reset()` 就是真机搬回原位
+     *  （后端 `/reset` 与旧的 `/replay` 是同一实现）。故这里不再单列 `startReplay`——
+     *  **一处实现，一处入口**（杜绝"两条路各写一份"）。
+     *  下面保留的是**只读的 2D 棋谱回放查看器**（逐手回看，不动机器人）。 */
 
     /** 载入棋谱做 **2D 回放查看**（只读数据、逐手回看，不动机器人）。 */
     async loadReplay() {

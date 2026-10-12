@@ -16,7 +16,7 @@ import CameraPanel from "./CameraPanel.vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useRobotStore } from "../stores/robot.js";
 import { useSafetyStore } from "../stores/safety.js";
-import { useRcReadyStore, NOT_READY_HINT } from "../stores/rcReady.js";
+import { useRcReadyStore } from "../stores/rcReady.js";
 import { useExecStore } from "../stores/exec.js";
 import { apiUrl } from "../config.js";
 
@@ -28,10 +28,15 @@ const exec = useExecStore();
 
 // 就绪提示盒：把「链路连接 + 控制器就绪 + 控制权限」合成一个结论；
 // 未就绪时只给一句最该先处理的原因，不罗列整面格表。
-const isReady = computed(() => robot.connected && rc.ready && auth.controlActive);
+// ★★ 2026-10-11 修复"同一页两个判据打架"：横幅与「直接运行」按钮**必须同源**。
+//   原来横幅 = `robot.connected && rc.ready && auth.controlActive`，而按钮用 `exec.canExec`
+//   （多含"残影预演不安全"/"遥测过期"）→ 遥测冻结或残影告警时横幅写着"可以执行代码"，
+//   按钮却是灰的，同一屏两个结论。现在统一以 `exec.canExec` 为准，原因取 `exec.blockReason`。
+const isReady = computed(() => exec.canExec);
 const readyText = computed(() => {
   if (!robot.connected) return "机器人未连接，请先在底部「机器人链路」重连";
-  if (!rc.ready) return NOT_READY_HINT + "（伺服 / 档位 / 报警 / 急停待检查）";
+  const why = exec.blockReason;                 // 单一判据下的"为什么不能下发"
+  if (why) return why;
   return "未获得控制权限，无法下发";
 });
 
@@ -128,8 +133,12 @@ function seqStepCls(i) {
   return "";
 }
 
-/** 执行按钮可用性：需控制令牌 + 没有别的执行在跑 + 序列非空。 */
-const runSeqDisabled = computed(() => !auth.controlActive || exec.seqBusy
+/** 执行按钮可用性：**与「直接运行」同一判据**（`exec.canExec`：权限 + 就绪 + 残影安全）
+ *  + 没有别的执行在跑 + 序列非空。
+ *  ★★ 2026-10-11 修复：原来不含就绪门控 → 机器人离线/未一键就绪时按钮**可点**，
+ *    按下去才被后端 409 拒（"按了却报机器人没就绪"），而同一页另一个下发按钮却是灰的。
+ *    `runSeq(false)` 是**真实下发**，所以必须过同一道门控。 */
+const runSeqDisabled = computed(() => !exec.canExec || exec.seqBusy
   || exec.fileBusy || exec.runBusy || !exec.seqItems.length);
 
 // ---------- 运行日志 ----------

@@ -14,6 +14,7 @@ import { defineStore } from "pinia";
 import { apiControl } from "../net/control.js";
 import { useAuthStore } from "./auth.js";
 import { useExecStore } from "./exec.js";
+import { useRcReadyStore } from "./rcReady.js";
 import { speak, stageSpeech } from "../ai/speak.js";
 
 export const useAiStore = defineStore("ai", {
@@ -44,7 +45,16 @@ export const useAiStore = defineStore("ai", {
       const a = s.parsed && s.parsed.plan && s.parsed.plan.action;
       return a === "move_all" || a === "look_color";
     },
-    canExec: (s) => !!(s.parsed && s.parsed.ok && !s.running && !s.busy),
+    // ★★ 2026-10-12（用户口径「**AI 也不能执行，直接恢复，没有机器人没有就绪就行了**」）：
+    //   「执行」是**真实下发** → 除"解析成功 / 未在跑"外，还必须**持有控制令牌**且**完整就绪**
+    //   （`rc.ready` = 伺服 + 210 已运行 + AUTO + 无报警/急停）。未就绪时按钮直接灰掉，
+    //   不再"按了才被后端 409 拒"（后端统一闸门仍作兜底）。
+    canExec() {
+      const a = useAuthStore();
+      const rc = useRcReadyStore();
+      return !!(this.parsed && this.parsed.ok && !this.running && !this.busy
+                && a.controlActive && rc.ready);
+    },
     echo: (s) => (s.parsed && s.parsed.echo) || null,
     llmOn: (s) => !!(s.cfg && s.cfg.llm_enabled),
   },
@@ -172,7 +182,11 @@ export const useAiStore = defineStore("ai", {
           : null;
         // ★ "每次运行必须从头开始"：日志游标归零，本轮从干净的初始状态重新记
         this._lastLogKey = "";
-        exec.logLine("info", `[AI] 本轮从头开始 · ${this.dryRun ? "空跑" : "真实下发"}：`
+        // ★★ 2026-10-11 修复：空跑/真机口径**以后端回包为准**（流程控制类分支会回 `dry_run`），
+        //   不再只看本地开关 —— 否则会出现"界面写真实下发、后端其实在空跑"这种编故事
+        //   （此前 AI 的「开始分拣」被后端写死 dry_run=True，日志却说真实下发）。
+        const usedDry = (typeof d.dry_run === "boolean") ? d.dry_run : this.dryRun;
+        exec.logLine("info", `[AI] 本轮从头开始 · ${usedDry ? "空跑" : "真实下发"}：`
           + ((this.echo && this.echo.detail) || ""));
         return true;
       } catch (e) {
@@ -222,7 +236,10 @@ export const useAiStore = defineStore("ai", {
     _logTick(silent = false) {
       const s = this.st;
       if (!s) return;
-      const key = [s.stage, s.piece, s.color, s.target, s.error, s.finished].join("|");
+      // ★★ 2026-10-11：签名必须包含**所有**下面日志会用到的字段，否则"只有该字段变化"时
+      //   整条日志被跳过（例：只有 conf 或空跑占位色变了 → 颜色/件数/阶段都没变 → 不写日志）。
+      const key = [s.stage, s.piece, s.color, s.conf, s.target, s.error,
+                   s.finished, s.sim_color].join("|");
       if (key === this._lastLogKey) return;
       this._lastLogKey = key;
       if (silent) return;   // 首轮：只记游标，不回放旧状态

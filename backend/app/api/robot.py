@@ -19,7 +19,7 @@ from app.db.crud import get_recent_poses
 from app.schemas.pose import HealthOut, HistoryOut, MetaOut
 from app.services.collector import collector, feed_run_mode
 from app.services.hub import hub
-from app.services.motion import motion, real_write_enabled
+from app.services.motion import motion, real_write_enabled, snapshot_ready
 from app.services.rc_ready import ReadinessService
 
 router = APIRouter(prefix="/api", tags=["robot"])
@@ -70,8 +70,11 @@ def rc_status():
     snap["service_program"] = prog_no
     # 就绪态一句话判定（前端直接显示）
     b = snap["bits"]
-    snap["ready"] = bool(b["servo"] and b["prog_loaded"] and b["run"]
-                         and (b["auto"] or b["remote"]) and not b["alarm"] and not b["estop"])
+    # ★★ 2026-10-12 修正（真 bug）：判据收敛到 `motion.snapshot_ready`（唯一实现）——
+    #   旧式 `servo and prog_loaded and run` 在**正常运行态**（prog=210/run=1/prog_loaded=0）
+    #   恒为 False（"已加载"位在程序 RUN 起来后会落下），导致前端 `rc.ready` 永远为假、
+    #   所有就绪门控的按钮点不动。详见 `motion.readiness_reason` 的现场注释。
+    snap["ready"] = snapshot_ready(snap)
     # ★★ 2026-10-09 新增：**伺服是否上电**（只看伺服位）。
     #   为什么单列一个字段：用户口径 ——
     #     "如果伺服上电的状态，应该显示取消就绪；如果没有上电伺服，那就需要一键就绪"

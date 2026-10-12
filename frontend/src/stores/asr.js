@@ -24,6 +24,10 @@ export const useAsrStore = defineStore("asr", {
     connecting: false,
     partial: "",        // 当前句（边说边出，灰白 + 光标）
     finalText: "",      // 最近定稿的整句（亮白）
+    // ★★ 2026-10-11 新增：**定稿句次计数器**（单调递增）。为什么不用 `finalText` 当水位：
+    //   连续两句话说出一模一样的文本时，`finalText` 赋的还是同一个字符串 → Vue 认为没变化
+    //   → 消费方的 watch 不触发 → **第二句被静默丢弃**（与运行日志 `log.length` 同一类病根）。
+    finalSeq: 0,
     err: "",
     level: 0,           // 麦克风电平峰值（给按钮做跳动反馈）
     // 内部句柄（不参与渲染）
@@ -151,6 +155,7 @@ export const useAsrStore = defineStore("asr", {
         if (d.slice === 2) {
           // 整句结束 → 定稿上屏，停留一会再淡出
           this.finalText = txt || this.partial;
+          this.finalSeq += 1;      // ★ 水位：每定稿一句就 +1（同文本也不会被 watch 吞掉）
           this.partial = "";
           if (this._hold) clearTimeout(this._hold);
           this._hold = setTimeout(() => {

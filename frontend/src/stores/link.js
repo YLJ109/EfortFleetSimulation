@@ -60,7 +60,9 @@ export const useLinkStore = defineStore("link", {
     runMode: (s) => (s.guide && s.guide.links && s.guide.links.run_mode) || null,
     /** 底栏整体色调：三盏灯里最差的那一档。 */
     tone() { return stripTone(this.pills); },
-    /** 第一个非 ok 的灯（没有就返回 null = 全部正常）。 */
+    /** 第一个非 ok 的灯（没有就返回 null = 全部正常）。
+     *  ★ 2026-10-11 如实注明：当前**没有界面消费方**（底栏统一用 `pills` / `tone`）——
+     *    属预留口径，别误以为"已经有这一处显示了"。 */
     attention() { return worstPill(this.pills); },
     /**
      * 引导条主提示（有未通过项才有）。
@@ -80,6 +82,8 @@ export const useLinkStore = defineStore("link", {
       return (this.guide && this.guide.primary) || null;
     },
     hasToken: (s) => !!(s.guide && s.guide.has_token),
+    /** "引导条没有未通过项"（≈ 链路全绿）。
+     *  ★ 2026-10-11 如实注明：当前**没有消费方**（各页改用 `primary`）—— 预留，勿误以为在用。 */
     ready: (s) => !!s.guide && !s.guide.primary,
   },
   actions: {
@@ -108,6 +112,16 @@ export const useLinkStore = defineStore("link", {
     stop() {
       if (timer) { clearInterval(timer); timer = null; }
     },
+    /**
+     * ★★ 2026-10-11 修复（"水位不可靠 → 假绿"这一类，与运行日志 `log.length` 同源病根）：
+     *   由**外部时钟**无条件推进水位。
+     *   背景：`stale` 用 `tick` 计时，而 `tick` 只在 `load()` 里推进 —— 但**掉线时**
+     *   `App.vue` 会 `link.stop()`（不再轮询）→ `tick` 冻结 → `stale` **永远算不出 true**
+     *   → 摄像头/示教器灯维持"旧绿"。偏偏那正是它要防的场景（"数据早就停了还挂绿灯"）。
+     *   现在由 App 的 1s 时钟（与令牌到期扫描同一个）无条件调用本方法，
+     *   "多久没更新"才真正随真实时间增长。
+     */
+    beat() { this.tick = Date.now(); },
     /** 立即刷一次（做完动作后调用，不等下一个轮询周期）。 */
     async refresh() { await this.load(); },
 

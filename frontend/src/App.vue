@@ -1,4 +1,4 @@
-﻿<script setup>
+﻿﻿<script setup>
 // 根组件：Tab 栏 + 三视图（v-show 保持 3D 场景存活）+ 全局渲染循环 + 安全围栏报警。
 //
 // 三视图共用 MonitorLayout 模板 —— 同一个 scene、同一张 canvas、同一套模型。
@@ -21,6 +21,7 @@ import PointExecView from "./components/PointExecView.vue";
 import ProgramExecView from "./components/ProgramExecView.vue";
 import EventsView from "./components/EventsView.vue";
 import SortingView from "./components/SortingView.vue";
+import PadExecView from "./components/PadExecView.vue";   // ★ 手柄执行页（2D 选点 + 气路 + 井字棋）
 import AiControlView from "./components/AiControlView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import AboutView from "./components/AboutView.vue";
@@ -34,7 +35,7 @@ import {
 } from "./utils/safetyLabels.js";
 import { useLinkStore } from "./stores/link.js";
 import { useExecStore } from "./stores/exec.js";
-import { useRcReadyStore } from "./stores/rcReady.js";
+import { useRcReadyStore, NOT_READY_HINT } from "./stores/rcReady.js";
 import { useSorting3dStore } from "./stores/sorting3d.js";
 import {
   resolveKey, isTypingTarget, tabKeyFor, SHORTCUT_BY_ID,
@@ -109,6 +110,30 @@ watch(() => auth.controlActive, (now, was) => {
 //   本组件只负责"取上下文 → 分派动作"，不在这里写任何键位判断 ——
 //   键盘是"按下去就出事"的东西，判据散在组件里没法断言。
 const exec = useExecStore();
+
+// ★★ 2026-10-11（用户口径「**应该电脑的速度去执行**」）：**拖滑块 → 长流程下一步生效**。
+//   分拣 / 井字棋 / 文件执行 / AI 这类**长流程**原来是"点开始那一刻定速"的，
+//   运行中改滑块**不生效**（现场表现："我调了 40 它按 10 跑"）。这里把滑块值同步给
+//   后端的内存登记处（`POST /control/ui-speed`，**只写一个数、不下发任何运动**），
+//   各流程每一步取点位时读它 → **下一步就按新速度走**（只换速、**不打断**当前这句运动）。
+//   ★ 节流 150ms：拖一次滑块不要打一串请求；★ 无控制令牌时不推（必然 401，纯噪音）。
+let uiSpeedTimer = null;
+let uiSpeedLast = null;
+watch(() => exec.speed, (v) => {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n) || n === uiSpeedLast) return;
+  uiSpeedLast = n;
+  clearTimeout(uiSpeedTimer);
+  uiSpeedTimer = setTimeout(async () => {
+    if (!auth.controlActive) return;      // 没权限不推（后端也要令牌）
+    try {
+      await apiControl("/control/ui-speed", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ speed_pct: n }),
+      });
+    } catch (e) { /* 网络抖动忽略：下一步还会再推；流程仍用开始时那份 */ }
+  }, 150);
+});
 // ★ 需求：底栏"控制中"也要以控制器就绪为准 —— 只授权、未就绪时显示"已授权·待就绪"。
 //   rcReady 的 rc_status 快照由 robot store 经 WS 全局注入，不依赖是否打开过点位执行页。
 const rc = useRcReadyStore();
@@ -363,6 +388,11 @@ function checkTtl() {
   // ★ 审计修复 P1-D8：同一个 1 秒时钟顺带扫一次遥测新鲜度。
   //   后端卡死时 WS 不一定断（TCP 还在），画面会定格但 connected 仍为 true。
   try { robot.sweepTelemetry(); } catch (e) { /* store 未就绪 */ }
+  // ★★ 2026-10-11：同一个 1 秒时钟再推两个"数据新鲜度"水位 —— 必须**无条件**推进，
+  //   否则掉线时（link 停轮询 / 控制器 WS 帧停）水位冻结 → `stale` 永远算不出 true
+  //   → 底栏挂着"旧绿"（最危险的假正常）。详见 stores/link.js::beat / rcReady.js::beat。
+  try { link.beat(); } catch (e) { /* store 未就绪 */ }
+  try { rc.beat(); } catch (e) { /* store 未就绪 */ }
 }
 
 let rafId = null;
@@ -506,6 +536,7 @@ onBeforeUnmount(() => {
   stopLoop();
   if (liveTimer) clearInterval(liveTimer);
   if (ttlTimer) clearInterval(ttlTimer);
+  if (uiSpeedTimer) clearTimeout(uiSpeedTimer);   // ★ 速度同步的节流定时器也要清
   disconnectEvents();
   // ★ 审计修复 P1-D11：卸载必须主动关掉姿态 WS 与执行域定时器。
   //   原实现只 clear 了本地定时器，robot store 的 WebSocket 句柄根本没人管
@@ -606,6 +637,7 @@ onBeforeUnmount(() => {
         </template>
       </ProgramExecView>
       <SortingView v-show="robot.activeView === 'sort'" />
+      <PadExecView v-show="robot.activeView === 'pad'" />
       <AiControlView v-show="robot.activeView === 'ai'" />
       <EventsView v-show="robot.activeView === 'ops'" />
       <!-- 系统设置 / 关于：纯数据页，没有 3D 容器。
@@ -684,9 +716,16 @@ onBeforeUnmount(() => {
         <template v-if="auth.controlActive">
           <!-- ★ 一键就绪 / 取消就绪已收进底部「真机链路」面板（点开即完整 RcReadyCard），
                这里只保留必要的状态与动作，避免同一功能在底栏出现两遍。
-               显示：授权角色 + 剩余有效时间；动作：释放控制权限。 -->
-          <span class="ctrl-badge" :title="'控制授权有效，剩余：' + auth.ttlText" style="font-variant-numeric:tabular-nums">
+               显示：授权角色 + 剩余有效时间；动作：释放控制权限。
+               ★★ 2026-10-11 修复（注释承诺了但代码没做）：底栏"控制中"**也要以控制器就绪为准** ——
+                 只授权、未就绪时显示"已授权 · 待就绪"，免得现场以为"有权限 = 能下发"。
+                 判据用 `rc.ready`（后端判定：伺服+程序运行+档位+无报警+非急停）。 -->
+          <span class="ctrl-badge" :class="{ pending: !rc.ready }"
+                :title="rc.ready ? ('控制授权有效，剩余：' + auth.ttlText)
+                                 : ('已获控制权限，但机器人未就绪（' + NOT_READY_HINT + '）；剩余：' + auth.ttlText)"
+                style="font-variant-numeric:tabular-nums">
             {{ auth.roleLabel ? auth.roleLabel + " · " : "" }}<Icon name="clock" :size="13" /> {{ auth.ttlText }}
+            <template v-if="!rc.ready"> · 待就绪</template>
           </span>
           <button class="ctrl-release" @click="releaseControl" title="释放控制权限">
             <Icon name="power" :size="14" /> 释放
@@ -805,6 +844,8 @@ onBeforeUnmount(() => {
 /* ---- 2026-10-11：原「真机链路」独立切换按钮的样式（.link-toggle）已随按钮移除，
         该功能并入 StatusStrip 的「真机链路」片。 ---- */
 .ctrl-badge.op { color: var(--accent); }
+/* ★★ 2026-10-11：拿到权限但控制器未就绪 → 用琥珀色点出来（不再只显示"管理员"）。 */
+.ctrl-badge.pending { color: var(--warn); }
 .ctrl-request, .ctrl-release { flex: none; width: auto; padding: 7px 10px;
   display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .ctrl-release { color: var(--warn); }

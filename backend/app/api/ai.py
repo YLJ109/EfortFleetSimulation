@@ -70,15 +70,16 @@ def _scene_state() -> Optional[Dict]:
 
 register_scene_source("ai", _scene_state)
 
-# ★ 吸取后停留（ms）：吸上后先停一下再抬，等真空吸牢 —— 与分拣同口径
-#   （api/sorting.py 的 StartIn.suck_hold_ms，2026-10-10 起默认 **500**）。
+# ★ 吸取后停留（ms）：吸上后先停一下再抬，等真空吸牢 —— 与分拣同口径。
+#   ★★ 2026-10-11：数值**不再各写一份**，直接取工艺时序的**唯一来源** `services/sorting.py`
+#     （原来这里与 `api/sorting.py`、`api/tictactoe.py` 三处各写 500，改一处会漏两处）。
 #   ★ 2026-10-10 用户口径："吸住要一直吸住，到放料时才停止吸住" ——
 #     本链路以前抄的是**分拣的旧写法**（抬起来就「停止吸」+ 没有吸牢停留），
 #     件只靠杯内残余负压吊着飞一路；这里与分拣引擎对齐。
-SUCK_HOLD_MS = 500
-# ★ C 检测位停留（秒）—— 与分拣的 StartIn.dwell_ms 默认（500ms）同口径；
+SUCK_HOLD_MS = S.SUCK_HOLD_MS
+# ★ C 检测位停留（秒）—— 与分拣的 `dwell_ms` 同口径（同为 DWELL_MS，500ms）；
 #   其间抓 3 帧（帧间隔见 api/sorting.py 的 FRAME_GAP_S）。
-CAM_DWELL_S = 0.5
+CAM_DWELL_S = S.DWELL_MS / 1000.0
 
 # ★ 本页自己的占位表（A 区是否有料 / B 区各格颜色）—— 见模块头"如实说明"。
 #   只在本页会话内有效，重启后端即清空（不假装知道真实格内容）。
@@ -623,14 +624,28 @@ def api_exec(body: ExecIn, tok: str = Depends(require_control)):
             #   plan 里 `dual_face=True`（语法「快速完成/双面/一趟两件」）→ 本次走双面（一趟两件）；
             #   其余一律一面（默认）—— 大模型降级/没解析出也回落一面。
             dual = bool(plan.get("dual_face"))
-            r = api_start(StartIn(dry_run=True, dual_face=dual), tok)
+            # ★★ 2026-10-11 修复（"参数写死 → 开关失效 + 界面编故事"这一类）：
+            #   原实现写死 `StartIn(dry_run=True, ...)`，于是
+            #     ① AI 页那颗「空跑」开关对"开始分拣"**完全不生效**（机器人永远不动）；
+            #     ② 前端运行日志却按本地开关打印"真实下发" —— 界面与实际相反。
+            #   现在：**尊重调用方的 `dry_run`**（= AI 页的空跑开关），
+            #   并把**右上角全局速度**一起传下去（原来没传 → 落到 StartIn 兜底 5%，"速度不跟滑块"）。
+            #   硬安全网不变：伺服未上电时 `api_start` 内部统一 409 拒绝。
+            dry = bool(body.dry_run)
+            r = api_start(StartIn(dry_run=dry, dual_face=dual,
+                                  speed_pct=int(body.speed_pct)), tok)
+            mode_cn = "空跑" if dry else "真实下发"
+            msg = "已开始分拣（%s，%s）" % (
+                mode_cn, "快速·双面·一趟两件" if dual else "正常·一面")
+            if dry:
+                msg += "；确认无误后可取消勾选「空跑」再执行"
             emit_event("ai", "info", "ai.sorting",
-                       "AI 指令：开始分拣（空跑起步，%s）" % ("快速·双面" if dual else "正常·一面"),
-                       {"raw": rec["raw"], "dual_face": dual}, actor="control")
+                       "AI 指令：开始分拣（%s，%s）" % (
+                           mode_cn, "快速·双面" if dual else "正常·一面"),
+                       {"raw": rec["raw"], "dual_face": dual, "dry_run": dry},
+                       actor="control")
             return {"ok": bool(r.get("ok")), "action": "sorting", "op": "start",
-                    "dual_face": dual,
-                    "message": "已开始分拣（空跑，%s）；确认无误后到分拣页切真机"
-                               % ("快速·双面·一趟两件" if dual else "正常·一面"),
+                    "dual_face": dual, "dry_run": dry, "message": msg,
                     "state": r.get("state")}
         raise HTTPException(400, detail="未知的流程操作")
 

@@ -82,6 +82,62 @@ def real_write_enabled() -> bool:
 SERVO_NOT_READY_MSG = "机器人没有就绪：伺服未上电，请先点「一键就绪」"
 
 
+def _service_program_no() -> int:
+    """常驻点动服务程序号（`motion.jog.service_program`，现场 = 210）；读不到 → 0（= 不校验）。"""
+    try:
+        return int(get_config().get("motion", "jog", "service_program", default=0) or 0)
+    except Exception:                                  # noqa: BLE001
+        return 0
+
+
+def readiness_reason(snap) -> Optional[str]:
+    """**控制器快照 → 「未就绪」原因**（None = 就绪）。★ **唯一判据实现**。
+
+    ★★ 2026-10-12（用户口径：「**一键就绪的要求是程序加载、上电等等**」+ 现场实测修正）：
+      **就绪 = 伺服上电 + 常驻服务程序（210）已就位且运行 + AUTO/远程档 + 无报警 + 无极停**。
+      · ⚠ **不再要求 `prog_loaded`** —— 现场实测「prog=210 / run=1 / **prog_loaded=0** 就是
+        正常运行态」（"已加载"位在程序 RUN 起来之后会**落下**，见
+        `modbus.rc_vacuum_prepare` / `rc_ready._prog_ok` 的现场注释）。
+        旧判据 `servo and prog_loaded and run` 在正常运行时**恒为 False** →
+        「未就绪」被长期误报、所有就绪门控的按钮永远点不动（**本轮修的真 bug**）。
+    ★ 判据与 `rc_ready._prog_ok`（就绪加载流程）**同源**：目标程序号已就位 且 处于运行态。
+    ★ 为什么放在 motion 层：`api/robot.py` 与 `services/collector.py` 都直接 import motion，
+      把唯一实现放这里 → "快照就绪"与"下发前闸门"共用**同一份代码**（§5.5 铁律④ 同屏同源）。
+    ★ 返回的每条文案都以「机器人没有就绪：」开场（现场一眼识别），主语在冒号后**如实**说明
+      到底是哪一条不满足（不笼统写"伺服未上电"—— 那是撒谎）。
+    """
+    if snap is None:
+        return "机器人没有就绪：读不到控制器状态，请先点「一键就绪」"
+    b = snap.get("bits") or {}
+    if not bool(b.get("servo")):
+        return SERVO_NOT_READY_MSG
+    if bool(b.get("estop")):
+        return "机器人没有就绪：急停已按下，请先复位急停"
+    if bool(b.get("alarm")):
+        return ("机器人没有就绪：控制器有报警（%s/%s），请先点「清除报错」"
+                % (snap.get("alarm1"), snap.get("alarm2")))
+    if not (bool(b.get("auto")) or bool(b.get("remote"))):
+        return "机器人没有就绪：示教器不在 AUTO/远程档（T1/T2 下上位机指令无效），请先拨到 AUTO"
+    svc = _service_program_no()
+    if svc > 0:
+        try:
+            prog = int(snap.get("prog") or 0)
+        except (TypeError, ValueError):
+            prog = 0
+        if prog != svc:
+            return ("机器人没有就绪：常驻服务程序（%d）未加载，当前程序号 %s，"
+                    "请先在「真机链路」点「一键就绪」" % (svc, prog or "?"))
+        if not bool(b.get("run")):
+            return ("机器人没有就绪：常驻服务程序（%d）未运行（未挂起在 WAIT），"
+                    "请先在「真机链路」点「一键就绪」" % svc)
+    return None
+
+
+def snapshot_ready(snap) -> bool:
+    """控制器快照 → 是否**完整就绪**（前端 `rc.ready` 与各就绪门控按钮的唯一来源）。"""
+    return readiness_reason(snap) is None
+
+
 def servo_not_ready_reason(dry: bool = False) -> Optional[str]:
     """真实下发前的统一"未就绪"闸门：返回 None = 放行；否则返回统一的拒绝文案。
 
@@ -89,7 +145,11 @@ def servo_not_ready_reason(dry: bool = False) -> Optional[str]:
     - 双闸未开（模拟模式）→ 放行（由 motion.command 播放仿真，不写控制器）。
     - 强制模拟链路（simulate=always / 采集器已降级）→ 放行（交给 motion.command 的
       "模拟链路"分支给更准确的原因，本闸门不抢答）。
-    - 伺服未上电 / 读不到控制器状态 → 返回拒绝文案（fail-safe）。
+    - 否则按 `readiness_reason`（**完整就绪**：伺服 + 210 已运行 + AUTO + 无报警/急停）判定。
+
+    ★★ 2026-10-12（用户口径「**没有就绪，所有能执行/到点/姿势/控制按钮全部禁止**」）：
+      判据由"只看伺服位"**升级为完整就绪** —— 伺服上电但 210 没加载/没运行、或不在
+      AUTO 档、或有报警/急停，一律按"未就绪"拒绝。就绪流程本身**不调用本函数**（防死锁）。
     """
     if dry:
         return None
@@ -106,14 +166,12 @@ def servo_not_ready_reason(dry: bool = False) -> Optional[str]:
     try:
         snap, err = motion.modbus.rc_snapshot()
     except Exception as e:                             # noqa: BLE001 —— 通讯异常按未就绪
-        return ("机器人没有就绪：读不到控制器伺服状态（%s），请先点「一键就绪」"
+        return ("机器人没有就绪：读不到控制器状态（%s），请先点「一键就绪」"
                 % str(e)[:120])
     if snap is None:
-        return ("机器人没有就绪：读不到控制器伺服状态（%s），请先点「一键就绪」"
+        return ("机器人没有就绪：读不到控制器状态（%s），请先点「一键就绪」"
                 % (err or "无响应"))
-    if not bool((snap.get("bits") or {}).get("servo")):
-        return SERVO_NOT_READY_MSG
-    return None
+    return readiness_reason(snap)
 
 
 class MotionService:

@@ -1,4 +1,4 @@
-﻿<script setup>
+﻿﻿<script setup>
 // 摄像头面板：一键启停 + 颜色分拣 + 截图 / 重连。
 // 浮在 3D 视口内，可拖动标题栏移位、拖右下角缩放；位置/尺寸记忆到 localStorage。
 //
@@ -7,6 +7,7 @@
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { useCameraStore } from "../stores/camera.js";
 import { useRobotStore } from "../stores/robot.js";
+import { useUiStore } from "../stores/ui.js";
 import { cameraBase } from "../config.js";
 import Icon from "./Icon.vue";
 
@@ -16,6 +17,10 @@ const props = defineProps({
 
 const cam = useCameraStore();
 const robot = useRobotStore();
+// ★★ 2026-10-11 修复：Q 键「显示 / 隐藏摄像头画面」原来是**假功能**——
+//   `ui.camVisible` 只被读写、没有任何组件消费，按 Q 只弹一句"已隐藏"而画面照旧（编故事）。
+//   现在由本面板真正响应它（`v-show`，不用 `v-if`：保活取流与拖拽/尺寸状态）。
+const ui = useUiStore();
 // 审计修复 P0-ui-1：不再持有单一 imgEl —— MJPEG 改为双缓冲（imgA/imgB，见下方
 // "MJPEG 流"一节），重连绝不再改写/移除**显示路**的 src。
 const liveFlag = ref(false);
@@ -380,6 +385,7 @@ onBeforeUnmount(() => {
   stopPoll();
   if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
   if (streamRetryTimer) { clearTimeout(streamRetryTimer); streamRetryTimer = null; }
+  if (snapMsgTimer) { clearTimeout(snapMsgTimer); snapMsgTimer = null; }
   document.removeEventListener("visibilitychange", onVis);
 });
 
@@ -430,10 +436,14 @@ async function onDeviceChange(e) {
   switching.value = false;
 }
 
+// ★★ 2026-10-11：截图提示的定时器要**持有句柄**，卸载时清掉 ——
+//   原来是个裸 setTimeout，组件卸载后仍会执行（对已销毁组件的 ref 赋值）。
+let snapMsgTimer = null;
 async function onSnap() {
   const r = await cam.snap();
   snapMsg.value = r.ok ? ("已保存: " + r.path) : ("保存失败: " + (r.error || "无画面"));
-  setTimeout(() => { snapMsg.value = ""; }, 4000);
+  if (snapMsgTimer) clearTimeout(snapMsgTimer);
+  snapMsgTimer = setTimeout(() => { snapMsg.value = ""; snapMsgTimer = null; }, 4000);
 }
 
 const reconnecting = ref(false);
@@ -483,7 +493,8 @@ const lastWhy = computed(() => {
 </script>
 
 <template>
-  <div class="cam-panel" :class="{ collapsed: !expanded, down: cam.serviceDown }"
+  <div class="cam-panel" v-show="ui.camVisible"
+       :class="{ collapsed: !expanded, down: cam.serviceDown }"
        :style="{ left: pos.x + 'px', top: pos.y + 'px', width: size.w + 'px' }">
     <!-- 标题栏 -->
     <div class="cam-head" @pointerdown="onHeadDown">

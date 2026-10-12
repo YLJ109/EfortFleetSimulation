@@ -1,6 +1,7 @@
 <script setup>
 // =====================================================================
-// 井字棋 2D 棋盘浮层 —— 挂在分拣页 3D 视口的 #hud 插槽上（Sentinel 深色半透明）
+// 井字棋 2D 棋盘浮层 —— 挂在**手柄执行页** 3D 视口的 #hud 插槽上（Sentinel 深色半透明）
+//   ★ 2026-10-11：随井字棋卡片一起从「智能分拣」页搬到「手柄执行」页（井字棋 tab）。
 //
 // 方案：docs/方案-井字棋对弈（机器人真实落子）.md §3.3
 //
@@ -12,20 +13,29 @@
 //
 // ★ 棋盘 = B 区 3×3（cell i ↔ B 槽位 B(i+1)），与后端同口径（games/tictactoe.js）。
 //   ★「回放」态显示的是**按棋谱逐手重建的棋盘**（只查看、不动机器人）；
-//     「真实复盘」是后端 POST /tictactoe/replay（机器人真的动、逐子搬回原位），
+//     「复原」是后端 POST /tictactoe/reset（**真机**：机器人真的动、逐子搬回原位），
 //     它开始前会退出回放态 —— 于是本浮层始终跟随**真实**棋盘（不编故事）。
+//   ★「预告态」（`state.pending`）用**虚框**标明"机器人先手已显示、但还没真搬"。
 // =====================================================================
 import { computed, onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { useTicTacToeStore } from "../stores/tictactoe.js";
 import { useRobotStore } from "../stores/robot.js";
+import { usePadStore, PAD_TAB_TTT } from "../stores/pad.js";
 import { moveCursor, resultCn, symCn } from "../games/tictactoe.js";
 import { subscribeGamepad } from "../games/gamepad.js";
 
 const ttt = useTicTacToeStore();
 const robot = useRobotStore();
+// ★ 手柄归属：棋盘只在「手柄执行」页的井字棋 tab 里响应（与卡片同一判据）。
+const pad = usePadStore();
 
 const cursor = ref(4);      // 光标默认放中点
 const hint = ref("");
+
+/** 本浮层是否该响应输入：手柄执行页 + 井字棋 tab（★ 唯一判据，卡片与本处同源）。 */
+function onTttPage() {
+  return robot.activeView === "pad" && pad.tab === PAD_TAB_TTT;
+}
 
 const visible = computed(() => ttt.gameVisible);
 const board = computed(() => ttt.displayBoard);
@@ -34,6 +44,14 @@ const winLine = computed(() => (ttt.inReplay ? (ttt.replay.win_line || []) : ttt
 const result = computed(() => (ttt.inReplay ? ttt.replay.result : ttt.result));
 const userWin = computed(() => result.value === "user_win");
 const pieceNo = computed(() => (ttt.st && ttt.st.piece_no) || 0);
+/** ★「预告态」格子（机器人先手时**已显示、待搬子**）—— 与后端 `state.pending` 一字对应：
+ *  棋盘上先把子显示出来（用户口径：先下棋就先显示），但**用虚框标明"还没真搬"**，
+ *  别让人以为已经落好了（3D 那边同源渲染成半透明、不坠落）。 */
+const pendingSet = computed(() => {
+  if (ttt.inReplay) return new Set();
+  const p = (ttt.st && Array.isArray(ttt.st.pending)) ? ttt.st.pending : [];
+  return new Set(p.map((v) => Number(v)));
+});
 
 const turnText = computed(() => {
   if (ttt.inReplay) {
@@ -75,9 +93,9 @@ function isTyping(el) {
 
 const KEY_DIR = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
 
-/** 全局键盘：仅当分拣页激活 + 轮到你时处理；输入框内不拦截；不占用 Space。 */
+/** 全局键盘：仅当手柄执行页·井字棋 tab 激活 + 轮到你时处理；输入框内不拦截；不占用 Space。 */
 function onKey(e) {
-  if (!visible.value || robot.activeView !== "sort") return;
+  if (!visible.value || !onTttPage()) return;
   if (isTyping(e.target)) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (ttt.inReplay || !canPlay.value) return;
@@ -106,7 +124,7 @@ watch(canPlay, (on) => {
 // ★ 与键盘**同一套语义**：方向移动光标、A(=confirm) 落子；其余动作（开始/暂停/
 //   停止/复盘/复位）由右侧卡片订阅处理 —— 两块互不重叠，避免一次按键触发两处。
 function onPad(action) {
-  if (!visible.value || robot.activeView !== "sort") return;
+  if (!visible.value || !onTttPage()) return;
   if (ttt.inReplay || !canPlay.value) return;
   if (action === "up" || action === "down" || action === "left" || action === "right") {
     cursor.value = moveCursor(cursor.value, action, 3);
@@ -139,7 +157,8 @@ onBeforeUnmount(() => {
 
     <div class="ttt-grid">
       <button v-for="(v, i) in board" :key="i" class="ttt-cell"
-              :class="{ cur: i === cursor && canPlay, win: isWin(i), o: v === 'O', x: v === 'X' }"
+              :class="{ cur: i === cursor && canPlay, win: isWin(i), o: v === 'O', x: v === 'X',
+                        pending: pendingSet.has(i) }"
               :disabled="!canPlay" @click="onCell(i)" @mouseenter="cursor = i">
         <span class="mk">{{ mark(i) }}</span>
       </button>
@@ -179,8 +198,13 @@ onBeforeUnmount(() => {
 .ttt-cell:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
 .ttt-cell:disabled { cursor: default; }
 .ttt-cell.cur { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.ttt-cell.o .mk { color: #7fe3ff; }
-.ttt-cell.x .mk { color: #ffc861; }
+/* ★★ 2026-10-11 用户口径「**蓝色是圆，绿色是叉**」——2D 与 3D 同一套符号色
+   （3D 那边 = 蓝块+圆环 / 绿块+十字，见 three/sortingBlocks.js::TTT_SYM_HEX）。 */
+.ttt-cell.o .mk { color: #4b8bff; }
+.ttt-cell.x .mk { color: #35c46a; }
+/* ★ 预告态（机器人先手：已显示、待搬子）：虚框 + 半透明，标明"还没真搬" */
+.ttt-cell.pending { border-style: dashed; border-color: var(--muted); }
+.ttt-cell.pending .mk { opacity: .45; }
 /* ★ 获胜三连线高亮 + 轻微脉冲（用户赢时更强） */
 .ttt-cell.win { border-color: var(--accent); background: rgba(47, 214, 240, .16);
   animation: ttt-win 0.9s ease-in-out infinite alternate; }

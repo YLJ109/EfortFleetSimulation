@@ -114,5 +114,51 @@ console.log("== D. 灯的三态判据（按真实字段，不兜底成绿） =="
 }
 
 console.log("");
+console.log("== E. 运行日志「来新消息就自动到底」（水位 = logSeq，不是 log.length） ==");
+{
+  const exec = read("src/stores/exec.js");
+  // ★★ 用户口径（2026-10-11）：「添加日志要自动最底部，根据新的消息」。
+  //   踩过的坑：滚底的 watch 绑的是 `exec.log.length`，而 `logLine()` 超过 LOG_MAX(240)
+  //   会 splice 掉旧行 → 长度恒为 240、不再变化 → 水位失效（恰恰日志越长越需要跟底）。
+  ok("★ exec 有单调递增的 `logSeq`（并说明为什么不能用 log.length）",
+     /logSeq:\s*0/.test(exec) && /logSeq \+= 1/.test(exec));
+  ok("★ logLine 里 logSeq 递增；clearLog 归零",
+     /this\.logSeq \+= 1/.test(exec) && /clearLog\(\)\s*\{\s*this\.log = \[\];\s*this\.logSeq = 0;/.test(exec));
+  ok("★ 滚底 watch 绑 `logSeq`（不再绑 `log.length` —— 满 240 行后长度就不再变化）",
+     /watch\(\(\)\s*=>\s*exec\.logSeq[\s\S]{0,120}logScrollToBottom\(\)/.test(strip)
+     && !/watch\(\(\)\s*=>\s*exec\.log\.length/.test(strip));
+  ok("★ 「粘底」语义保留：用户往上翻看历史时不抢滚动条",
+     /logStick/.test(strip) && /LOG_BOTTOM_EPS\s*=\s*24/.test(strip)
+     && /onLogScroll/.test(strip));
+  ok("★ 点开「运行日志」片 → 重置为粘底并滚到底",
+     /watch\(open[\s\S]{0,120}logStick\.value = true;[\s\S]{0,80}logScrollToBottom\(\)/.test(strip));
+}
+
+console.log("");
+console.log("== F. 「数据过期」水位改外部时钟（防假绿）+ 未知不得报成已知 ==");
+{
+  const linkJs = read("src/stores/link.js");
+  const rcJs = read("src/stores/rcReady.js");
+  const appVue = read("src/App.vue");
+  // ★★ 2026-10-11：`stale` 原来靠"收到数据"推进水位 —— 掉线时 link 会停轮询、控制器 WS 帧
+  //   也会停 → 水位**冻结** → "过期"永远算不出来 → 底栏挂"旧绿"（最危险的假正常）。
+  //   现在由 App 的 1s 时钟（与令牌到期扫描同一个）**无条件**推进。
+  ok("★ link 有外部时钟 `beat()`，且 App 的 1s 时钟无条件调用",
+     /beat\(\)\s*\{\s*this\.tick = Date\.now\(\)/.test(linkJs) && /link\.beat\(\)/.test(appVue));
+  ok("★ rcReady 也有 `beat()`，且 `stale` 用 `clk` 而**不是** `Date.now()`",
+     /beat\(\)\s*\{\s*this\.clk = Date\.now\(\)/.test(rcJs)
+     && /stale: \(s\) => \(s\.snap \? \(\(s\.clk - s\.wsAt\) > RC_STALE_MS\) : true\)/.test(rcJs)
+     && !/stale: \(s\) => \(s\.snap \? \(Date\.now\(\)/.test(rcJs));
+  ok("★ 控制器快照过期 → 底栏**绝不报绿**（压黄并写「数据过期」）",
+     /if \(rc\.stale\) return "warn"/.test(strip) && /rc\.stale \? "数据过期"/.test(strip));
+  // ★★ `servoOn === null`（后端未返回）是三元的 falsy —— 原写法会把"不知道"说成"未上电"。
+  //   现在必须是**三态**：null → 「未知」；true → 「未就绪」；false → 「未上电」。
+  ok("★ `servoOn === null` → 报「未知」（三态：未知 / 未就绪 / 未上电，不再把未知说成未上电）",
+     /rc\.servoOn === null \? "未知"/.test(strip)
+     && /rc\.servoOn \? "未就绪" : "未上电"/.test(strip)
+     && /readyValue = !rc\.ok \? "读不到"\s*\n\s*: rc\.stale \? "数据过期"/.test(strip));
+}
+
+console.log("");
 console.log(`结果: ${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

@@ -27,6 +27,7 @@ from app.db.crud import get_point, list_points, list_programs
 from app.db.database import SessionLocal
 from app.services import jog_frames as jf
 from app.services import sorting as S
+from app.services import ui_speed                     # ★ 上位机当前速度（长流程跟随滑块）
 from app.services.collector import collector
 from app.services.events import emit as emit_event
 from app.services.jog import jog
@@ -363,9 +364,11 @@ class PointTargetIn(BaseModel):
     name: Optional[str] = None
     # 基姿态（缺省 = 当前实时姿态）；**只有 J6 正/反面用得上**，普通点位忽略它。
     base: Optional[List[float]] = None
-    # ★★ 2026-10-11「面」语义：可指定用该点自身的**正面/反面**（只动 J6）。
-    #   缺省 "front" → 与旧行为逐字一致（零回归）。残影与实发同源（都走 resolve_target_joints）。
-    face: Optional[str] = "front"
+    # ★★ 2026-10-11 旋转管控：残影预演**默认不旋转**（`auto` = 保持当前 J6），
+    #   与实际下发同一道闸门 `S.effective_face`（未授权 → keep）。要按面摆残影须显式两件都到位：
+    #   `face="front"|"back"` + `allow_rotate=true`。残影与实发**同源**是这里的硬要求。
+    face: Optional[str] = "auto"
+    allow_rotate: bool = False
 
 
 @router_ro.post("/point-target")
@@ -422,8 +425,11 @@ def api_point_target(body: PointTargetIn):
     #   **目标点是原料位（A1…A9/B1…B9）→ 一律 `keep`（保持当前面、绝不翻面）**。
     #   残影预读必须与实发**同源**（实发见 api/goto、api/move、run-file 步骤）——
     #   否则残影会停在该点默认正面、而实发保持当前面 → 又对不上（见 services/sorting.py::face_for_target）。
-    target, j6_only, reason = S.resolve_target_joints(name, joints, _base,
-                                                      face=S.face_for_target(name, body.face))
+    # ★★★ 2026-10-11 旋转管控：**默认不旋转**（用户口径「其他时间一律不允许旋转」）——
+    #   未授权（`allow_rotate=false`）时 `S.effective_face` 把任何 face 降级成 keep。
+    target, j6_only, reason = S.resolve_target_joints(
+        name, joints, _base,
+        face=S.effective_face(name, body.face, rotate=bool(body.allow_rotate)))
     if reason:
         return {"ok": False, "j6_only": j6_only, "readonly": True, "error": reason}
     return {"ok": True, "j6_only": j6_only, "readonly": True,
@@ -478,9 +484,10 @@ class MoveIn(BaseModel):
     #   杜绝"很快"的误发。默认也取 5，没传 speed 时就按最慢执行。
     speed_pct: int = Field(default=SPEED_MIN, ge=SPEED_MIN, le=SPEED_MAX)
     dwell_ms: int = Field(default=0, ge=0, le=60000)
-    # ★★ 2026-10-11「面」语义：按 point_id 到点时可用该点自身的**正面/反面**（只动 J6）；
-    #   缺省 "front" → 与旧行为逐字一致（零回归）。见 S.resolve_target_joints。
-    face: Optional[str] = "front"
+    # ★★ 2026-10-11 旋转管控：按 point_id 到点**默认不旋转**（`auto` = 保持当前 J6）；
+    #   要翻面须 `face="front"|"back"` + `allow_rotate=true` 两件都到位（见 S.effective_face）。
+    face: Optional[str] = "auto"
+    allow_rotate: bool = False
 
     @model_validator(mode="after")
     def _must_have_target(self):
@@ -521,9 +528,36 @@ def api_move(body: MoveIn, tok: str = Depends(require_control)):
     #   ★ 决策收敛到唯一入口 `S.resolve_target_joints`（与"残影预演"同源，见 /point-target）。
     #   ★★ 统一口径（2026-10-11 用户原话「我在正上位反面，去原料区是变成了正面」）：
     #     `point_name` 若为**原料位**（A1…A9/B1…B9）→ face 归一成 `keep`（保持当前面、绝不翻面）。
-    target, _j6_only, _j6_reason = S.resolve_target_joints(
-        point_name, target, _live_joints_or_none,
-        face=S.face_for_target(point_name, body.face))
+    #   ★★★ 2026-10-11 旋转管控：**默认不旋转**（用户口径「其他时间一律不允许旋转」）——
+    #     未授权（`allow_rotate=false`）时 `S.effective_face` 把任何 face 降级成 keep；
+    #     真机 + 拿不到当前 J6 → **拒绝下发**（`_j6_reason`，绝不"按该点自身值转一下"）。
+    #   ★★★ 但**显式 6 轴指令**（`body.joints`，不经 point_id）**不走这套**：那是操作员
+    #     在点位执行页/滑块上**明确指定了 J6**（本来就是"用户在主动旋转"）→ 原样透传，
+    #     只做"折等价角"归一化（与旧行为逐字一致）。旋转管控管的是"**到点**"，不是"手动下发"。
+    if point_name is None:
+        target, _j6_only, _j6_reason = S.resolve_target_joints(
+            None, target, None, face=S.FACE_FRONT)
+    else:
+        # ★★ 2026-10-12 原位禁转（用户口径「**原位禁止旋转拒绝指令！**」）：
+        #   按 point_id 到 `J6正面`/`J6反面`（虚拟切面命令）时，若机器人**正停在原料位** → **拒绝**。
+        #   （与 `/sorting/goto`、`_move_flip_j6` 同一口径；判据 = 实时关节 vs 18 个原料位示教姿态。）
+        if S.is_j6_face_point(point_name):
+            _live0 = _live_joints_or_none()
+            if _live0:
+                try:
+                    _poses = S.raw_slot_poses()
+                except Exception as _e:            # noqa: BLE001 —— 判不出 → fail-safe 拒绝
+                    raise HTTPException(409, detail=(
+                        "无法确认机器人当前是否停在原料位（读点位库失败：%s）"
+                        "—— 为安全已拒绝切面「%s」" % (str(_e)[:120], point_name)))
+                _slot = S.current_raw_slot(_live0, _poses)
+                if _slot:
+                    raise HTTPException(409, detail=(
+                        "原位禁止旋转：机器人当前停在原料位「%s」，"
+                        "请**先到它的正上位（%s上）**再切面" % (_slot, _slot)))
+        target, _j6_only, _j6_reason = S.resolve_target_joints(
+            point_name, target, _live_joints_or_none,
+            face=S.effective_face(point_name, body.face, rotate=bool(body.allow_rotate)))
     if _j6_reason:
         raise HTTPException(409, detail=_j6_reason)
     # ---------- 围栏互锁（阶段 4）----------
@@ -556,8 +590,47 @@ def api_move(body: MoveIn, tok: str = Depends(require_control)):
     # ★ 统一"未就绪"闸门：伺服未上电 → 拒绝并明确提示（详见 reject_if_not_ready）。
     reject_if_not_ready()
 
+    # ★★ 2026-10-12「原位安全路径」**自动补垂直段**（用户口径：一切入口都**自动**走安全路径；
+    #   「禁止原位直接去别处 / 去起点摄像头 / 从起点摄像头直接回原位」「如果原位旋转，
+    #   先回到正上位，旋转，然后来到原位」）—— **显式 6 轴 joints 也包含在内**：
+    #   先按安全路径走掉 `pre` 段（抬起 / 抬到目标正上位），再下发原目标，最后走 `post`（切面回原位）。
+    #   ★ 放在未就绪闸门**之后**：没就绪时先报「机器人没有就绪」，而不是先纠结点位语义。
+    _pre0, _post0 = [], []
+    if real_write_enabled():
+        _live0 = _live_joints_or_none()
+        if _live0:
+            try:
+                _poses0 = S.all_point_poses()
+            except Exception as _e0:                   # noqa: BLE001 —— 判不出 → fail-safe
+                raise HTTPException(409, detail=(
+                    "无法确认机器人当前位置与目标（读点位库失败：%s）—— 为安全已拒绝下发"
+                    % str(_e0)[:120]))
+            _pre0, _post0, _perr = S.raw_slot_step_targets(
+                _live0, _poses0,
+                target_name=point_name,
+                target_joints=(None if point_name is not None else target))
+            if _perr:
+                emit_event("control", "warn", "control.move_blocked", _perr,
+                           {"target": target, "point_name": point_name}, actor=_actor(tok))
+                raise HTTPException(409, detail=_perr)
+            for _nm, _jt in _pre0:
+                _rr0 = motion.command([float(v) for v in _jt], clamp_speed(body.speed_pct),
+                                      body.dwell_ms)
+                if not _rr0.get("ok"):
+                    raise HTTPException(502, detail="原位安全路径「%s」失败：%s"
+                                        % (_nm, _rr0.get("error")))
+            # ★ 主段若是"抬到目标正上位"之后的**垂直下降** → 主段 J6 也冻结（升降不转）
+            if _pre0 and point_name and S.is_vertical_move(_pre0[-1][0], point_name):
+                try:
+                    target = S.compose_j6_only(target, float(_pre0[-1][1][5]))
+                except Exception:                      # noqa: BLE001 —— 拿不到就保持原目标
+                    pass
+
     res = motion.command([float(x) for x in target], clamp_speed(body.speed_pct),
                          body.dwell_ms)
+    # ★ 原位安全路径：`post` 段（只有"原位切面"才有 —— 切完回原位）
+    for _nm, _jt in _post0:
+        motion.command([float(v) for v in _jt], clamp_speed(body.speed_pct), body.dwell_ms)
     emit_event("control", "info" if res.get("ok") else "warn",
                "control.move",
                f"下发目标到位（{res.get('mode', '?')}）" if res.get("ok")
@@ -1540,6 +1613,31 @@ def api_seq_load(name: str = Query(..., min_length=1, max_length=64),
             "saved_at": data.get("saved_at"), "items": items}
 
 
+class UiSpeedIn(BaseModel):
+    """右上角滑块当前值（%）。"""
+    speed_pct: int = Field(ge=SPEED_MIN, le=SPEED_MAX)
+
+
+@router.post("/ui-speed")
+def api_ui_speed(body: UiSpeedIn):
+    """★ 登记「上位机当前速度」—— **只写内存里那一个值，不下发任何运动 / 不碰控制器**。
+
+    为什么需要它（用户口径「**应该电脑的速度去执行**」）：分拣 / 井字棋这类**长流程**
+    是"点开始那一刻定速"的，运行中拖滑块**不生效**；登记之后，每一次点位移动
+    （`api/sorting.py::_move`）都会取**最新值** → **下一步起生效**
+    （只在步/趟边界换速，**不打断**飞行中的那一句运动）。
+
+    ★ 路由自带 `require_control`（router 级依赖）→ 没控制令牌一律 401。
+    ★ **这里是"界面滑块"的写入者**：除它之外没有任何地方会改登记值
+      （各流程的"开始时自报"已按用户口径删除 —— 那是"快速分拣偶尔变成 20%"的根因）。
+    ★ 无登记 / 流程首次取速度时，各流程行为**一字不变**（`ui_speed.apply` 原样返回传入值）。
+    """
+    v = ui_speed.publish(body.speed_pct, "前端滑块")
+    # ★ 只记**日志**、不落审计事件：拖一次滑块会来好几条，落库会把审计时间线刷屏。
+    log.info("上位机速度 → %d%%（长流程下一步生效）", v)
+    return {"ok": True, "applied": v, **ui_speed.peek()}
+
+
 @router.post("/seq")
 def api_seq_save(body: SeqIn, tok: str = Depends(require_control)):
     """把编辑器里的序列保存成本地文件 programs/<name>.json。
@@ -1686,6 +1784,21 @@ def _run_file_job(ctx, body: RunFileIn, tok: str, run_id: str, disp_name: str) -
         _set_progress(run_id, total=len(res["steps"]),
                       speed_pct=body.speed_pct, dry_run=bool(body.dry_run))
 
+        # ★★ 2026-10-12（用户口径「**原位到起点和摄像头点也是禁止执行的动作，必须在正上位执行**」
+        #   「**任何程序也是**」）：程序/序列执行**不走** `api/sorting._move`（自己那条下发链）
+        #   → 「原位出发」规则必须在这里**也有一份**（点名步骤 + 显式 6 轴步骤都管）。
+        #   · 点位姿态表**整个 job 惰性只读一次**（有相关步骤才读，不逐步骤读库）。
+        _point_poses_box: Dict[str, object] = {"rows": None, "err": None}
+
+        def _point_poses_once() -> Dict[str, object]:
+            if _point_poses_box["rows"] is None and _point_poses_box["err"] is None:
+                try:
+                    _point_poses_box["rows"] = S.all_point_poses()
+                except Exception as _re:               # noqa: BLE001 —— 判不出 → 调用方 fail-safe
+                    _point_poses_box["err"] = str(_re)[:120]
+                    _point_poses_box["rows"] = {}
+            return _point_poses_box
+
         for st in res["steps"]:
             # ★ P0-7：每一步开始前先查中止表 —— 这是"中止"真正生效的位置。
             if _is_cancelled(run_id):
@@ -1709,6 +1822,9 @@ def _run_file_job(ctx, body: RunFileIn, tok: str, run_id: str, disp_name: str) -
             #   最后统一夹取，杜绝"请求 5% 却按 100% 跑"。
             sp = int(st.get("speed_pct") or body.speed_pct)
             sp = max(5, min(100, sp))
+            # ★★ 2026-10-11：**每一步都取"界面滑块"**（只认人拖的那条；按时间戳判断
+            #   流程跑起来后有没有人动过）—— 见 `services/ui_speed.py`；未推送过则零回归。
+            sp = ui_speed.apply(sp, st)
             dw = int(st.get("dwell_ms") or 0)
 
             # ---------- io 步：吸气 / 停止吸气 / 等待（无移动目标） ----------
@@ -1791,9 +1907,88 @@ def _run_file_job(ctx, body: RunFileIn, tok: str, run_id: str, disp_name: str) -
                 ok_all = False
                 break
 
+            # ---------- 目标解算（**试运行与实发同源**：先算好 target，再决定走哪条路）----------
+            target = st.get("joints")
+            if target is None:
+                if not st.get("tcp"):
+                    results.append({"index": st["index"], "name": st.get("name"),
+                                    "ok": False, "readonly": False,
+                                    "error": "直角步骤缺少 TCP 目标"})
+                    ok_all = False
+                    break
+                q, solver, viol = _solve_tcp(st["tcp"])
+                if viol or not solver["ok"]:
+                    results.append({"index": st["index"], "name": st.get("name"),
+                                    "ok": False, "readonly": False,
+                                    "error": "IK 解算失败或超限位",
+                                    "violations": viol})
+                    ok_all = False
+                    break
+                target = [float(v) for v in q]
+
+            # ★★ 2026-10-11 护栏：程序步骤里若点名 `J6正面`/`J6反面` → 同样"原地只改 J6"。
+            #   （序列编辑器的"标记点"可以是任意点位名 —— 与 `/control/move` 按 point_id
+            #    是同一类旁路，必须一并堵死，否则程序里带上这两个点会整姿态跑回起点。）
+            #   ★ 决策收敛到唯一入口 `S.resolve_target_joints`（与"残影预演"同源）。
+            #   ★★ 统一口径（2026-10-11 用户原话「我在正上位反面，去原料区是变成了正面」）：
+            #     步骤点名若为**原料位**（A1…A9/B1…B9）→ face 归一成 `keep`（保持当前面、绝不翻面）。
+            #   ★★★ 2026-10-11 旋转管控：程序/序列步骤**默认不旋转**（`auto`）——
+            #     用户口径「其他时间一律不允许旋转」：走程序不等于授权翻 J6。
+            #   ★ 但**显式 6 轴步骤**（`joints` / IK 解出来的目标，不来自点位）**不走这套**：
+            #     那是程序里明确写死的目标姿态，与 `/control/move` 的显式 joints 同一口径 → 原样透传。
+            #     ★ 判据 = **是否来自点位**（`point_id` 存在）且 `mode == "joint"`。
+            if st.get("point_id") is not None and st.get("mode") == "joint":
+                target, _j6_only, _j6_reason = S.resolve_target_joints(
+                    st.get("name"), target, _live_joints_or_none,
+                    face=S.effective_face(st.get("name"), S.FACE_AUTO))
+            else:
+                target, _j6_only, _j6_reason = S.resolve_target_joints(
+                    None, target, None, face=S.FACE_FRONT)
+            if _j6_reason:
+                if body.dry_run:
+                    # ★ 空跑/离线本来就不下发任何指令（用户口径）→ 用点位自带值把试运行走通。
+                    target = [float(v) for v in (st.get("joints") or target or [])]
+                else:
+                    results.append({"index": st["index"], "name": st.get("name"),
+                                    "ok": False, "readonly": False, "error": _j6_reason})
+                    ok_all = False
+                    break
+
+            # ★★ 2026-10-12「原位安全路径」**自动补垂直段**（用户口径：「**禁止原位到原位执行**」
+            #   「**禁止原位去起点和摄像头点**」「**禁止摄像头点位或者起点直接去原点**」
+            #   「**如果原位旋转，先回到正上位，旋转，然后来到原位**」「**任何程序也是**」）：
+            #   **点名步骤 + 显式 6 轴步骤都自动补段**（不是拒绝）——`pre` 在动作前走、
+            #   `post` 在动作后走（只有"原位切面"才有 `post` = 切完回原位）。
+            #   ★ 空跑不下发 → 不算；拿不到实时姿态 → 不补；读库失败/正上位未示教 → **fail-safe 拒绝**。
+            #   ★ **笛卡尔（IK）步骤不判**（见 §7 已知限制）：IK 目标天然不等于任何示教姿态。
+            _pre_x, _post_x = [], []
+            if (not body.dry_run and st.get("mode") == "joint"):
+                _live0 = _live_joints_or_none()
+                if _live0:
+                    _box0 = _point_poses_once()
+                    if _box0.get("err"):
+                        results.append({"index": st["index"], "name": st.get("name"),
+                                        "ok": False, "readonly": False,
+                                        "error": ("无法确认机器人当前位置与目标（读点位库失败：%s）"
+                                                  "—— 为安全已拒绝该步" % _box0["err"])})
+                        ok_all = False
+                        break
+                    _frompt = st.get("point_id") is not None
+                    _pre_x, _post_x, _serr = S.raw_slot_step_targets(
+                        _live0, _box0.get("rows") or {},
+                        target_name=(str(st.get("name") or "") if _frompt else None),
+                        target_joints=(None if _frompt else target))
+                    if _serr:
+                        results.append({"index": st["index"], "name": st.get("name"),
+                                        "ok": False, "readonly": False, "error": _serr})
+                        ok_all = False
+                        break
+
             # ---------- 试运行（空跑测试）----------
             if body.dry_run:
-                pv = _compute_preview(st["mode"], st.get("joints"), st.get("tcp"),
+                pv = _compute_preview(st["mode"],
+                                      (target if st["mode"] == "joint" else None),
+                                      st.get("tcp"),
                                       duration_ms=2500, steps=body.steps)
                 total_ms += int(pv["duration_ms"])
                 results.append({
@@ -1821,40 +2016,6 @@ def _run_file_job(ctx, body: RunFileIn, tok: str, run_id: str, disp_name: str) -
                             "reason": reason}, actor=_actor(tok))
                 break
 
-            target = st.get("joints")
-            if target is None:
-                if not st.get("tcp"):
-                    results.append({"index": st["index"], "name": st.get("name"),
-                                    "ok": False, "readonly": False,
-                                    "error": "直角步骤缺少 TCP 目标"})
-                    ok_all = False
-                    break
-                q, solver, viol = _solve_tcp(st["tcp"])
-                if viol or not solver["ok"]:
-                    results.append({"index": st["index"], "name": st.get("name"),
-                                    "ok": False, "readonly": False,
-                                    "error": "IK 解算失败或超限位",
-                                    "violations": viol})
-                    ok_all = False
-                    break
-                target = [float(v) for v in q]
-
-            # ★★ 2026-10-11 护栏：程序步骤里若点名 `J6正面`/`J6反面` → 同样"原地只改 J6"。
-            #   （序列编辑器的"标记点"可以是任意点位名 —— 与 `/control/move` 按 point_id
-            #    是同一类旁路，必须一并堵死，否则程序里带上这两个点会整姿态跑回起点。）
-            #   ★ 决策收敛到唯一入口 `S.resolve_target_joints`（与"残影预演"同源）。
-            #   ★★ 统一口径（2026-10-11 用户原话「我在正上位反面，去原料区是变成了正面」）：
-            #     步骤点名若为**原料位**（A1…A9/B1…B9）→ face 归一成 `keep`（保持当前面、绝不翻面）；
-            #     其余点位照旧（缺省正面 → 整姿态，零回归）。
-            target, _j6_only, _j6_reason = S.resolve_target_joints(
-                st.get("name"), target, _live_joints_or_none,
-                face=S.face_for_target(st.get("name"), S.FACE_FRONT))
-            if _j6_reason:
-                results.append({"index": st["index"], "name": st.get("name"),
-                                "ok": False, "readonly": False, "error": _j6_reason})
-                ok_all = False
-                break
-
             # ★ P0-7：真实下发前再查一次（guard_check 本身可能耗时）
             if _is_cancelled(run_id):
                 cancelled = True
@@ -1863,6 +2024,26 @@ def _run_file_job(ctx, body: RunFileIn, tok: str, run_id: str, disp_name: str) -
             #   原实现只打 _RUN_CANCEL 标记 → 下一步循环开头才生效，而当前这一步
             #   已经进 motion.command()，rc_jog_execute 同步阻塞最长 30s 且无
             #   abort_check → 界面显示"已中止"、机器人还走完这一发。
+            # ★ 原位安全路径：**先走 `pre` 段**（抬起 / 抬到目标正上位）——任一段失败即中止该步
+            _segbad = None
+            for _nm, _jt in _pre_x:
+                _pr = motion.command([float(v) for v in _jt], sp, dw,
+                                     abort_check=lambda: _is_cancelled(run_id))
+                if not _pr.get("ok"):
+                    _segbad = "原位安全路径「%s」失败：%s" % (_nm, _pr.get("error"))
+                    break
+            if _segbad:
+                results.append({"index": st["index"], "name": st.get("name"), "ok": False,
+                                "readonly": False, "error": _segbad})
+                ok_all = False
+                break
+            # ★ 主段若是"抬到目标正上位"之后的**垂直下降** → 主段 J6 也冻结（升降不转）
+            _mst_nm = str(st.get("name") or "") if st.get("point_id") is not None else None
+            if _pre_x and _mst_nm and S.is_vertical_move(_pre_x[-1][0], _mst_nm):
+                try:
+                    target = S.compose_j6_only(target, float(_pre_x[-1][1][5]))
+                except Exception:                      # noqa: BLE001
+                    pass
             r = motion.command([float(x) for x in target], sp, dw,
                                abort_check=lambda: _is_cancelled(run_id))
             total_ms += dw + 300
@@ -1876,6 +2057,10 @@ def _run_file_job(ctx, body: RunFileIn, tok: str, run_id: str, disp_name: str) -
             if not r.get("ok"):
                 ok_all = False
                 break
+            # ★ 原位安全路径：**再走 `post` 段**（只有"原位切面"才有 —— 切完回原位）
+            for _nm, _jt in _post_x:
+                motion.command([float(v) for v in _jt], sp, dw,
+                               abort_check=lambda: _is_cancelled(run_id))
             _set_progress(run_id, phase="settling")
             # ★ 用可暂停等待：点动步的"收尾静置"是暂停最自然的落点
             if _sleep_pausable(max(0.15, dw / 1000.0 + 0.2), run_id):

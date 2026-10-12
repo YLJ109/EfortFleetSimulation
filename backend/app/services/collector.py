@@ -17,7 +17,7 @@ from app.services.events import emit as emit_event
 from app.services.hub import hub
 from app.services.kinematics import tcp_of
 from app.services.modbus import ModbusRobot
-from app.services.motion import motion, real_write_enabled
+from app.services.motion import motion, real_write_enabled, snapshot_ready
 from app.services.runmode import runmode
 from app.services.sim_robot import sim_robot
 
@@ -374,13 +374,10 @@ class Collector:
                        "real_enabled": real_write_enabled(),
                        "service_program": self._service_program(), "t": t_now}
         else:
-            b = snap["bits"]
             snap["ok"] = True
             snap["real_enabled"] = real_write_enabled()
             snap["service_program"] = self._service_program()
-            snap["ready"] = bool(b["servo"] and b["prog_loaded"] and b["run"]
-                                 and (b["auto"] or b["remote"])
-                                 and not b["alarm"] and not b["estop"])
+            snap["ready"] = snapshot_ready(snap)
             # ★ 顺手把实测档位喂给 runmode：底栏「示教器」灯从此自动确认，
             #   不必再让操作员按旋钮位置手动声明一遍（见 services/runmode.py）。
             feed_run_mode(snap.get("mode"), snap.get("status_word"))

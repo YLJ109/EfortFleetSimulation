@@ -150,17 +150,21 @@ def test_sorting_goto_uses_slider_speed_pct(client):
     只保留寄存器合法范围夹取（[5,100]），不再"额外压低"。
     """
     h = _h(client)
-    # 先示教一个合法点位（A1 在 38 点位白名单内）
-    r = client.post("/api/sorting/teach", json={"name": "A1", "joints": HOME}, headers=h)
-    assert r.status_code == 200, r.text
+    # 先示教几个**非原料位**的点（正上位）：它们不走"原位安全路径"的补段/去重逻辑，
+    # ★ 2026-10-12 起 `/sorting/goto` 对"已经在目标点"会如实 409「无需移动」，
+    #   所以这里**每次到不同的点**，避免与"去重"耦合（本用例只测速度跟随）。
+    for _nm, _j6 in (("A1上", 10), ("A2上", 20), ("A3上", 30)):
+        r = client.post("/api/sorting/teach",
+                        json={"name": _nm, "joints": [0, 0, 0, 0, 0, _j6]}, headers=h)
+        assert r.status_code == 200, r.text
     # 带滑块速度到点 → 必须原样采用
-    r = client.post("/api/sorting/goto", json={"name": "A1", "speed_pct": 42}, headers=h)
+    r = client.post("/api/sorting/goto", json={"name": "A1上", "speed_pct": 42}, headers=h)
     assert r.status_code == 200, r.text
     assert r.json()["speed_pct"] == 42, "到点速度必须跟随滑块，不得回落到 config 的 5%%：%s" % r.text
     # 越界只被夹到寄存器合法范围（40103 物理范围），不是"额外限速"
-    r = client.post("/api/sorting/goto", json={"name": "A1", "speed_pct": 999}, headers=h)
+    r = client.post("/api/sorting/goto", json={"name": "A2上", "speed_pct": 999}, headers=h)
     assert r.status_code == 200 and r.json()["speed_pct"] == 100, r.text
-    r = client.post("/api/sorting/goto", json={"name": "A1", "speed_pct": 1}, headers=h)
+    r = client.post("/api/sorting/goto", json={"name": "A3上", "speed_pct": 1}, headers=h)
     assert r.status_code == 200 and r.json()["speed_pct"] == 5, r.text
 
 

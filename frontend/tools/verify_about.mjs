@@ -196,7 +196,7 @@ section("H. 渲染完整性：每个数据导出都必须在模版里被用到")
     ["PROCEDURES", "标准操作流程"],
     ["PRECAUTIONS", "注意事项"],
     ["TROUBLESHOOT", "异常处置速查"],
-    ["MODULE_GUIDE", "八个模块"],
+    ["MODULE_GUIDE", "全部模块"],
     ["SAFETY_NOTES", "安全须知"],
   ];
   for (const [name, label] of rendered) {

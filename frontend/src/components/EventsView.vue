@@ -1,4 +1,4 @@
-﻿<script setup>
+﻿﻿<script setup>
 // =====================================================================
 // 运维审计视图（阶段 3 监控运维 + 阶段 4 企业级加固）
 //
@@ -293,6 +293,7 @@ onMounted(() => {
 watch(() => auth.controlActive, (v) => { if (v) loadVersions(); });
 onBeforeUnmount(() => {
   if (tick) clearInterval(tick);
+  if (deb) { clearTimeout(deb); deb = null; }   // ★ 2026-10-11：卸载时也要清掉输入防抖定时器
   disconnectEvents();
 });
 

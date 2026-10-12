@@ -55,20 +55,34 @@ def _reset_globals():
 
 
 # ---------------------------------------------------------------- 假 Modbus
-class _MB:
-    """假 Modbus：只实现闸门用到的 rc_snapshot。servo=0 表示伺服未上电。"""
+def _svc_no() -> int:
+    """当前配置的常驻服务程序号（闸门要校验 prog == 它）。"""
+    from app.services.motion import _service_program_no
+    return _service_program_no()
 
-    def __init__(self, servo=0, raises=None, none=False):
+
+class _MB:
+    """假 Modbus：只实现闸门用到的 rc_snapshot。
+
+    ★★ 2026-10-12：判据升级为**完整就绪**（伺服 + 210 已运行 + AUTO + 无报警/急停）
+      —— 故默认位给"除 servo 外全都就绪"，用 `servo=0` 只关伺服、用 `**bits` 覆盖其它位。
+    """
+
+    def __init__(self, servo=0, raises=None, none=False, **bits):
         self.servo = servo
         self.raises = raises
         self.none = none
+        self.bits = bits          # 覆盖默认位（如 auto=0 / run=0 / alarm=1）
 
     def rc_snapshot(self):
         if self.raises is not None:
             raise self.raises
         if self.none:
             return None, "连接超时"
-        return {"bits": {"servo": self.servo, "alarm": 0, "estop": 0}}, None
+        b = {"servo": self.servo, "alarm": 0, "estop": 0,
+             "manual": 0, "auto": 1, "remote": 0, "run": 1, "prog_loaded": 1}
+        b.update(self.bits)
+        return {"bits": b, "prog": _svc_no(), "alarm1": 0, "alarm2": 0}, None
 
 
 def _arm_link(monkeypatch, mb, real_modules=()):
@@ -102,7 +116,54 @@ def test_servo_off_returns_unified_msg(monkeypatch):
 
 
 def test_servo_on_passes(monkeypatch):
+    """★ 2026-10-12：完整就绪（伺服 + 210 已运行 + AUTO + 无报警/急停）→ 放行。"""
     _arm_link(monkeypatch, _MB(servo=1))
+    from app.services.motion import servo_not_ready_reason
+    assert servo_not_ready_reason() is None
+
+
+# ---- ★★ 2026-10-12 新增：判据由"只看伺服"升级为"完整就绪" ----
+#   用户口径：「**一键就绪的要求是程序加载、上电等等**」「如果没有就绪……全部禁止」。
+#   以下四条钉死"伺服上电 ≠ 就绪"的四种残缺态都必须被拒。
+def test_servo_on_but_not_auto_rejected(monkeypatch):
+    """伺服上电但示教器在手动档（T1/T2）→ 未就绪（上位机指令无效）。"""
+    _arm_link(monkeypatch, _MB(servo=1, auto=0, remote=0, manual=1))
+    from app.services.motion import servo_not_ready_reason
+    r = servo_not_ready_reason()
+    assert r and r.startswith("机器人没有就绪") and "AUTO" in r
+
+
+def test_servo_on_but_service_program_not_loaded_rejected(monkeypatch):
+    """伺服上电但常驻 210 未加载（程序号不对）→ 未就绪。"""
+    mb = _MB(servo=1)
+    real = mb.rc_snapshot
+
+    def bad():
+        snap, err = real()
+        snap["prog"] = (_svc_no() or 0) + 1     # 目标程序号不是常驻服务程序
+        return snap, err
+
+    mb.rc_snapshot = bad
+    _arm_link(monkeypatch, mb)
+    from app.services.motion import servo_not_ready_reason
+    r = servo_not_ready_reason()
+    assert r and r.startswith("机器人没有就绪") and "未加载" in r
+
+
+def test_servo_on_but_program_not_running_rejected(monkeypatch):
+    """伺服上电、210 已就位但**未运行**（没挂起在 WAIT）→ 未就绪。"""
+    _arm_link(monkeypatch, _MB(servo=1, run=0))
+    from app.services.motion import servo_not_ready_reason
+    r = servo_not_ready_reason()
+    assert r and r.startswith("机器人没有就绪") and "未运行" in r
+
+
+def test_ready_does_not_require_prog_loaded_bit(monkeypatch):
+    """★★ 真机实测口径：正常运行态 = prog=210 / run=1 / **prog_loaded=0** → 必须判为就绪。
+
+    旧判据 `servo and prog_loaded and run` 在这里会**误报未就绪**（本轮修的真 bug）。
+    """
+    _arm_link(monkeypatch, _MB(servo=1, prog_loaded=0))
     from app.services.motion import servo_not_ready_reason
     assert servo_not_ready_reason() is None
 
@@ -308,3 +369,38 @@ def test_unified_msg_is_the_single_source():
     import app.services.motion as M
     assert M.SERVO_NOT_READY_MSG.startswith("机器人没有就绪")
     assert "一键就绪" in M.SERVO_NOT_READY_MSG
+
+
+# =====================================================================
+# E —— ★★ 2026-10-12：「快照就绪」的唯一实现（修 `ready` 恒假的真 bug）
+# =====================================================================
+def test_snapshot_ready_true_when_running_normally():
+    """正常态 = servo + prog=210 + run=1 + AUTO + 无报警/急停 → 就绪（**不要求 prog_loaded**）。"""
+    from app.services.motion import snapshot_ready
+    snap = {"bits": {"servo": 1, "alarm": 0, "estop": 0, "manual": 0, "auto": 1,
+                     "remote": 0, "run": 1, "prog_loaded": 0},
+            "prog": _svc_no(), "alarm1": 0, "alarm2": 0}
+    assert snapshot_ready(snap) is True
+
+
+def test_snapshot_ready_false_when_program_not_running():
+    from app.services.motion import snapshot_ready
+    snap = {"bits": {"servo": 1, "alarm": 0, "estop": 0, "manual": 0, "auto": 1,
+                     "remote": 0, "run": 0, "prog_loaded": 1},
+            "prog": _svc_no(), "alarm1": 0, "alarm2": 0}
+    assert snapshot_ready(snap) is False
+
+
+def test_ready_judgement_is_single_source_in_status_and_collector():
+    """★ 静态核对（§5.5 铁律④ 同屏同源）：`/api/rc-status`（robot.py）与采集器（collector.py）
+    的 `ready` **都**来自 `motion.snapshot_ready` —— 绝不允许再各写一份
+    `servo and prog_loaded and run`（那正是"正常运行时 ready 恒假"的真 bug 源头）。"""
+    import inspect
+
+    import app.api.robot as robot
+    import app.services.collector as C
+    assert "snapshot_ready(" in inspect.getsource(robot)
+    assert "snapshot_ready(" in inspect.getsource(C)
+    # 反向钉：旧式错误判据不得再出现
+    assert "prog_loaded\"] and b[\"run\"]" not in inspect.getsource(robot)
+    assert 'b["prog_loaded"]' not in inspect.getsource(robot)

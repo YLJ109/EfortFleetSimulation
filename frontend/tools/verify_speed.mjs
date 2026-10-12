@@ -115,6 +115,15 @@ console.log("== C. 所有下发点都引用同一份速度（无硬编码） =="
   ok(`后端分拣接口的默认值在 [${SPEED_MIN}, ${SPEED_MAX}] 内`,
      d && Number(d[1]) >= SPEED_MIN && Number(d[1]) <= SPEED_MAX,
      d ? d[1] : "未找到");
+  // ★★ 2026-10-11（用户口径「**应该电脑的速度去执行**」）：拖滑块必须**推给后端**，
+  //   长流程才能在"下一步"用上新速度（分拣/井字棋原来是开局定速，运行中改滑块不生效）。
+  const appVue = read("src/App.vue");
+  ok("★ 顶栏滑块变化会推 `/control/ui-speed`（长流程下一步生效）",
+     /watch\(\(\) => exec\.speed/.test(appVue) && /"\/control\/ui-speed"/.test(appVue));
+  const ctrlPy = read("../backend/app/api/control.py");
+  ok("★ 后端 `/control/ui-speed` 只写内存登记（**绝不下发运动**）",
+     /@router\.post\("\/ui-speed"\)/.test(ctrlPy)
+     && !/def api_ui_speed[\s\S]{0,1500}?motion\.command/.test(ctrlPy));
 }
 
 console.log("");

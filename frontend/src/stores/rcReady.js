@@ -26,6 +26,12 @@ import { useLinkStore } from "./link.js";
 export const RC_POLL_MS = 4000;
 
 /**
+ * ★★ 2026-10-11 新增：判定"控制器快照已过期"的宽限窗口。
+ *   后端按 RC_POLL_MS(≈4s) 推帧，所以"两帧没来"(2×) 才算过期 —— 避免正常抖动误报黄灯。
+ */
+export const RC_STALE_MS = RC_POLL_MS * 2;
+
+/**
  * ★ 2026-10-11 统一"未就绪"提示（用户口径：「如果没有上电，执行点到点、移到什么的，
  *   全部提醒机器人没有就绪」）。
  *   与后端 motion.SERVO_NOT_READY_MSG（"机器人没有就绪：伺服未上电，请先点「一键就绪」"）
@@ -45,6 +51,11 @@ export const useRcReadyStore = defineStore("rcReady", {
     lastResult: null,  // 最近一次 /ready 或 /ready/cancel 的完整结果（steps/summary/error）
     lastAction: "",    // 上一次结果属于哪个动作："ready" | "cancel"（文案分流用）
     wsAt: 0,           // 最近一次收到 WS rc_status 帧的时间（stale 判定依据）
+    // ★★ 2026-10-11 新增：**外部时钟水位**（由 App 的 1s 时钟调用 `beat()` 推进）。
+    //   为什么必须外部推：`stale` 原来用 `Date.now()` 做判据 —— 它不是响应式依赖，
+    //   getter 只会在 `snap`/`wsAt` 变化时重算；而这两者**恰恰在 WS 帧停掉时不再变化**
+    //   → "过期"永远算不出来（控制器快照冻结仍挂绿灯 = 最危险的假正常）。
+    clk: 0,
     // ★ 一键就绪成功计数器：各页面 watch 它来「就绪后自动刷新点位」。
     //   为什么用计数器而不是布尔：连续两次就绪也要各触发一次刷新（布尔会因值相同不触发）。
     readyTick: 0,
@@ -69,8 +80,9 @@ export const useRcReadyStore = defineStore("rcReady", {
     },
     /** 点动触发位为 1 = 上一发点动还没收尾，此时禁止一键就绪。 */
     jogTrig: (s) => !!(s.snap && s.snap.jog_trig),
-    /** 数据是否过期：超过 RC_POLL_MS 没收到 WS 帧（或根本没有快照）判定为旧数据。 */
-    stale: (s) => (s.snap ? (Date.now() - s.wsAt > RC_POLL_MS) : true),
+    /** 数据是否过期：超过 RC_STALE_MS（两帧）没收到 WS 帧（或根本没有快照）判定为旧数据。
+     *  ★ 判据用 `clk`（外部时钟），**不用 `Date.now()`** —— 理由见 state 里 `clk` 的注释。 */
+    stale: (s) => (s.snap ? ((s.clk - s.wsAt) > RC_STALE_MS) : true),
     modeText: (s) => {
       const m = s.snap && s.snap.mode;
       if (m === "auto") return "AUTO 自动";
@@ -129,6 +141,9 @@ export const useRcReadyStore = defineStore("rcReady", {
     stop() {
       /* 无定时器需清理；保留空实现兼容组件卸载调用。 */
     },
+    /** ★★ 2026-10-11：由 **App 的 1s 时钟**推进"快照新鲜度"水位（理由见 state 里 `clk` 的注释）。
+     *  WS 帧一停，`wsAt` 不再变化，但 `clk` 继续走 → `stale` 才能如实变 true。 */
+    beat() { this.clk = Date.now(); },
 
     /** 一键就绪：清报警 → 伺服上电 → 加载点动服务程序 → 运行挂起 WAIT。 */
     async doReady(prog) {

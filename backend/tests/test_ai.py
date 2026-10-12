@@ -569,15 +569,49 @@ def _login(client):
     return {"X-Control-Token": r.json()["token"]}
 
 
-def _exec_sorting(client, headers, pid, plan):
+def _exec_sorting(client, headers, pid, plan, dry_run=True, speed_pct=5):
     import time as _t
     AI._plans[pid] = {"plan": plan, "at": _t.time(), "raw": "分拣"}
     try:
         return client.post("/api/ai/exec",
-                           json={"plan_id": pid, "confirm": True, "dry_run": True},
+                           json={"plan_id": pid, "confirm": True,
+                                 "dry_run": dry_run, "speed_pct": speed_pct},
                            headers=headers)
     finally:
         AI._plans.pop(pid, None)
+
+
+def test_ai_exec_start_honors_dry_run_and_speed(client, monkeypatch):
+    """★★ 2026-10-11 修复（"参数写死 → 开关失效 + 界面编故事"这一类）：
+      （a）`/ai/exec` 的「开始分拣」必须**尊重调用方的 `dry_run`** ——
+          改前写死 `StartIn(dry_run=True)`，于是 AI 页那颗「空跑」开关**完全不生效**
+          （机器人永远不动），而前端日志却按本地开关打印"真实下发"（界面与实际相反）；
+      （b）必须把**右上角全局速度**（`speed_pct`）一起传下去 —— 改前根本没传，
+          落到 `StartIn` 的兜底 5%（"速度不跟滑块"）。
+    """
+    from app.api import sorting as SORT
+    cap = {}
+    monkeypatch.setattr(SORT, "api_start",
+                        lambda body, tok=None: (cap.update(dry=body.dry_run,
+                                                          sp=body.speed_pct,
+                                                          dual=body.dual_face)
+                                                or {"ok": True, "state": {}}))
+    h = _login(client)
+    # ① 不勾「空跑」= 真实下发 + 速度跟滑块（37%）
+    r = _exec_sorting(client, h, "unit-real-" + "c" * 8,
+                      {"action": "sorting", "op": "start"},
+                      dry_run=False, speed_pct=37)
+    assert r.status_code == 200, r.text
+    assert cap.get("dry") is False, "dry_run 没传下去（AI 的「空跑」开关失效）"
+    assert cap.get("sp") == 37, "speed_pct 没跟右上角滑块传下去"
+    assert r.json().get("dry_run") is False, "回包要如实带回**实际**口径（供前端日志不再编故事）"
+    assert "真实下发" in (r.json().get("message") or ""), r.json()
+    # ② 勾上「空跑」→ api_start 收到 dry_run=True，回包文案也如实
+    r2 = _exec_sorting(client, h, "unit-dry-" + "d" * 8,
+                       {"action": "sorting", "op": "start"},
+                       dry_run=True, speed_pct=5)
+    assert cap.get("dry") is True
+    assert "空跑" in (r2.json().get("message") or ""), r2.json()
 
 
 def test_ai_exec_start_forwards_dual_face(client, monkeypatch):

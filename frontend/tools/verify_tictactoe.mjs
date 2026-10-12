@@ -18,7 +18,7 @@ import {
   O, X, WIN_LINES, DIFF_CN, newBoard, winner, isDraw, isFull, legal, other,
   cellToSlot, slotToCell, resultOf, moveCursor, diffCn, resultCn, symCn,
 } from "../src/games/tictactoe.js";
-import { createSortingBlocks } from "../src/three/sortingBlocks.js";
+import { createSortingBlocks, TTT_SYM_HEX } from "../src/three/sortingBlocks.js";
 import {
   pressedButtons, edgeButtons, dpadDir, stickDir, actionsOf, subscribeGamepad,
   simulateAction, readPad, readPads, ACTION_CN, BUTTON_CN,
@@ -188,7 +188,6 @@ console.log("== H. 前端输入路径（键盘 ↑↓←→ + Enter / 鼠标点�
 {
   const boardVue = read("src/components/TicTacToeBoard.vue");
   const cardVue = read("src/components/TicTacToeCard.vue");
-  const viewVue = read("src/components/SortingView.vue");
   const store = read("src/stores/tictactoe.js");
   const bs = scriptOf(boardVue);
   const bClean = stripComments(bs);
@@ -215,23 +214,29 @@ console.log("== H. 前端输入路径（键盘 ↑↓←→ + Enter / 鼠标点�
   ok("卡片：真实下发需二次确认（window.confirm）", /window\.confirm/.test(cardVue));
   ok("卡片：鼠标点击可用（按钮 @click）", /@click=/.test(cardVue));
 
-  ok("分拣页挂载了 2D 棋盘浮层", /<TicTacToeBoard/.test(viewVue));
-  // ★ 防回归钉（2026-10-11 用户口径）：2D 棋盘浮层**只在「井字棋」tab 下出现** ——
-  //   执行/点位 tab 不该被游戏棋盘挡住分拣画面。渲染条件 = 内建判据(store.gameVisible，
-  //   **复用、不在此重写**) && 本页 tab === "ttt"；这里钉住"模板按该条件条件渲染"，
-  //   并钉住"条件里确有 tab === ttt"（改回常显 / 漏判 tab 都会立刻红）。
-  ok("★ 浮层 TicTacToeBoard 的渲染条件含 tab === 'ttt'（且复用 store.gameVisible）",
-    /<TicTacToeBoard\s+v-if="showTttBoard"/.test(viewVue)
-    && /ttt\.gameVisible\s*&&\s*tab\.value === "ttt"/.test(viewVue));
-  ok("分拣页挂载了井字棋卡片", /<TicTacToeCard/.test(viewVue));
-  ok("分拣页进出启停井字棋轮询", /ttt\.startPolling\(\)/.test(viewVue)
-    && /ttt\.stopPolling\(\)/.test(viewVue));
+  // ★★ 2026-10-11 用户口径「**井字棋要搬走，放在新页面**」：
+  //   井字棋卡片 / 2D 棋盘浮层 / 手柄测试盒 现在都挂在 components/PadExecView.vue（手柄执行页）。
+  const padVue = read("src/components/PadExecView.vue");
+  const sortVue = read("src/components/SortingView.vue");
+  ok("★ 手柄执行页挂载了 2D 棋盘浮层", /<TicTacToeBoard/.test(padVue));
+  // ★ 防回归钉：2D 棋盘浮层**只在「井字棋」tab 下出现**（执行 tab 不该被棋盘挡住）。
+  //   渲染条件 = 本页 tab === "ttt" 且 store.gameVisible（**复用、不重写**）。
+  ok("★ 浮层 TicTacToeBoard 的渲染条件含 pad.tab === 'ttt'（且复用 store.gameVisible）",
+    /<TicTacToeBoard\s+v-if="showTttBoard"/.test(padVue)
+    && /pad\.tab === PAD_TAB_TTT/.test(padVue)
+    && /ttt\.gameVisible/.test(padVue));
+  ok("★ 手柄执行页挂载了井字棋卡片", /<TicTacToeCard/.test(padVue));
+  ok("★ 手柄执行页进出启停井字棋轮询", /ttt\.startPolling\(\)/.test(padVue)
+    && /ttt\.stopPolling\(\)/.test(padVue));
+  ok("★★ 井字棋已从「智能分拣」页**移走**（本页不再渲染任何游戏内容）",
+    !/<TicTacToeCard/.test(sortVue) && !/<TicTacToeBoard/.test(sortVue)
+    && !/<GamepadTestCard/.test(sortVue));
 
   console.log("");
   console.log("== I. store 口径（令牌 / 默认空跑 / 首轮静默 / 语音 / 复用暂停端点） ==");
   ok("全部请求走 apiControl（带控制令牌）", [...store.matchAll(/apiControl\(/g)].length >= 6);
   ok("未授权不发请求（_authed 门控）", /_authed\(/.test(store) && /controlActive/.test(store));
-  ok("默认空跑 dryRun: true", /dryRun:\s*true/.test(store));
+  ok("★★ 井字棋默认**真实下发**（用户：「不用空跑啊，要真机移动」）", /dryRun:\s*false/.test(store));
   ok("首轮静默：poll(true) 对齐游标", /poll\(true\)/.test(store) && /silent/.test(store));
   ok("暂停/继续复用 /control/run-pause|run-resume",
     /\/control\/run-pause/.test(store) && /\/control\/run-resume/.test(store));
@@ -296,6 +301,89 @@ console.log("== J. 3D 联动（B 区按棋盘显隐 / A 区按已取用隐藏）
     Object.values(b2).every((v) => v === false));
   ok("清除覆盖后 A 区料全部恢复", Object.values(a2).every((v) => v === true));
   sb.dispose();
+
+  // ★★ 2026-10-11（本轮）用户口径：「模拟的这些盒子要颜色区分呀，不是全部白色…
+  //    **蓝色是圆，绿色是叉**」→ 3D 棋子按**符号**上色 + 顶面圆/叉标记；`pending` 预告态。
+  console.log("");
+  console.log("== J2. 3D 棋子：符号上色（蓝圆/绿叉）+ 坠落 + 预告态 ==");
+  const mkSb = () => {
+    const s = createSortingBlocks(0);
+    s.setSlots(payload);
+    return s;
+  };
+  const bOf = (s, slot) => s.root.children.find((c) => c.userData && c.userData.sortSlot === slot);
+  const aOf = (s, name) => s.root.children.find((c) => c.userData && c.userData.sortName === name);
+  const markOf = (g) => g && g.children.find((c) => c.name === "sym-mark");
+  {
+    const s = mkSb();
+    const bd = newBoard();
+    bd[0] = O; bd[4] = X;                    // B1 = 圆(O)、B5 = 叉(X)
+    s.setTtt({ board: bd, used: ["A1", "A6"], holding: false, pending: [] });
+    s.update({});
+    const b1 = bOf(s, "B1"), b5 = bOf(s, "B5");
+    ok("★ B1（O）棋子 = **蓝色**（不再一律未知灰）",
+      !!b1 && b1.children[0].material.color.getHex() === TTT_SYM_HEX.O,
+      b1 ? b1.children[0].material.color.getHex().toString(16) : "无");
+    ok("★ B5（X）棋子 = **绿色**",
+      !!b5 && b5.children[0].material.color.getHex() === TTT_SYM_HEX.X);
+    ok("★ O 棋子顶面是**圆环**标记（按几何类型断言）",
+      !!markOf(b1) && markOf(b1).children.length >= 1
+      && markOf(b1).children.every((c) => c.geometry.type === "RingGeometry"));
+    ok("★ X 棋子顶面是**十字**（两根交叉横杠）",
+      !!markOf(b5) && markOf(b5).children.length === 2
+      && markOf(b5).children.every((c) => c.geometry.type === "BoxGeometry"));
+    const a1 = aOf(s, "A1"), a7 = aOf(s, "A7");
+    ok("★ A 区也按来源符号上色：A1（圆来源）蓝、A7（叉来源）绿 —— 这就是\"不是全部白色\"",
+      !!a1 && a1.children[0].material.color.getHex() === TTT_SYM_HEX.O
+      && !!a7 && a7.children[0].material.color.getHex() === TTT_SYM_HEX.X);
+    s.dispose();
+  }
+  {
+    // ★ 坠落：hidden→visible 才播；只在 step() 里推进；末态**严格**回格子面
+    const s = mkSb();
+    s.setTtt({ board: newBoard(), used: [], holding: false, pending: [] });
+    s.update({});                                   // firstUpdate → 不播（位置=格子面）
+    const restY = bOf(s, "B1").position.y;
+    const bd = newBoard(); bd[0] = O;
+    s.setTtt({ board: bd, used: [], holding: false, pending: [] });
+    s.update({});                                   // B1 由隐藏→显示 → 触发坠落
+    const yTop = bOf(s, "B1").position.y;
+    ok("★ 坠落：落子瞬间在格子上方（不是瞬移）",
+      yTop - restY > 0.03, `Δ=${((yTop - restY) * 1000).toFixed(1)}mm`);
+    s.step(0.016, null, null);
+    const yMid = bOf(s, "B1").position.y;
+    ok("★ 坠落：step 推进中，位置在格子面之上、且比初值低",
+      yMid > restY && yMid < yTop);
+    s.step(1.0, null, null);                        // 远超 FALL_DUR → 落定
+    ok("★ 坠落：落定后**严格**回到格子面高（不留残留偏移）",
+      Math.abs(bOf(s, "B1").position.y - restY) < 1e-12);
+    // ★ 预告态（机器人先手"已显示、待搬子"）：半透明 + 不坠落
+    const bd2 = newBoard(); bd2[8] = X;
+    s.setTtt({ board: bd2, used: [], holding: false, pending: [8] });
+    s.update({});
+    const b9 = bOf(s, "B9");
+    ok("★ 预告态：棋子可见但**半透明**（material.transparent = true）",
+      !!b9 && b9.visible === true && b9.children[0].material.transparent === true
+      && b9.children[0].material.opacity < 1);
+    ok("★ 预告态：**不播坠落**（位置就在格子面 —— 还没真搬，不能编故事）",
+      !!b9 && Math.abs(b9.position.y - restY) < 1e-12);
+    s.setTtt({ board: bd2, used: [], holding: false, pending: [] });
+    s.update({});
+    ok("★ 真搬完成（pending 清空）→ 棋子恢复实心",
+      bOf(s, "B9").children[0].material.transparent === false
+      && bOf(s, "B9").children[0].material.color.getHex() === TTT_SYM_HEX.X);
+    s.dispose();
+  }
+  console.log("");
+  console.log("== J3. 2D 棋盘符号色 + 预告态虚框（源码钉） ==");
+  {
+    const bv = read("src/components/TicTacToeBoard.vue");
+    ok("★ 2D：O 用蓝、X 用绿（用户口径\"蓝色是圆，绿色是叉\"）",
+      /\.ttt-cell\.o \.mk \{ color: #4b8bff/.test(bv)
+      && /\.ttt-cell\.x \.mk \{ color: #35c46a/.test(bv));
+    ok("★ 2D：预告态用虚框 + 读 state.pending（与后端同源）",
+      /pendingSet/.test(bv) && /st\.pending/.test(bv) && /\.ttt-cell\.pending \{/.test(bv));
+  }
 }
 
 console.log("");
@@ -343,7 +431,9 @@ console.log("== K. 手柄（Xbox / 标准映射） ==");
     && JSON.stringify(actionsOf([1])) === '["stop"]'
     && JSON.stringify(actionsOf([3])) === '["replay"]'
     && JSON.stringify(actionsOf([8])) === '["reset"]');
-  ok("未映射按钮（LB=4）不产生任何动作", actionsOf([4]).length === 0);
+  ok("★ LB/RB 已映射为中性动作名（l1/r1，供手柄执行页用）",
+    JSON.stringify(actionsOf([4])) === '["l1"]'
+    && JSON.stringify(actionsOf([5])) === '["r1"]');
   ok("subscribeGamepad 返回可取消函数（node 无 rAF 也不崩）",
     (() => { const un = subscribeGamepad(() => {}); const isFn = typeof un === "function";
              un(); return isFn; })());
@@ -355,16 +445,23 @@ console.log("== K. 手柄（Xbox / 标准映射） ==");
     /subscribeGamepad\(/.test(boardSrc) && /moveCursor\(/.test(boardSrc)
     && /action === "confirm"/.test(boardSrc)
     && !/action === "start"/.test(boardSrc));
-  ok("卡片接手柄：开始/暂停/停止/复盘/复位",
+  ok("卡片接手柄：开始/暂停/停止/复原（Y 与 View 合并为一个动作）",
     /subscribeGamepad\(/.test(cardSrc)
     && /action === "start"/.test(cardSrc) && /action === "pause"/.test(cardSrc)
-    && /action === "stop"/.test(cardSrc) && /action === "replay"/.test(cardSrc)
-    && /action === "reset"/.test(cardSrc));
-  ok("只在分拣页响应（不劫持全局手柄）",
-    /robot\.activeView !== "sort"/.test(boardSrc)
-    && /robot\.activeView !== "sort"/.test(cardSrc));
-  ok("手柄复位走二次确认（不依赖手柄点不了的 confirm 弹窗）",
-    /doReset\(true\)/.test(cardSrc) && /padResetArm/.test(cardSrc));
+    && /action === "stop"/.test(cardSrc)
+    && /action === "replay" \|\| action === "reset"/.test(cardSrc));
+  ok("只在「手柄执行」页·井字棋 tab 响应（不劫持全局手柄，也不与同页执行 tab 抢键）",
+    /robot\.activeView !== "pad"/.test(cardSrc) && /pad\.tab !== PAD_TAB_TTT/.test(cardSrc)
+    // 棋盘把同一判据收敛进 onTttPage()（正面写法），钉住它确实同时看页与 tab
+    && /function onTttPage\(\)/.test(boardSrc)
+    && /robot\.activeView === "pad" && pad\.tab === PAD_TAB_TTT/.test(boardSrc));
+  // ★★ 2026-10-11（用户口径「这个不需要啊」，附图 = 开局那个 confirm 弹窗）：
+  //   界面的 `window.confirm` **已全部移除**（开局 / 切真实下发 / 复原）——
+  //   点一下就执行；真机保护仍由未就绪闸门 + 安全围栏 + 界面上的真实/空跑开关兜着。
+  ok("★ 界面不再用 window.confirm 做真机动作确认（用户口径「这个不需要啊」）",
+    !/window\.confirm\(/.test(cardSrc));
+  ok("手柄复原仍保留「按两次」确认（手柄点不了弹窗，这是它唯一的确认手段）",
+    /doRestore\(\)/.test(cardSrc) && /padRestoreArm/.test(cardSrc));
 }
 
 console.log("");
@@ -436,12 +533,24 @@ console.log("== L. 手柄测试盒（模拟触发 = 与真手柄同一条广播�
     /litButtons/.test(gpSrc) && /markLit\(cur, now\)/.test(gpSrc) && /LIT_MS/.test(gpSrc));
   ok("litButtons 在 node 返回数组（无手柄 → 空）",
     Array.isArray(litButtons()) && litButtons().length === 0);
-  const sortVue2 = read("src/components/SortingView.vue");
-  ok("分拣页挂载手柄测试盒", /<GamepadTestCard\s*\/>/.test(sortVue2)
-    && /import GamepadTestCard/.test(sortVue2));
+  const padVue2 = read("src/components/PadExecView.vue");
+  ok("★ 手柄执行页挂载手柄测试盒（跟着手柄走；分拣页已不再有）",
+    /<GamepadTestCard\s*\/>/.test(padVue2) && /import GamepadTestCard/.test(padVue2)
+    && !/import GamepadTestCard/.test(read("src/components/SortingView.vue")));
 
   // ⑤ 井字棋卡片也常驻显示连接状态
   ok("井字棋卡片也显示「手柄已连接」", /手柄已连接/.test(read("src/components/TicTacToeCard.vue")));
+
+  // ⑥ ★★ 2026-10-11：测试盒**按 tab 换表**（用户口径「移除掉没有的测试键」）——
+  //    执行 tab 只列本 tab 真实存在的键（含新的 LB/RB），井字棋 tab 用原表。
+  ok("★ 测试盒按 tab 切表（SIMS/MAP_ROWS 随 pad.tab 切换）",
+    /pad\.tab === PAD_TAB_TTT \? SIMS_TTT : SIMS_EXEC/.test(boxSrc)
+    && /pad\.tab === PAD_TAB_TTT \? MAP_TTT : MAP_EXEC/.test(boxSrc));
+  ok("★ 执行 tab 的模拟键含 A 原位 / Y 正上位 / LB 正面 / RB 反面 / Start 启动关闭",
+    /A 原位/.test(boxSrc) && /Y 正上位/.test(boxSrc)
+    && /LB 正面/.test(boxSrc) && /RB 反面/.test(boxSrc) && /Start 启动\/关闭/.test(boxSrc));
+  ok("★ 执行 tab 的表含 LB/RB（对应新动作名 l1/r1）",
+    /a: "l1"/.test(boxSrc) && /a: "r1"/.test(boxSrc));
 }
 
 console.log("");
@@ -522,16 +631,20 @@ console.log("== M. 后端来源（Windows XInput 直读兜底） ==");
   // ★★ 2026-10-11（方案 §D）「正常 / 快速」两模式 + 「只剩一个空位免等待」
   ok("卡片有「节奏」正常/快速开关（默认正常）",
     /ttt\.fast/.test(tttCard) && /正常/.test(tttCard) && /快速/.test(tttCard));
-  ok("快速模式有如实提示（需 J6正面/J6反面、不与自证合并、免等待）",
-    /J6正面/.test(tttCard) && /J6反面/.test(tttCard)
+  ok("快速模式有如实提示（无需录制正反面、不与自证合并、免等待）",
+    /无需录制正反面/.test(tttCard) && /虚拟切面/.test(tttCard)
     && /免等待/.test(tttCard) && /不与「拍照自证」合并/.test(tttCard));
   ok("store 开局透传 fast",
     /fast: this\.fast/.test(tttStore));
   ok("后端 StartIn.fast 默认 false（正常=零回归）",
     /fast: bool = Field\(default=False/.test(gpApiTtt));
-  ok("后端快速模式需要 J6正面/J6反面（_needed_points 带 fast）",
-    /def _needed_points\(verify: bool = False, fast: bool = False\)/.test(gpApiTtt)
-    && /OPTIONAL_EXTRA_POINTS/.test(gpApiTtt));
+  // ★★ 2026-10-12 终版（用户口径「不用录制正反面」）：快速翻转 = 虚拟切面命令
+  //   （正面 = 该点自身录制 J6、反面 = 当前点 J6 − 180，按点名自动折算，不读点位库）
+  //   → `_needed_points` 不再带 fast、不再把 J6正面/J6反面 列进必需点位
+  //   （否则用户删掉库里历史遗留行后，快速模式会被"缺点位" 400 卡死）。
+  ok("★ 后端快速模式不再要求库里有 J6正面/J6反面（_needed_points 无 fast / 无 OPTIONAL_EXTRA）",
+    /def _needed_points\(verify: bool = False\)/.test(gpApiTtt)
+    && !/OPTIONAL_EXTRA_POINTS/.test(gpApiTtt));
   ok("后端快速模式 = 一趟取两子（_play_two 复用翻转 + 双面放件）",
     /def _play_two\(/.test(gpApiTtt) && /_move_flip_j6\(/.test(gpApiTtt)
     && /_dual_drop\(/.test(gpApiTtt));
@@ -548,41 +661,76 @@ console.log("== M. 后端来源（Windows XInput 直读兜底） ==");
 }
 
 console.log("");
-console.log("== N. 真实复盘（机器人真的动 · 逐子搬回原位） ==");
+console.log("== N. 「复原」（复位 + 复盘合并 · 真机 · 逐子搬回原位） ==");
 {
   const store = read("src/stores/tictactoe.js");
   const cardVue = read("src/components/TicTacToeCard.vue");
   const boardVue = read("src/components/TicTacToeBoard.vue");
   const pyApi = read("../backend/app/api/tictactoe.py");
 
-  // ---- 后端：终点/顺序/闸门/终态 ----
-  ok("★ 后端：真实复盘端点 POST /tictactoe/replay（复用 _carry，不新造下发通道）",
-    /@router\.post\("\/replay"\)/.test(pyApi)
-    && /def _replay_run\(/.test(pyApi)
-    && /_carry\(ctx, pmap, st, dry, TT\.cell_to_slot\(cell\), src, "复盘"\)/.test(pyApi));
-  ok("★ 后端：复盘按落子**逆序**（LIFO）搬回 + 逐子回执（第几个子 / 去向）",
-    /reversed\(moves\)/.test(pyApi) && /复盘：搬回第/.test(pyApi));
-  ok("★ 后端：复盘接统一未就绪闸门（dry 继承本局口径）",
-    /reject_if_not_ready\(dry=dry\)/.test(pyApi));
-  ok("★ 后端：复盘终态清空棋盘（子回原位 → 复位到初始）",
+  // ---- 后端：只有一个实现（旧的 _reset_run 已删）/ 顺序 / 闸门 / 终态 ----
+  ok("★ 后端：「复原」唯一实现 `_restore_run`（旧的 `_reset_run` 已删除 —— 它把 dry 写死成 True）",
+    /def _restore_run\(/.test(pyApi) && !/_reset_run/.test(pyApi));
+  ok("★ 后端：`/reset`（复原）与 `/replay`（兼容别名）走**同一**实现 `_launch_restore`",
+    (pyApi.match(/return _launch_restore\(/g) || []).length >= 2
+    && /def _launch_restore\(/.test(pyApi));
+  ok("★ 后端：复原复用 `_carry`，不新造下发通道，且**按该件的面**取（face=face）",
+    /_carry\(ctx, pmap, st, dry, TT\.cell_to_slot\(cell\), src, "复原", face=face\)/.test(pyApi));
+  // ★★ 2026-10-11（用户「先放回第二次，然后放回第一次，放回的时候也不要乱旋转」）：
+  //   复原顺序 = **先反面件、后正面件**（唯一口径 `S.order_for_restore`），
+  //   同一面内保持"落子逆序"；每件按 `moves[].face` 用**它自己那个面**去取。
+  ok("★ 后端：复原顺序走唯一口径 `order_for_restore`（先反面后正面）+ 同面内落子逆序",
+    /S\.order_for_restore\(list\(reversed\(moves\)\)\)/.test(pyApi)
+    && /S\.norm_face\(mv\.get\("face"\)\)/.test(pyApi));
+  ok("★ 后端：`_carry` 的 face 参数化（先在正上方摆面 → 再 keep 下去取，不做多余翻转）",
+    /min_conf: float = 0\.3, face: str = S\.FACE_FRONT\)/.test(pyApi)
+    && /_air\(ctx, "suck", dry, "%s·吸" % who_cn, st, face=face\)/.test(pyApi)
+    && /_move\(ctx, pmap, src_slot \+ "上", speed, dry, "%s·取料上方" % who_cn, st, face=face\)/.test(pyApi));
+  ok("★ 后端：`moves[]` 记下 `face`（没有它复原只能瞎猜哪件是反面）",
+    /"face": S\.FACE_FRONT\}\)/.test(pyApi) && /"face": S\.FACE_BACK\}\)/.test(pyApi));
+  ok("★ 后端：持件按面如实登记（`face_slot_put/take` → 3D 显示哪面有件，与分拣双面同口径）",
+    /S\.face_slot_put\(st, "lower"/.test(pyApi) && /S\.face_slot_put\(st, "upper"/.test(pyApi)
+    && /S\.face_slot_take\(st, "upper"\)/.test(pyApi));
+  ok("★ 后端：快速模式**先落用户子（反面）→ 再落机器人子（正面）**（顺着停面、少翻一次）",
+    pyApi.indexOf('"用户·落子"') < pyApi.indexOf('"机器人·落子"')
+    && /_move\(ctx, pmap, S\.START_POINT, speed, dry, "经起点", st, face=S\.FACE_BACK\)/.test(pyApi));
+  ok("★ 后端：复原按落子**逆序**搬回 + 逐子回执（第几个子 / 去向 / 用哪面）",
+    /reversed\(moves\)/.test(pyApi) && /复原：搬回第/.test(pyApi) && /原位·%s/.test(pyApi));
+  ok("★ 后端：真实复原接统一未就绪闸门（空跑局不走真机、只清棋盘并如实说明）",
+    /reject_if_not_ready\(dry=False\)/.test(pyApi) && /没有真实搬动过棋子/.test(pyApi));
+  ok("★ 后端：复原终态清空棋盘（子回原位 → 复位到初始）",
     /st\.update\(\{"board": TT\.new_board\(\), "moves": \[\], "used": \[\]/.test(pyApi));
 
+  // ---- 后端：预告态（机器人先手"已显示、待搬子"）----
+  ok("★ 后端：`pending` 预告态随 state 下发，且真搬后/收尾/复原都会清空",
+    /"pending": \[\]/.test(pyApi)
+    && /_set_state\(st, pending=\[int\(cell_r\)\]\)/.test(pyApi)
+    && /pending=\[\]/.test(pyApi));
+
   // ---- 前端 store ----
-  ok("★ 前端 store：startReplay 发 POST /tictactoe/replay",
-    /async startReplay\(/.test(store)
-    && /apiControl\("\/tictactoe\/replay",\s*\{\s*method:\s*"POST"/.test(store));
+  ok("★ 前端 store：复原走 POST /tictactoe/reset（dry_run 决定真机 / 只清棋盘）",
+    /async reset\(\)/.test(store)
+    && /apiControl\("\/tictactoe\/reset",\s*\{\s*method:\s*"POST"/.test(store)
+    && /本局是空跑（没有真实搬动过棋子）/.test(store));
+  ok("★ 前端 store：不再单列 `startReplay`（一处实现、一处入口）",
+    !/async startReplay\(/.test(store));
   ok("前端 store：回放（只查看）仍走 GET /tictactoe/replay",
     /apiControl\("\/tictactoe\/replay"\)/.test(store) && /async loadReplay\(/.test(store));
+  ok("★ 前端 store：把 `pending` 同步给 3D（预告态渲染）",
+    /pending:\s*Array\.isArray\(s\.pending\)/.test(store));
 
   // ---- 前端卡片 ----
-  ok("★ 卡片：「复盘」按钮 → 真实复盘（真实局二次确认）",
-    /复盘/.test(cardVue) && /doReplay/.test(cardVue) && /ttt\.startReplay\(\)/.test(cardVue)
-    && /window\.confirm/.test(cardVue) && /真实复盘/.test(cardVue));
+  ok("★ 卡片：只保留「复原」按钮（不再有「复盘」按钮字面量）",
+    /<Icon name="refresh"[^>]*\/>\s*复原/.test(cardVue)
+    && !/>\s*复盘\s*</.test(cardVue)
+    && !/doReplay/.test(cardVue));
+  ok("★ 卡片：「复原」真实局要二次确认（会真动机器人）",
+    /doRestore/.test(cardVue) && /ttt\.reset\(\)/.test(cardVue) && /window\.confirm/.test(cardVue));
   ok("★ 卡片：「回放」按钮 → 只读回放（不动机器人）",
     /回放/.test(cardVue) && /doViewReplay/.test(cardVue) && /ttt\.loadReplay\(\)/.test(cardVue));
-  ok("★ 卡片：手柄复盘也二次确认（真实局，无弹窗可用）",
-    /padReplayArm/.test(cardVue) && /请再按一次 Y/.test(cardVue));
-  ok("★ 棋盘标签如实：回放=只查看（不再把复盘说成\"不动机器人\"）",
+  ok("★ 卡片：手柄复原也二次确认（真实局，无弹窗可用；Y 与 View 合并）",
+    /padRestoreArm/.test(cardVue) && /请再按一次确认/.test(cardVue));
+  ok("★ 棋盘标签如实：回放=只查看（不动机器人）",
     /回放（棋谱记录 · 只查看不动机器人）/.test(boardVue));
 }
 

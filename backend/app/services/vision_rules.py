@@ -28,6 +28,7 @@ from app.core.safety_const import clamp_speed
 from app.utils.joints import parse_joints
 from app.db.crud import get_point, get_program, list_programs
 from app.db.database import SessionLocal
+from app.services.collector import collector          # ★ 取当前实时姿态（"到点不旋转"要读当前 J6）
 from app.services.kinematics import fk_matrix, ikine, rpy_to_matrix, tcp_of
 # ★ 审计修复 P1-E1：限位读取与判定的唯一实现在 services/limits.py。
 #   原实现的兜底限位是 ±360（其它三处都是 ±180），且 `_in_limits` 按 range(6)
@@ -72,16 +73,18 @@ def normalize_rules(raw: Optional[dict]) -> Dict[str, Any]:
             pid = int(pid) if pid not in (None, "", "null") else None
         except Exception:
             pid = None
-        try:
-            sp = int(it.get("speed_pct") or 100)
-        except Exception:
-            sp = 100
         out_rules.append({
             "enabled": bool(it.get("enabled", True)),
             "color": color,
             "program_id": pid,
             "program_name": str(it.get("program_name") or "")[:64],
-            "speed_pct": max(1, min(100, sp)),
+            # ★★ 2026-10-11 修复（"参数写死 → 安全缺省失效"这一类）：
+            #   原来是 `int(it.get("speed_pct") or 100)`，于是"没设速度"被**落盘成 100%**；
+            #   而 `execute_rule` 里的 `clamp_speed(rule["speed_pct"])` 拿到 100 还是 100 ——
+            #   那段"缺省改为安全下限"的注释**从未生效**（视觉规则是相机事件**无人值守**触发，
+            #   缺省跑满速是最危险的默认值）。现在缺省/非法 → `clamp_speed(None)` = SPEED_MIN(5)，
+            #   越界 → 夹到 [5,100]（与全项目唯一速度口径同源）。
+            "speed_pct": clamp_speed(it.get("speed_pct")),
             "auto": bool(it.get("auto", False)),
             "note": str(it.get("note") or "")[:120],
         })
@@ -156,8 +159,8 @@ def _steps_from_items(items, db) -> List[dict]:
             except ValueError as e:
                 out.append({"index": idx, "ok": False, "error": str(e)})
                 continue
-            st = {"index": idx, "name": row.name, "mode": "joint", "joints": joints,
-                  "speed_pct": sp, "dwell_ms": dw}
+            st = {"index": idx, "name": row.name, "point_id": row.id, "mode": "joint",
+                  "joints": joints, "speed_pct": sp, "dwell_ms": dw}
             if row.kind == "cartesian":
                 try:
                     t = json.loads(row.tcp or "null")
@@ -179,6 +182,22 @@ def _steps_from_items(items, db) -> List[dict]:
         else:
             out.append({"index": idx, "ok": False, "error": "步骤缺少 joints / tcp / point_id"})
     return out
+
+
+def _live_joints_or_none() -> Optional[List[float]]:
+    """当前实时 6 轴；拿不到 → None（**不抛**）—— 与 `api/sorting.py` 的同名函数**同口径**。
+
+    ★ 为什么需要：2026-10-11 旋转管控下，"到点不旋转"要求**读得到当前 J6** 才能保证不转；
+      读不到 → 该步**拒绝**（`resolve_target_joints` 返回原因），绝不"按点位自身值转一下"。
+    """
+    snap = collector.get_latest()
+    if snap:
+        try:
+            return [float(snap["j%d" % i]) for i in range(1, 7)]
+        except Exception:  # noqa: BLE001 —— 快照字段异常 → 当作拿不到
+            pass
+    lt = list(getattr(motion, "last_target", None) or [])
+    return lt if len(lt) == 6 else None
 
 
 def execute_rule(rule: dict, *, color: str = "", seq: int = 0,
@@ -230,8 +249,26 @@ def execute_rule(rule: dict, *, color: str = "", seq: int = 0,
         # ★ 全维度审查 B-05：原缺省 100% —— 视觉链路是"相机事件无人值守触发"，
         #   缺省跑满速是极其危险的默认值。改为安全下限。
         speed_pct = clamp_speed(rule.get("speed_pct"))
+        # ★★ 2026-10-11：**视觉规则不读也不写"界面滑块"** —— 它是**无人值守**的自动执行，
+        #   必须用**规则自己配的**速度；若它也去登记/跟随，就会把操作员拖的 50% 顶成规则里的
+        #   20%（现场："快速分拣偶尔变成 20%" 的根因之一）。
         run: List[dict] = []
         ok_all = True
+        # ★★ 2026-10-12（用户口径「**原位到起点和摄像头点也是禁止执行的动作，必须在正上位执行**」
+        #   「**任何程序也是**」）：无人值守规则**不走 `api/sorting._move`**（自己这条下发链）
+        #   → 「原位出发」规则必须在这里**也有一份**（点名步骤 + 显式 6 轴步骤都管）；
+        #   点位姿态表**本次执行惰性只读一次**。
+        _point_poses_box: Dict[str, object] = {"rows": None, "err": None}
+
+        def _point_poses_once() -> Dict[str, object]:
+            if _point_poses_box["rows"] is None and _point_poses_box["err"] is None:
+                try:
+                    _point_poses_box["rows"] = S.all_point_poses()
+                except Exception as _re:               # noqa: BLE001 —— 判不出 → fail-safe
+                    _point_poses_box["err"] = str(_re)[:120]
+                    _point_poses_box["rows"] = {}
+            return _point_poses_box
+
         for st in steps:
             if st.get("ok") is False:
                 run.append(st)
@@ -277,11 +314,23 @@ def execute_rule(rule: dict, *, color: str = "", seq: int = 0,
             #   基姿态取 `motion.last_target`（本模块本来就用它作 IK 基姿态）；拿不到 → 拒绝该步。
             #   ★ 决策收敛到唯一入口 `S.resolve_target_joints`（与"残影预演"同源）。
             #   ★★ 统一口径（2026-10-11 用户原话「我在正上位反面，去原料区是变成了正面」）：
-            #     规则步骤点名若为**原料位**（A1…A9/B1…B9）→ face 归一成 `keep`（保持当前面、绝不翻面）；
-            #     其余点位照旧（缺省正面 → 整姿态，零回归）。
-            target, _j6_only, _j6_reason = S.resolve_target_joints(
-                st.get("name"), target, lambda: list(motion.last_target or []),
-                face=S.face_for_target(st.get("name"), S.FACE_FRONT))
+            #     规则步骤点名若为**原料位**（A1…A9/B1…B9）→ face 归一成 `keep`（保持当前面、绝不翻面）。
+            #   ★★★ 2026-10-11 旋转管控：**无人值守的规则一律不旋转**（`auto` = 保持当前 J6）——
+            #     用户口径「J6 如果用户在旋转、双面分拣、AI 快速分拣、游戏过程中可以旋转，
+            #     **其他时间一律不允许旋转**」；后台自动规则没有人看着，更没有理由转。
+            #   ★ 但**显式 6 轴步骤**（`joints` / IK 解算出来的目标，不来自点位）**不走这套**：
+            #     那是程序里**明确写死的目标姿态**，与 `/control/move` 的显式 joints 同一口径 → 原样透传。
+            #     ★ 判据 = **是否来自点位**（`point_id` 存在）且 `mode == "joint"`；
+            #       笛卡尔点位步的 J6 是 IK 解出来的（覆盖它就到不了那个 TCP 姿态），也原样透传。
+            # ★★ 2026-10-12「原位出发」规则见下方（紧接"未就绪"闸门之后）——
+            #   **点名步骤 + 显式 6 轴步骤都管**，与 `/control/run-file`、`api/sorting._move` 同一口径。
+            if st.get("point_id") is not None and st.get("mode") == "joint":
+                target, _j6_only, _j6_reason = S.resolve_target_joints(
+                    st.get("name"), target, _live_joints_or_none,
+                    face=S.effective_face(st.get("name"), S.FACE_AUTO))
+            else:
+                target, _j6_only, _j6_reason = S.resolve_target_joints(
+                    None, target, None, face=S.FACE_FRONT)
             if _j6_reason:
                 run.append({"index": st["index"], "ok": False, "error": _j6_reason})
                 ok_all = False
@@ -308,6 +357,48 @@ def execute_rule(rule: dict, *, color: str = "", seq: int = 0,
                 res["note"] = _nready
                 ok_all = False
                 break
+            # ★★ 2026-10-12「原位安全路径」**自动补垂直段**（用户口径：「**禁止原位到原位执行**」
+            #   「**禁止原位去起点和摄像头点**」「**禁止摄像头点位或者起点直接去原点**」
+            #   「**如果原位旋转，先回到正上位，旋转，然后来到原位**」「**任何程序也是**」）：
+            #   无人值守规则也**自动补段**（`pre` 在动作前、`post` 在动作后 = 切完回原位）。
+            #   ★ 只在"真机会下发"时判（模拟/仿真链路下实时姿态无意义，不误伤）；
+            #     拿不到实时姿态 → 不补；读库失败 / 正上位未示教 → **fail-safe 拒绝该步**。
+            #   ★ **笛卡尔（IK）步骤不判**（见 AGENTS §7 已知限制）。
+            _pre_v, _post_v, _vbad = [], [], None
+            if real_write_enabled() and st.get("mode") == "joint":
+                _live0 = _live_joints_or_none()
+                if _live0:
+                    _box0 = _point_poses_once()
+                    if _box0.get("err"):
+                        _vbad = ("无法确认机器人当前位置与目标（读点位库失败：%s）"
+                                 "—— 为安全已拒绝该步" % _box0["err"])
+                    else:
+                        _frompt = st.get("point_id") is not None
+                        _pre_v, _post_v, _vbad = S.raw_slot_step_targets(
+                            _live0, _box0.get("rows") or {},
+                            target_name=(str(st.get("name") or "") if _frompt else None),
+                            target_joints=(None if _frompt else target))
+                    if not _vbad:
+                        for _nm, _jt in _pre_v:
+                            _prv = motion.command(
+                                [float(v) for v in _jt], sp, dw,
+                                abort_check=lambda: not auto_execute_enabled())
+                            if not _prv.get("ok"):
+                                _vbad = "原位安全路径「%s」失败：%s" % (_nm, _prv.get("error"))
+                                break
+            if _vbad:
+                run.append({"index": st["index"], "ok": False, "blocked": True, "reason": _vbad})
+                res["outcome"] = "blocked"
+                res["note"] = _vbad
+                ok_all = False
+                break
+            # ★ 主段若是"抬到目标正上位"之后的**垂直下降** → 主段 J6 也冻结（升降不转）
+            _vnm = str(st.get("name") or "") if st.get("point_id") is not None else None
+            if _pre_v and _vnm and S.is_vertical_move(_pre_v[-1][0], _vnm):
+                try:
+                    target = S.compose_j6_only(target, float(_pre_v[-1][1][5]))
+                except Exception:                      # noqa: BLE001
+                    pass
             # ★ 运行中关闭 auto_execute 开关也能立即停，不必等这一发走完
             rr = motion.command([float(x) for x in target], sp, dw,
                                 abort_check=lambda: not auto_execute_enabled())
@@ -318,6 +409,10 @@ def execute_rule(rule: dict, *, color: str = "", seq: int = 0,
             if not rr.get("ok"):
                 ok_all = False
                 break
+            # ★ 原位安全路径：`post` 段（只有"原位切面"才有 —— 切完回原位）
+            for _nm, _jt in _post_v:
+                motion.command([float(v) for v in _jt], sp, dw,
+                               abort_check=lambda: not auto_execute_enabled())
             time.sleep(max(0.15, dw / 1000.0 + 0.2))
 
         res["steps"] = run

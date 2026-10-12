@@ -1,4 +1,4 @@
-﻿<script setup>
+﻿﻿<script setup>
 // =====================================================================
 // 底部状态区（状态片条）：运行日志 / 摄像头 / 示教器 / 真机链路。
 //
@@ -104,7 +104,10 @@ function robotTone() {
 function rcTone() {
   if (!rc.ok) return "err";                 // ★ 读不到控制器寄存器快照（模拟/离线/未连接）
   const b = rc.bits || {};
-  if (b.alarm || b.estop) return "err";     // ★ 报警 / 急停
+  if (b.alarm || b.estop) return "err";     // ★ 报警 / 急停（旧快照里报过警也不能当没事）
+  // ★★ 2026-10-11：快照已过期 → **绝不报绿**。数据早停了还挂绿灯是现场最危险的假正常；
+  //   "不知道"只能报黄，不能报成"没事"。水位由 App 的 1s 时钟推进（见 rcReady.beat）。
+  if (rc.stale) return "warn";
   if (!rc.joggable) return "err";           // ★ 非 AUTO/远程档：上位机指令无效
   if (rc.ready) return "ok";                // ★ 完整就绪
   return "warn";                            // 中间态（正在就绪 / 条件未满足）
@@ -116,9 +119,15 @@ const linkTab = computed(() => {
   const robot = link.robot || null;
   const rlab = (robot && robot.label) || "未知";
   const robotBad = (rt === "err" || rt === "warn");   // 机器人链路不正常 → 先报链路
+  // ★★ 2026-10-11 修复两处"把未知说成已知"：
+  //   ① 快照过期 → 报"数据过期"（不再拿最后一次的结论硬说）；
+  //   ② `servoOn === null`（后端未返回 servo_on）→ 报"未知"，**不再当成"未上电"**
+  //      （`null` 是三元的 falsy，原写法会把"不知道"说成"知道"）。
   const readyValue = !rc.ok ? "读不到"
-    : rc.ready ? "就绪"
-      : (rc.servoOn ? "未就绪" : "未上电");
+    : rc.stale ? "数据过期"
+      : rc.ready ? "就绪"
+        : rc.servoOn === null ? "未知"
+          : (rc.servoOn ? "未就绪" : "未上电");
   const value = robotBad ? rlab : readyValue;
   const bits = ["机器人 " + rlab, "就绪链 " + readyValue];
   return {
@@ -191,7 +200,9 @@ async function logScrollToBottom() {
   const el = logBody.value;
   if (el) el.scrollTop = el.scrollHeight;
 }
-watch(() => exec.log.length, () => { if (logStick.value) logScrollToBottom(); });
+// ★★ 水位用 `logSeq`（只增不减），**不能用 `log.length`** —— 日志满 LOG_MAX(240) 后
+//   会 splice 掉旧行，长度恒定 → 长度型 watch 不再触发 → 恰恰在最需要跟底时断掉。
+watch(() => exec.logSeq, () => { if (logStick.value) logScrollToBottom(); });
 watch(open, (k) => { if (k === "log") { logStick.value = true; logScrollToBottom(); } });
 
 /** 各片面板宽度：日志要宽一点看得清，真机链路要放得下 RcReadyCard，其余沿用默认。 */

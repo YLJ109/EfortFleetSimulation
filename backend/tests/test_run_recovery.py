@@ -104,9 +104,11 @@ def test_finish_is_first_statement_of_finally_in_every_executor():
 
     targets = [(A._run, "ai._run"),
                (S._run_sorting, "sorting._run_sorting"),
-               (T._run, "tictactoe._run"),
-               (T._reset_run, "tictactoe._reset_run"),
-               (T._replay_run, "tictactoe._replay_run")]
+               # ★★ 2026-10-11 旋转管控：井字棋的 `_run` / `_restore_run` 现在是**薄包装**
+               #   （只负责 `with S.allow_rotate():` 声明"游戏=允许翻 J6"），真正的执行器
+               #   是 `_run_body` / `_restore_run_body` —— 收尾钉要看的是**执行器本体**。
+               (T._run_body, "tictactoe._run_body"),
+               (T._restore_run_body, "tictactoe._restore_run_body")]
     for fn, label in targets:
         src = inspect.getsource(fn)
         body = src[src.index("finally:"):]

@@ -73,7 +73,7 @@ eq(SHORTCUT_GROUPS.filter((g) => !shortcutRows().some((r) => r.group === g)), []
    "A5 每个分组都至少有一个动作（空分组会在「关于」页留下空白块）");
 ok(shortcutRows().reduce((n, r) => n + r.items.length, 0) === SHORTCUTS.length,
    "A6 分组后条目总数 == 定义总数（没有动作被漏掉）");
-eq(TAB_KEY_COUNT, 8, "A7 数字键位数 = 8（= 顶栏可直达模块数，见 K1）");
+eq(TAB_KEY_COUNT, 9, "A7 数字键位数 = 9（= 顶栏可直达模块数，见 K1）");
 // 每个按键只能属于一个动作，否则"按 e 到底干什么"就变成看代码顺序了
 {
   const seen = new Map();
@@ -100,7 +100,7 @@ for (const k of ["e", "q", "1", " ", "Escape", "Enter"]) {
 section("C. 打字优先：焦点在输入控件里时，所有快捷键整体失效");
 // ---------------------------------------------------------------------
 // ★ 这一节是整套快捷键里最重要的一条：它是"打字打成急停/打成程序运行"的唯一防线。
-for (const k of ["e", "q", "1", "2", "8", " ", "Escape", "Enter"]) {
+for (const k of ["e", "q", "1", "2", "9", " ", "Escape", "Enter"]) {
   eq(resolveKey(key(k), ctx({ typing: true })), "", `C1 打字中按 ${JSON.stringify(k)} → 不触发任何动作`);
 }
 // 即使同时满足其它触发条件（程序页 + 空格 / 急停锁定 + Enter）也必须失效
@@ -119,13 +119,13 @@ ok(isTypingTarget(null) === false && isTypingTarget(undefined) === false, "C11 �
 ok(isTypingTarget({ tagName: "input" }) === true, "C12 小写 tagName 也认（大小写不敏感）");
 
 // ---------------------------------------------------------------------
-section("D. 数字键 1~8：切模块");
+section("D. 数字键 1~9：切模块");
 // ---------------------------------------------------------------------
-for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) {
+for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
   eq(resolveKey(key(String(n)), ctx()), "tab:" + n, `D1 按 ${n} → tab:${n}`);
 }
-for (const bad of ["0", "9", "10", "12", "3abc", "abc", "", "  "]) {
-  eq(resolveKey(key(bad), ctx()), "", `D2 非 1~8 的输入 ${JSON.stringify(bad)} 不当作切模块`);
+for (const bad of ["0", "10", "12", "3abc", "abc", "", "  "]) {
+  eq(resolveKey(key(bad), ctx()), "", `D2 非 1~9 的输入 ${JSON.stringify(bad)} 不当作切模块`);
 }
 eq(resolveKey(key("1", { repeat: true }), ctx()), "tab:1", "D3 数字键允许长按重复（连续切页是有意为之）");
 
@@ -192,9 +192,9 @@ section("J. tab:N 的解码：越界必须返回空，不能回落到第一个")
 // ---------------------------------------------------------------------
 eq(tabIndexOf("tab:3"), 3, "J1 tab:3 → 3");
 eq(tabIndexOf("tab:0"), 0, "J2 tab:0 → 0（非法）");
-eq(tabIndexOf("tab:8"), 8, "J3 tab:8 → 8（第 8 位：关于，末位）");
-eq(tabIndexOf("tab:9"), 0, "J3c tab:9 → 0（超出 1~8）");
-eq(tabIndexOf("tab:10"), 0, "J3b tab:10 → 0（超出 1~8）");
+eq(tabIndexOf("tab:8"), 8, "J3 tab:8 → 8（第 8 位：系统设置）");
+eq(tabIndexOf("tab:9"), 9, "J3c tab:9 → 9（第 9 位：关于，末位）");
+eq(tabIndexOf("tab:10"), 0, "J3b tab:10 → 0（超出 1~9）");
 eq(tabIndexOf("toggle_side"), 0, "J4 非 tab 动作 → 0");
 eq(tabIndexOf(""), 0, "J5 空串 → 0");
 eq(tabIndexOf(null), 0, "J6 null → 0");
@@ -208,8 +208,9 @@ eq(tabKeyFor("tab:" + VISIBLE_OP.length, VISIBLE_OP), "about",
    "J11 操作员按最后一个数字 → about");
 eq(tabKeyFor("tab:" + (VISIBLE_OP.length + 1), VISIBLE_OP), "",
    "J11b 操作员按超出可见数的键 → 空（不是绕回第一个）");
-eq(tabKeyFor("tab:6", VISIBLE_ADMIN), "ops", "J12 管理员按 6 → ops（运维审计）");
-eq(tabKeyFor("tab:5", VISIBLE_ADMIN), "sim", "J12c 管理员按 5 → sim（模拟仿真）");
+eq(tabKeyFor("tab:7", VISIBLE_ADMIN), "ops", "J12 管理员按 7 → ops（运维审计）");
+eq(tabKeyFor("tab:6", VISIBLE_ADMIN), "sim", "J12c 管理员按 6 → sim（模拟仿真）");
+eq(tabKeyFor("tab:5", VISIBLE_ADMIN), "pad", "J12e 管理员按 5 → pad（手柄执行）");
 eq(tabKeyFor("tab:4", VISIBLE_ADMIN), "ai", "J12d 管理员按 4 → ai（AI 执行）");
 eq(tabKeyFor("tab:" + VISIBLE_ADMIN.length, VISIBLE_ADMIN), "about",
    "J12b 管理员按最后一键 → about（最后一位）");

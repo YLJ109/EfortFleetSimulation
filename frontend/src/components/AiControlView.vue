@@ -135,7 +135,11 @@ async function handleUtterance(text, { fromVoice = false } = {}) {
   await doSend(t);
 }
 
-watch(() => asr.finalText, (t) => {
+// ★★ 2026-10-11：watch **句次计数器**（`finalSeq`）而不是 `finalText` ——
+//   连续两句话说出一模一样的文本时，`finalText` 值不变 → watch 不触发 → 第二句被静默吞掉。
+//   文本仍从 `asr.finalText` 读（计数只是"有新一句了"的水位）。
+watch(() => asr.finalSeq, () => {
+  const t = asr.finalText;
   if (t && asr.active) {
     ai.setAsrText(t);
     handleUtterance(t, { fromVoice: true });
