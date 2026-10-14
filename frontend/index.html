@@ -345,10 +345,21 @@
         padding: 9px 10px; border-radius: 10px; font-size: 13px; font-weight: 600;
         border: 1px solid; backdrop-filter: blur(8px); white-space: nowrap; }
       #safety-banner .sa-sub { font-weight: 400; font-size: 12px; opacity: .85; }
+      /* ★ A5：报警条上的"查看取证"入口（一键跳到运维审计的取证包面板）。
+         用 currentColor 描边，跟着 danger/hit/stalled 三档配色走，不再各写一遍。 */
+      #safety-banner .sa-ev { flex: none; padding: 2px 9px; border-radius: 6px; cursor: pointer;
+        font: inherit; font-size: 12px; font-weight: 600; color: inherit;
+        border: 1px solid currentColor; background: transparent; }
+      #safety-banner .sa-ev:hover { background: var(--veil); }
       #safety-banner.danger { color: var(--err-fg); border-color: var(--err-line);
         background: var(--err-soft); }
       #safety-banner.hit { color: var(--ink); border-color: var(--hit); background: var(--hit-bg-strong);
         animation: sa-blink .5s steps(1, end) infinite; }
+      /* ★ A6 评估停摆：用"警示"色而不是"安全"的默认样式 ——
+         页面隐藏/上下文丢失时余量读数是**上一帧冻结值**，界面必须说"数据不可信"，
+         绝不能因为"没算出危险"就长得像安全（§5.5 铁律③）。 */
+      #safety-banner.stalled { color: var(--warn-fg); border-color: var(--warn-line);
+        background: var(--warn-soft); }
       @keyframes sa-blink { 50% { opacity: .3; } }
 
       /* ---- 底部状态栏 ---- */
@@ -382,6 +393,12 @@
       #safety-chip.warn { color: var(--warn-fg); }
       #safety-chip.danger { color: var(--err-fg); }
       #safety-chip.hit { color: var(--ink); background: var(--hit-bg); }
+      /* ★ A6：评估不新鲜 = 灰态 + 空心点（不发光、不闪烁），
+         与"安全的绿"在形态上就分得开（C5 的可访问性双编码：不只靠颜色） */
+      #safety-chip.stalled { color: var(--muted); border-style: dashed; }
+      #safety-chip.stalled .sc-dot { background: transparent; border: 1px solid var(--muted);
+        box-shadow: none; }
+      #safety-chip.stalled .sc-num { color: var(--muted); }
 
       /* =================================================================
          点位执行 / 程序执行（两页共用样式）

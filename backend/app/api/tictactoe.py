@@ -208,13 +208,13 @@ def _carry(ctx, pmap, st, dry, src_slot: str, dst_slot: str, who_cn: str,
         if not v.get("ok"):
             _set_state(st, stage="自证失败·放回原位")
             _put_back(ctx, pmap, src_slot, speed, dry, blow_ms=BLOW_MS,
-                      prefix="放回原位 %s" % src_slot, st=st, face=face)
+                      prefix="放回原位 %s" % src_slot, st=st, face=face, v=v)
             raise _Stop("颜色无法识别（%s），已放回原位 %s"
                         % (v.get("reason") or "无有效判定", src_slot), "自证")
         if expect_color and v.get("color") != expect_color:
             _set_state(st, stage="自证不符·放回原位")
             _put_back(ctx, pmap, src_slot, speed, dry, blow_ms=BLOW_MS,
-                      prefix="放回原位 %s" % src_slot, st=st, face=face)
+                      prefix="放回原位 %s" % src_slot, st=st, face=face, v=v)
             raise _Stop("自证不符：该格应为 %s，实拍 %s，已放回原位 %s"
                         % (expect_color, v.get("color"), src_slot), "自证")
         _set_state(st, stage="自证通过")

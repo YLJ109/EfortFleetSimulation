@@ -39,12 +39,14 @@ from app.api.sorting import (_Stop, _air, _capture, _move,  # 复用同一套原
 from app.core.logger import get_logger
 from app.db.crud import list_points
 from app.db.database import SessionLocal
+from app.services import intent_ast, intent_plan
 from app.services import llm, nl_intent as NL
 from app.services import placement as PL
 from app.services import sorting as S
 from app.services.collector import collector
 from app.services.events import emit as emit_event
-from app.services.motion import real_write_enabled
+from app.services.motion import real_write_enabled, readiness_reason
+from app.services.safety_guard import check as guard_check
 
 log = get_logger("ai")
 router = APIRouter(prefix="/api/ai", tags=["ai"])
@@ -370,6 +372,92 @@ def api_parse(body: ParseIn, tok: str = Depends(require_control)):
     return _parse_to_plan(body.text)
 
 
+# ============================================================ ★ E1 意图编译器（只编译·不动作）
+class PlanIn(BaseModel):
+    # 优先 `plan_id`（必须是 `/parse` 刚解析出的那一份）；没带就**现解析** text（同一个解析入口）
+    plan_id: str = Field(default="", max_length=64)
+    text: str = Field(default="", max_length=300)
+
+
+def _ready_gate() -> Dict:
+    """就绪闸门的**结论**（只读；判据与文案与真下发用的**同一份** `motion.readiness_reason`）。
+
+    ★ 与 `api/robot.py`、`services/collector.py` 同源（§5.5 铁律④ 同屏同源）：读**采集器缓存**
+      的控制器快照，不额外开 TCP —— 一张预检卡不该把界面拖住。
+    ★ 模拟/离线链路：统一未就绪闸门**本来就放行**（`servo_not_ready_reason` 的前两条豁免），
+      所以这里也返回 ok=True，但**如实注明**「不代表真机已就绪」，别让绿章变成假安慰。
+    """
+    if not real_write_enabled() or getattr(collector, "simulated", False):
+        return {"ok": True, "reason": "",
+                "note": "当前是模拟/离线链路：统一未就绪闸门本就放行，**不代表真机已就绪**"}
+    rc = getattr(collector, "latest_rc_status", None) or {}
+    if not rc.get("ok"):
+        return {"ok": False,
+                "reason": "机器人没有就绪：读不到控制器状态（采集未运行/离线）"}
+    reason = readiness_reason(rc)
+    return {"ok": reason is None, "reason": reason or ""}
+
+
+@router.post("/plan")
+def api_plan(body: PlanIn, tok: str = Depends(require_control)):
+    """★ E1 意图编译器（方案 §10.2 **收缩版**）：这句话会变成**哪几段**、每段闸门怎么说。
+
+    只做展示卡，**先不接执行**（逐字口径）：
+      · 取计划只认 `/parse` 缓存的那一份（带 `plan_id`），或现解析 `text` —— **同一个解析入口**；
+      · 编译 = `services/intent_plan.compile_plan()`：逐段现算 `raw_slot_safe_path`（自动补段）、
+        `effective_face`（面）、`resolve_target_joints`（目标关节）、`safety_eval.sweep`（保守间隙）；
+      · **本接口不动机器人**：不下发、不排队、不碰 40135；执行仍走 `/exec`
+        （统一未就绪闸门 + 围栏互锁 + 轴锁 + 速度夹取一个都不少）；
+      · 任一段被真实闸门判为会被拒 → 整卡标红并指出**第几段**（而不是"跑到那儿再失败"）。
+    """
+    raw = (body.text or "").strip()
+    pid = (body.plan_id or "").strip()
+    source = ""
+    if pid:
+        with _gate:
+            rec = _plans.get(pid)
+        if not rec:
+            raise HTTPException(400, detail="计划已过期或不存在，请先解析")
+        plan, raw = dict(rec.get("plan") or {}), str(rec.get("raw") or "")
+        source = str(rec.get("source") or "")
+    else:
+        if not raw:
+            raise HTTPException(400, detail="要说清指令（或带上 /parse 返回的 plan_id）")
+        r = _parse_to_plan(raw)
+        if not r.get("ok"):
+            # 没解析出来就没有"段"可预检 —— **如实**回错误 + 建议，绝不硬编一段路径充数
+            return {"ok": False, "compiled": False, "raw": raw,
+                    "error": r.get("error") or "没听懂这条指令",
+                    "suggestions": r.get("suggestions") or [],
+                    "understood": bool(r.get("understood")),
+                    "segments": [], "verdict": "blocked",
+                    "verdict_label": "无法编译（指令没解析出来）",
+                    "notes": [intent_plan.NOTE_CARD]}
+        plan, pid, source = dict(r.get("plan") or {}), r.get("plan_id"), r.get("source") or ""
+
+    ast = intent_ast.ast_of(plan, source=source)
+    live = _live_joints()
+    try:
+        poses = S.all_point_poses()
+        poses_error = ""
+    except Exception as e:   # noqa: BLE001 —— 读库失败如实标注，不冒充"点位没示教"
+        poses, poses_error = {}, str(e)[:120]
+    g_ok, g_reason, _g = guard_check()
+    compiled = intent_plan.compile_plan(
+        ast, live=live, poses=poses, ready=_ready_gate(),
+        guard={"ok": bool(g_ok), "reason": g_reason or ""}, poses_error=poses_error)
+    emit_event("ai", "info", "ai.plan_compile",
+               "意图预检：%d 段（%s）" % (len(compiled["segments"]),
+                                          compiled["verdict_label"]),
+               {"raw": raw, "action": ast.get("action"),
+                "segments": [s["point"] for s in compiled["segments"]],
+                "dropped": ast.get("dropped") or [],
+                "blocked_at": compiled.get("blocked_at")}, actor="control")
+    return {"ok": True, "compiled": True, "raw": raw, "plan_id": pid, "source": source,
+            "intent": ast.get("action") or "", "plan": plan, "ast": ast,
+            "echo": _echo(ast.get("action") or "", plan), **compiled}
+
+
 def _free_b_tips(bad_slot: str) -> List[str]:
     """目标格被占/禁放时给的**可操作建议**（B 区当前认为空的格）。"""
     free = [s for s in ["B%d" % i for i in range(1, 10)] if not _occ["B"].get(s)]
@@ -441,7 +529,10 @@ def _finalize(text: str, res: Dict, source: str) -> Dict:
     # ---- ③ 缓存 + 回显 ----
     pid = uuid.uuid4().hex
     with _gate:
-        _plans[pid] = {"plan": out["plan"], "at": time.time(), "raw": text}
+        _plans[pid] = {"plan": out["plan"], "at": time.time(), "raw": text,
+                       # ★ E1：把"这句话是谁解析的"一起缓存 —— 预检卡要**如实**标注
+                       #   大模型 / 规则 / 规则降级（与界面回显同一份，不各写一遍）
+                       "source": source}
     out["plan_id"] = pid
     out["echo"] = _echo(out["intent"], out["plan"])
     if out["plan"].get("action") == "move_all":

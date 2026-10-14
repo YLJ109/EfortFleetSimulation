@@ -20,6 +20,7 @@ import { SafetyFence, STATE_RANK } from "./safety.js";
 import { createGhost, GHOST_COLOR_B } from "./ghost.js";
 import { buildOwnerMap } from "./jointOwner.js";
 import { SKIN_BODY, SKIN_HARD, SKIN_JOINT, SKIN_LOGO, SKIN_METAL, skinMat } from "./materials.js";
+import { samplerEnabled, recordFrame, ingestRendererInfo } from "../utils/perfSampler.js";
 import { buildEndEffector, suckerLocalMm } from "./endEffector.js";
 import { createSortingBlocks } from "./sortingBlocks.js";
 
@@ -254,7 +255,41 @@ function ensureScene() {
 let safetyCb = null;
 let lastSafetyKey = "";
 
+// ★ A6 评估健康：ticks/at 描述的是**评估跑了几次、最近一次在什么时候**，
+//   与"结论有没有变化"无关 —— lastSafetyKey 会把同结论的连续帧吞掉，
+//   拿它当新鲜度就会出现"页面卡住但计数照样涨/结论没变就永远不说停摆"两种错。
+let safetyTicks = 0;
+let safetyTickAt = 0;          // performance.now()（与调用方同一时钟）
+let idleSafetyTimer = 0;
+
 export function onSafety(cb) { safetyCb = cb; }
+
+/** 评估健康读数（供 store 用**外部时钟**判定三态，绝不在这里自己说"安全"）。 */
+export function getSafetyHealth() {
+  return { ticks: safetyTicks, at: safetyTickAt };
+}
+
+/**
+ * 渲染循环停帧时的**低频评估**（不 render，只量围栏）。
+ *
+ * ★ 为什么需要：渲染循环在 `document.hidden` / WebGL 上下文丢失时**彻底停帧**
+ *   （黑屏第一根因的修法，不许回退）。以前一停帧就连评估一起停 ——
+ *   后台标签页里机器人真的撞了台面，界面还挂着上一帧的"安全"。
+ * ★ 浏览器会把后台 timer 节流到 ≥1s，所以阈值按 1s 口径定（见 utils/safetyLabels.js）。
+ */
+export function startIdleSafetyEval(periodMs = 250) {
+  if (idleSafetyTimer) return;
+  idleSafetyTimer = setInterval(() => {
+    // 前台渲染循环正在量（<200ms 内有过评估）就不重复量一次 AABB
+    if (safetyTickAt && performance.now() - safetyTickAt < 200) return;
+    updateSafety(performance.now() / 1000);
+  }, periodMs);
+}
+export function stopIdleSafetyEval() {
+  if (!idleSafetyTimer) return;
+  clearInterval(idleSafetyTimer);
+  idleSafetyTimer = 0;
+}
 
 /**
  * 热更新围栏配置（不需要重建场景）。
@@ -347,6 +382,8 @@ function updateSafety(tSec) {
   if (!fence) return;
   const r = evalSafety(tSec);
   if (!r) return;
+  safetyTicks += 1;                    // ★ 单调递增，只加不减（§5.5 铁律①）
+  safetyTickAt = performance.now();
   // 残影泛红：预演终点危险/碰撞 → 整体变红，一眼看出"这个点位不能去"。
   // 量的是实体机时一律解除（泛红只表达预演结论，不表达实时读数）。
   if (ghost) ghost.setAlarm(r.source === "ghost" && STATE_RANK[r.state] >= STATE_RANK.danger);
@@ -401,6 +438,7 @@ const qTarget = [0, 0, 0, 0, 0, 0];
 const qCurrent = [0, 0, 0, 0, 0, 0];
 let qReady = false;
 let lastFrameMs = 0;
+let infoTick = 0;              // ★ B1：renderer.info 读取节拍（每 30 帧一次，不逐帧读）
 
 function pushPose(q) {
   if (robot) robot.applyJoints(q);
@@ -571,6 +609,13 @@ export function renderFrame() {
   // 分拣：摄像头闪烁 + 手上方块**贴着吸盘**跟随末端（用吸盘口锚点，不是法兰中心）
   if (sorting) sorting.step(dt, getTcp(), getPieceAnchor());
   renderer.render(scene, camera);
+  // ★ B1：渲染侧指标。**默认关闭**（samplerEnabled() 为假时这两行什么都不做），
+  //   renderer.info 每 30 帧读一次 —— 每帧读就是往热路径加活。
+  if (samplerEnabled()) {
+    recordFrame(now, dt);
+    infoTick = (infoTick + 1) % 30;
+    if (infoTick === 0) ingestRendererInfo(renderer.info);
+  }
 }
 
 // ---------------------------------------------------------------------

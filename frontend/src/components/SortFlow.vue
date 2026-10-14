@@ -21,7 +21,7 @@
 // 与后端 stage 的对应关系一旦改了后端文案就会失联 —— 有回归钉子守着
 // （tools/verify_sortflow.mjs 会断言 STAGE_MAP 覆盖后端全部 stage 字面量）。
 // =====================================================================
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 import { LOOP_STEPS, PRE_STEP, POST_STEP, STEP_ORDER, stepOf }
   from "../sorting/flowSteps.js";
@@ -52,6 +52,43 @@ const total = computed(() => Number(s.value.total) || props.frames || 9);
 const ended = computed(() => !!s.value.finished);
 const stopReason = computed(() => String(s.value.error || ""));
 const target = computed(() => String(s.value.target || ""));
+
+// ---------------------------------------------------------------- 步骤耗时
+// ★★ C3（方案 §C3「分拣步：步骤名 + 本步耗时 + 上一步耗时」）：
+//   后端 `/api/sorting/state` **没有耗时字段**（只有 stage/piece/color…），
+//   所以这里的耗时**只能由界面观测**：父组件每次轮询到"stage 落在哪一步"变了，就记一次时刻。
+//   ★ 由此产生两条必须写进界面的限制（不许含糊，否则就是拿估算冒充实测）：
+//     ① 粒度 = 轮询周期（约 0.8s），界面上明写"界面观测"；
+//     ② 它是"界面看到这一步在第几秒"，**不等于控制器真实执行时长**，更**不是**剩余时间预估
+//        （本项目绝不输出 ETA —— 运动由控制器侧常驻程序 210 执行，PC 只能写目标 + 触发位）。
+//   ★ 不做的事：不为此新增后端字段/存储（与 §C3「不为趋势新增后端存储」同一条纪律）。
+const seg = ref({ key: "", start: 0 });   // 当前正在观测的那一步（key + 进入时刻）
+const durs = ref({});                      // 步骤 key → 本轮这件观测到的耗时(ms)
+const pieceSeen = ref(0);
+
+watch([curStep, piece, running], ([k, pc, run]) => {
+  const now = Date.now();
+  if (pc !== pieceSeen.value) {          // 换了一件 → 循环体重新计时（否则会把上一件算进来）
+    pieceSeen.value = pc;
+    durs.value = {};
+  }
+  if (!run) { seg.value = { key: "", start: 0 }; return; }   // 停了就不再计时
+  if (k === seg.value.key) return;
+  if (seg.value.key) {
+    durs.value = { ...durs.value, [seg.value.key]: now - seg.value.start };
+  }
+  seg.value = { key: k, start: now };
+});
+
+/** 某一步的观测耗时文案；没观测到就**返回空串**（不显示 0ms，那会被读成"瞬间完成"）。 */
+function durText(key) {
+  if (!running.value) return "";
+  if (seg.value.key === key && seg.value.start) {
+    return "观测 " + Math.round((Date.now() - seg.value.start) / 100) / 10 + "s（进行中）";
+  }
+  const d = durs.value[key];
+  return Number.isFinite(d) ? "观测 " + Math.round(d / 100) / 10 + "s" : "";
+}
 
 /** 参数对象（供步骤 label/note 取真实数字）。 */
 const P = computed(() => ({
@@ -116,7 +153,9 @@ const showFrames = computed(() => frameList.value.length > 0 && curStep.value !=
     <div class="step" :class="stepState(PRE_STEP)">
       <span class="dot"></span>
       <span class="idx">·</span>
-      <span class="lbl">{{ PRE_STEP.label }}</span>
+      <span class="lbl">{{ PRE_STEP.label }}
+        <span v-if="durText(PRE_STEP.key)" class="dur">{{ durText(PRE_STEP.key) }}</span>
+      </span>
     </div>
 
     <!-- 循环体 -->
@@ -132,6 +171,8 @@ const showFrames = computed(() => frameList.value.length > 0 && curStep.value !=
         <span class="lbl">
           {{ typeof stp.label === "function" ? stp.label(P) : stp.label }}
           <span v-if="stp.note" class="note">{{ stp.note(P) }}</span>
+          <!-- ★ C3：界面观测耗时（配置值写在 note 里、观测值写在这里，两者**并列不混写**） -->
+          <span v-if="durText(stp.key)" class="dur">{{ durText(stp.key) }}</span>
           <!-- 放料步骤顺带把"按颜色选中的那个槽"写出来，现场一眼能对上 -->
           <span v-if="stp.key === 'b_up' && target" class="pick">
             <b :style="{ color: COLOR_HEX[verdict && verdict.color] || 'var(--muted)' }">
@@ -175,8 +216,13 @@ const showFrames = computed(() => frameList.value.length > 0 && curStep.value !=
     <div class="step" :class="stepState(POST_STEP)">
       <span class="dot"></span>
       <span class="idx">·</span>
-      <span class="lbl">{{ POST_STEP.label }}</span>
+      <span class="lbl">{{ POST_STEP.label }}
+        <span v-if="durText(POST_STEP.key)" class="dur">{{ durText(POST_STEP.key) }}</span>
+      </span>
     </div>
+
+    <!-- ★ C3：耗时口径如实标注（不标注就会被读成控制器实测，甚至被读成"还剩多久"） -->
+    <p class="small muted">耗时为<b>界面观测</b>（按轮询粒度、非控制器实测，也不提供剩余时间预估<span v-if="!running">；未运行不计时</span>）</p>
 
     <p v-if="ended && stopReason" class="small err" style="margin-top:6px">
       <Icon name="alert" :size="12" /> 本轮结束原因：{{ stopReason }}
@@ -228,6 +274,10 @@ const showFrames = computed(() => frameList.value.length > 0 && curStep.value !=
 @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 
 .note { margin-left: 6px; font-size: 11px; color: var(--muted); font-weight: 400; }
+/* ★ C3：界面观测耗时 —— 与"配置值(note)"并列但**形态不同**（青色调、等宽数字），
+   避免现场把"吸牢后停 500ms"（配置）和"观测 1.6s"（实测到的这一下）读成同一件事。 */
+.dur { margin-left: 6px; font-size: 11px; color: var(--accent); font-weight: 400;
+  font-variant-numeric: tabular-nums; }
 .pick { margin-left: 6px; font-size: 11px; color: var(--muted); font-weight: 400; }
 
 /* ---- 抓帧明细 ---- */

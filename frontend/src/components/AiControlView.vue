@@ -93,6 +93,40 @@ const qtyOf = (m) => {
   }
   return 0;
 };
+// ---------------------------------------------------------------- ★ E1 意图编译器预检卡
+//   数据来自 `POST /api/ai/plan`（**只读、不动作**），store 里 `ai.planCard`。
+//   两张卡（计划 / 预检）**必须同一个 plan_id** 才配对 —— 否则显示的就是别的那一句。
+const cardOf = (m) => {
+  const c = ai.planCard;
+  const pid = m.parsed && m.parsed.plan_id;
+  return pid && c && c.plan_id === pid ? c : null;
+};
+const VERDICT_ZH = { ok: "可走", warn: "有隐患", blocked: "会被拒" };
+const verdictZh = (v) => VERDICT_ZH[v] || v || "—";
+/** 间隙三态：`unknown` / 拿不到 mm → **未预检**（绝不塌成「安全」，§5.5 铁律③）。 */
+const clrOf = (s) => {
+  const c = (s && s.clearance) || {};
+  if (c.state === "unknown" || c.mm === null || c.mm === undefined) return "未预检";
+  return `${c.mm}mm`;
+};
+const blockedOf = (m) => {
+  const c = cardOf(m);
+  const segs = (c && c.segments) || [];
+  return segs.find((s) => ((s.gate || {}).verdict === "blocked")) || null;
+};
+const chkOf = (v) => (v === "未校验" || v === undefined ? "未校验" : (v ? "通过" : "被拒"));
+const posesOf = (c) => ((c && c.checks) || {}).poses ?? 0;
+const pcCls = (c) => (c && c.compiled ? `pc-${c.verdict || "warn"}` : "pc-none-ok");
+const segCls = (s) => {
+  const v = ((s && s.gate) || {}).verdict;
+  return { "pc-bad": v === "blocked", "pc-warn": v === "warn" };
+};
+/** 解析成功 → **自动**做一次只读预检（不占执行通道、不下发任何东西）。 */
+watch(() => ai.parsed && ai.parsed.plan_id, (pid) => {
+  if (pid) ai.compilePlan(pid);
+  else ai.planCard = null;
+}, { immediate: true });
+
 /** 禁用格 = **黑色方块**（用户口径："禁止摆放你就放黑色方块就行了"） */
 const BAN_SQ = {
   display: "inline-block", marginLeft: "4px", padding: "0 5px",
@@ -267,6 +301,10 @@ const stageLine = (m) => {
   if (s.piece) bits.push(`${s.piece}/${s.total || 1} 件`);
   if (s.color) bits.push(`${s.color}${s.conf ? " " + Number(s.conf).toFixed(2) : ""}`);
   if (s.sim_color) bits.push("空跑未判色");
+  // ★ E5′：同一批送检帧的第二次读法（判据在后端 services/hold_state.py，这里只转述档位）
+  if (s.hold_evidence && s.hold_evidence.state_label) {
+    bits.push(`持件证据：${s.hold_evidence.state_label}`);
+  }
   if (s.target) bits.push("→ " + s.target);
   return bits.join(" · ");
 };
@@ -387,6 +425,62 @@ const stageLine = (m) => {
               <ul v-if="m.parsed && m.parsed.warnings && m.parsed.warnings.length" class="warns">
                 <li v-for="(w, i) in m.parsed.warnings" :key="i">{{ plain(w) }}</li>
               </ul>
+              <!-- ★★ E1 意图编译器（**只编译、不动作**）：这句话会变成哪几段、每段闸门怎么说。
+                   与后端 `POST /api/ai/plan` 用**同一个 plan_id** 挂勾（对不上不显示）。 -->
+              <div v-if="cardOf(m)" class="pcard" :class="pcCls(cardOf(m))">
+                <div class="pc-h">
+                  <b>路径预检（不执行）</b>
+                  <span class="pc-v">{{ cardOf(m).compiled ? verdictZh(cardOf(m).verdict) : "没做成" }}</span>
+                  <span class="muted">共 {{ (cardOf(m).segments || []).length }} 段</span>
+                </div>
+                <div v-if="!cardOf(m).compiled" class="pc-bad">
+                  {{ plain(cardOf(m).error || "预检没做成") }} ——
+                  <b>这不代表没有隐患</b>（本卡只是没算出结论）
+                </div>
+                <template v-else>
+                  <div v-if="blockedOf(m)" class="pc-bad">
+                    第 <b>{{ blockedOf(m).i }}</b> 段「{{ blockedOf(m).point }}」执行时会被拒：
+                    {{ plain(blockedOf(m).gate.reason || "") }}
+                  </div>
+                  <table class="pc-t">
+                    <thead>
+                      <tr><th>#</th><th>点位</th><th>用途</th><th>J6 面</th>
+                          <th>最小余量</th><th>闸门</th></tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="s in cardOf(m).segments" :key="s.i" :class="segCls(s)">
+                        <td>{{ s.i }}</td>
+                        <td>{{ s.point }}</td>
+                        <td>
+                          {{ plain(s.purpose) }}
+                          <em v-if="s.auto_preface" class="pc-auto">自动补段</em>
+                        </td>
+                        <td>{{ plain(s.face_label) }}</td>
+                        <td>{{ clrOf(s) }}</td>
+                        <td>{{ verdictZh(s.gate.verdict) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <div v-if="!(cardOf(m).segments || []).length" class="muted pc-none">
+                    这句话没有要去的点（批量 / 分拣类动作由流程编排执行，本卡不重排工艺时序）
+                  </div>
+                  <ul v-if="(cardOf(m).warnings || []).length" class="warns">
+                    <li v-for="(w, i) in cardOf(m).warnings" :key="'pw' + i">{{ plain(w) }}</li>
+                  </ul>
+                  <ul v-if="(cardOf(m).notes || []).length" class="pc-n">
+                    <li v-for="(n, i) in cardOf(m).notes" :key="'pn' + i">{{ plain(n) }}</li>
+                  </ul>
+                  <div class="pc-c">
+                    <span>就绪闸门：{{ chkOf(cardOf(m).checks && cardOf(m).checks.ready) }}</span>
+                    <span>围栏互锁：{{ chkOf(cardOf(m).checks && cardOf(m).checks.guard) }}</span>
+                    <span>实时姿态：{{ cardOf(m).checks && cardOf(m).checks.live ? "已取到" : "取不到（不预检）" }}</span>
+                    <span>点位库：{{ posesOf(cardOf(m)) }} 个</span>
+                  </div>
+                  <div v-if="cardOf(m).checks && cardOf(m).checks.sweep_note" class="muted pc-s">
+                    {{ plain(cardOf(m).checks.sweep_note) }}
+                  </div>
+                </template>
+              </div>
               <!-- ★ 运行过程（执行前先摊开：等宽、带序号，一眼看清会怎么跑） -->
               <div class="plan-steps">
                 <div v-for="(s, i) in planStepsOf(m)" :key="i" class="plan-step">
@@ -587,6 +681,33 @@ const stageLine = (m) => {
 .plan-step .ps-n { width: 12px; text-align: right; flex: none; color: var(--muted); }
 .plan-b { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
 .warns { margin: 4px 0 0; padding-left: 16px; font-size: 11.5px; color: var(--warn, #d48806); }
+/* ★★ E1 意图编译器预检卡（**只读**：它不产生任何可下发的东西，执行仍走「执行」按钮）。
+   配色沿用"深底画面"约定： verdict 用**边框 + 文字**表态，不铺大面积高饱和底色。 */
+.pcard { margin: 6px 0 2px; padding: 6px 8px; border: 1px solid var(--line);
+  border-radius: 5px; background: var(--screen); font-size: 11.5px; }
+.pcard.pc-ok { border-color: var(--ok-line, rgba(47, 158, 111, .45)); }
+.pcard.pc-warn { border-color: var(--warn-line, rgba(212, 136, 6, .45)); }
+.pcard.pc-blocked { border-color: var(--err-line, rgba(224, 82, 82, .5)); }
+.pc-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.pc-v { padding: 0 6px; border: 1px solid var(--line); border-radius: 3px; font-weight: 600; }
+.pc-ok .pc-v { color: var(--ok, #2f9e6f); border-color: var(--ok, #2f9e6f); }
+.pc-warn .pc-v { color: var(--warn, #d48806); border-color: var(--warn, #d48806); }
+.pc-blocked .pc-v, .pc-none-ok .pc-v { color: var(--err, #e05252); border-color: var(--err, #e05252); }
+.pc-bad { margin: 3px 0; padding: 4px 6px; border-radius: 4px; font-size: 11.5px;
+  background: var(--err-soft, rgba(224, 82, 82, .12)); border: 1px solid var(--err-line, rgba(224, 82, 82, .4));
+  color: var(--err, #e05252); }
+.pc-t { width: 100%; border-collapse: collapse; font-family: Consolas, monospace; font-size: 11.5px; }
+.pc-t th, .pc-t td { padding: 2px 5px; border-bottom: 1px solid var(--line);
+  text-align: left; vertical-align: top; }
+.pc-t th { color: var(--muted); font-weight: 500; }
+.pc-t tr.pc-warn td { color: var(--warn, #d48806); }
+.pc-t tr.pc-bad td { color: var(--err, #e05252); }
+.pc-auto { margin-left: 4px; padding: 0 4px; border: 1px dashed var(--line); border-radius: 3px;
+  font-style: normal; font-size: 10.5px; color: var(--muted); }
+.pc-none { margin: 4px 0; color: var(--muted); }
+.pc-n { margin: 4px 0 0; padding-left: 16px; font-size: 11px; color: var(--muted); }
+.pc-c { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 5px; font-size: 11px; color: var(--muted); }
+.pc-s { margin-top: 3px; font-size: 10.5px; }
 .run { font-size: 12.5px; }
 .queued { display: flex; align-items: center; gap: 5px; margin-top: 4px;
   font-size: 12px; color: var(--accent); }

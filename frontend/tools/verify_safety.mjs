@@ -3,10 +3,14 @@
 //
 // 只测纯几何与分级算法（three/safety.js 导出的纯函数），不依赖 DOM / WebGL。
 import * as THREE from "three";
+import { readFileSync } from "node:fs";
 import {
   zonePolygon, polygonHalfspaces, clearanceToPolygon, clearanceToCircle,
   basisOf, classify, evaluateZone, classifyGround, STATE_RANK,
 } from "../src/three/safety.js";
+import {
+  freshState, evalHealth, HEALTH_LABEL, FRESH_MAX_MS, FRESH_STOP_MS,
+} from "../src/utils/safetyLabels.js";
 
 let pass = 0, fail = 0;
 function ok(name, cond, extra = "") {
@@ -189,6 +193,60 @@ console.log("== 8. ★ 下发门控判据（点位/示教/程序按残影目标�
   ok("反证：四个状态里既有放行也有拦截",
     ["safe", "warn", "danger", "hit"].map(blocks).includes(true)
       && ["safe", "warn", "danger", "hit"].map(blocks).includes(false));
+}
+
+console.log("== 9. ★ A6 评估健康三态（停摆不许显示\"安全\"） ==");
+{
+  // 背景：围栏余量原本只在渲染循环里算，渲染循环在页面隐藏/WebGL 上下文丢失时**彻底停帧**
+  //   （黑屏第一根因的修法）。停帧 = 停评估 = `last` 冻在上一帧，界面可以继续显示"安全"
+  //   而机器人正在真撞台面。这一节钉的是"不知道就说不知道"（§5.5 铁律③）。
+  ok("三态词表齐全（never/fresh/stale/stopped，不是布尔）",
+    Object.keys(HEALTH_LABEL).length === 4 && HEALTH_LABEL.fresh === "实时"
+      && HEALTH_LABEL.stopped === "已停止");
+  ok("阈值口径：fresh < 2s ≤ stale < 5s ≤ stopped",
+    FRESH_MAX_MS === 2000 && FRESH_STOP_MS === 5000 && FRESH_MAX_MS < FRESH_STOP_MS,
+    `${FRESH_MAX_MS}/${FRESH_STOP_MS}ms（后台 timer 被浏览器节流到 ≥1s）`);
+  ok("1.5s → fresh", freshState(1500) === "fresh");
+  ok("3s → stale（不是 safe 也不是危险）", freshState(3000) === "stale");
+  ok("30s → stopped", freshState(30000) === "stopped");
+  // ★ 反证①：不许把"没数据"塌成"新鲜"
+  ok("null / NaN / 负数 → never（绝不塌成 fresh）",
+    freshState(null) === "never" && freshState(NaN) === "never" && freshState(-5) === "never");
+  ok("反证：三态判定不是恒真/恒假",
+    new Set([0, 3000, 30000].map(freshState)).size === 3);
+
+  const hStopped = evalHealth({ ageMs: 30000, ticks: 42 });
+  ok("停摆时 ok=false 且话术写明\"数据不可信\"",
+    hStopped.ok === false && hStopped.label === "已停止" && hStopped.notice.includes("不可信"),
+    hStopped.notice);
+  ok("停摆话术点名\"上一帧的安全不算数\"", hStopped.notice.includes("上一帧"));
+  ok("新鲜时不产生任何停摆话术", evalHealth({ ageMs: 300, ticks: 42 }).notice === "");
+  ok("title 带上单调评估次数（水位只增不减）", hStopped.title.includes("42"));
+
+  // ★ 反证②：界面确实接了这个判据，而不是又多一套本地猜测
+  const srcChip = readFileSync("src/components/SafetyChip.vue", "utf8");
+  const srcApp = readFileSync("src/App.vue", "utf8");
+  const srcPanel = readFileSync("src/components/SafetyPanel.vue", "utf8");
+  const srcStore = readFileSync("src/stores/safety.js", "utf8");
+  const srcMgr = readFileSync("src/three/manager.js", "utf8");
+  ok("状态片按 health 切灰态（stalled），不再直接吃 last.state",
+    srcChip.includes("stalled") && srcChip.includes("health.value.ok"));
+  ok("报警条按 health 改口（healthStalled → bannerText）",
+    srcApp.includes("healthStalled") && srcApp.includes("health.value.notice"));
+  ok("调试面板顶部徽标同源（headState 用 safety.health）",
+    srcPanel.includes("headState") && srcPanel.includes("safety.health"));
+  ok("三态判定只有**一处**实现（各显示组件都从 safetyLabels 引用）",
+    srcChip.includes("safetyLabels.js") && srcApp.includes("safetyLabels.js")
+      && !/function freshState/.test(srcApp) && !/function freshState/.test(srcChip));
+  ok("store 由外部时钟刷新（tickHealth 读 manager 的 ticks/at，不用\"结论变没变\"推断）",
+    srcStore.includes("getSafetyHealth") && srcStore.includes("tickHealth"));
+  ok("评估计数单调递增（safetyTicks += 1，没有清零路径）",
+    /safetyTicks \+= 1/.test(srcMgr) && !/safetyTicks = 0;/.test(srcMgr.split("function updateSafety")[1] || ""));
+  ok("停帧期间保留低频评估（setInterval + 只做 updateSafety 不 render）",
+    srcMgr.includes("startIdleSafetyEval") && srcMgr.includes("setInterval")
+      && srcApp.includes("startIdleSafetyEval()"));
+  ok("低频评估在渲染循环正常时自动让位（不重复量 AABB）",
+    /performance\.now\(\) - safetyTickAt < 200/.test(srcMgr));
 }
 
 console.log(`\n结果: ${pass} PASS / ${fail} FAIL`);

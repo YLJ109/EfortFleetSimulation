@@ -232,7 +232,8 @@ class JogEngine:
             clamped = True
 
         duration_ms = int(round(ang / sp * 1000))
-        res = motion.command([float(v) for v in target], self._speed_pct(sp), 0)
+        res = motion.command([float(v) for v in target], self._speed_pct(sp), 0,
+                             source="点动J%d" % j)
         out = {
             "ok": bool(res.get("ok")),
             "mode": res.get("mode"),
@@ -272,7 +273,8 @@ class JogEngine:
                 "blocked": False,
             }
         target = [float(v) for v in r["joints"]]
-        res = motion.command(target, self._speed_pct(r["need_dps"]), 0)
+        res = motion.command(target, self._speed_pct(r["need_dps"]), 0,
+                             source="点动(直角)")
         # ★ 不能用 `or 1.0`：speed_scale=0.0（完全限速）会被 or 吞掉变 1.0
         raw_scale = r.get("speed_scale")
         scale = float(raw_scale) if raw_scale is not None else 1.0
@@ -429,7 +431,8 @@ class JogEngine:
                     #   判据用裸读 bool：**不能在回调里抢 jog._lock**，
                     #   否则与"持有 _exec_lock 的下发线程"形成锁序耦合。
                     res = motion.command([float(v) for v in q], self._speed_pct(sp), 0,
-                                         abort_check=self._stopped_for_abort)
+                                         abort_check=self._stopped_for_abort,
+                                         source="点动J%d" % j)
                     scale = 1.0
                     limit_names = [f"J{j}"]
                 else:
@@ -447,7 +450,8 @@ class JogEngine:
                         break
                     q = [float(v) for v in r["joints"]]
                     res = motion.command(q, self._speed_pct(r["need_dps"]), 0,
-                                         abort_check=self._stopped_for_abort)
+                                         abort_check=self._stopped_for_abort,
+                                         source="点动(直角)")
                     scale = float(r.get("scale") or 1.0)
                     hit_limit = bool(r.get("hit_limit"))
                     limit_names = [h["joint"] for h in (r.get("hit_limit") or [])]

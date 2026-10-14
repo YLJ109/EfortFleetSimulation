@@ -6,13 +6,16 @@ import { onMounted, onBeforeUnmount, ref, computed, watch, nextTick } from "vue"
 import { useRobotStore } from "./stores/robot.js";
 import { useSafetyStore } from "./stores/safety.js";
 import { useUiStore } from "./stores/ui.js";
-import { switchView, renderFrame, resizeView, onSafety, applyRobotPose, disposeAll, onGlState } from "./three/manager.js";
+import {
+  switchView, renderFrame, resizeView, onSafety, applyRobotPose, disposeAll, onGlState,
+  startIdleSafetyEval, stopIdleSafetyEval,
+} from "./three/manager.js";
 import Icon from "./components/Icon.vue";
 import { useAuthStore } from "./stores/auth.js";
 // ★ 速度边界来自**唯一来源**（core/safetyConst.js，与后端 safety_const.py 同口径）。
 //   以前这里写死 min="1"、而 store 里写死 5 —— 两处会各自漂移（就出过
 //   "滑块能拖到 1%，后端却按 5% 跑"的事故）。现在都引用常量，只有一个地方能改。
-import { SPEED_MIN, SPEED_MAX } from "./core/safetyConst.js";
+import { SPEED_MIN, SPEED_MAX, SPEED_DEV_TOL } from "./core/safetyConst.js";
 import { useAsrStore } from "./stores/asr.js";
 import { useCameraStore } from "./stores/camera.js";
 import RealMonitor from "./components/RealMonitor.vue";
@@ -37,6 +40,9 @@ import { useLinkStore } from "./stores/link.js";
 import { useExecStore } from "./stores/exec.js";
 import { useRcReadyStore, NOT_READY_HINT } from "./stores/rcReady.js";
 import { useSorting3dStore } from "./stores/sorting3d.js";
+import { useMetricsStore } from "./stores/metrics.js";   // ★ B1：后端进程级指标（只读轮询）
+// ★ C3：关键参数的短趋势 = **纯前端环形缓冲**（不新增后端存储；方案 §C3「不做什么」）。
+import { sample as trendSample } from "./utils/paramTrend.js";
 import {
   resolveKey, isTypingTarget, tabKeyFor, SHORTCUT_BY_ID,
 } from "./shortcuts.js";
@@ -55,6 +61,9 @@ const cam = useCameraStore();   // ★ 2026-10-11 口径：相机/实时捕捉**
 // 链路自检（机器人/摄像头/示教器档位）：★ 由本组件做**唯一**的启停者，
 // 底栏状态灯与引导条都只是它的消费者 —— 两个轮询者必然出现自相矛盾的界面。
 const link = useLinkStore();
+// ★ B1：后端进程级指标（GET /api/system/metrics，只读、不需令牌）。
+//   启停同样收敛在本组件（与 link 同一个闸门）—— 两个轮询者必然出现自相矛盾的界面。
+const metrics = useMetricsStore();
 
 // ★ 2026-10-11：真机链路面板已并入底部状态区（StatusStrip 的「真机链路」片，
 //   面板内容仍是 RcReadyCard）—— 原来独立的 showLinkPanel / 切换按钮 / LinkPanel 浮窗已移除。
@@ -80,6 +89,12 @@ const safety = ref({ state: "safe", ratio: 1, clearance: 0, zoneId: "", zoneName
 //   本组件只留报警条用到的两条；状态片在 components/SafetyChip.vue 里自己取。
 const safetyText = computed(() => safetyTextOf(safety.value));
 const safetySub = computed(() => safetySubOf(safety.value));
+
+// ★★ A6 评估健康：三态 never / fresh / stale / stopped（判定见 utils/safetyLabels.js）。
+//   报警条在 stale/stopped 时**必须**改口说"数据不可信"，而不是继续显示上一帧的
+//   "安全：余量正常" —— 那正是 §5.5 铁律③禁的"把不知道塌成安全"。
+const health = computed(() => safe.health || { state: "never", ok: false, notice: "", label: "未评估" });
+const healthStalled = computed(() => !health.value.ok && health.value.state !== "never");
 
 // ---------- 控制权限（阶段 1） ----------
 const auth = useAuthStore();
@@ -137,6 +152,27 @@ watch(() => exec.speed, (v) => {
 // ★ 需求：底栏"控制中"也要以控制器就绪为准 —— 只授权、未就绪时显示"已授权·待就绪"。
 //   rcReady 的 rc_status 快照由 robot store 经 WS 全局注入，不依赖是否打开过点位执行页。
 const rc = useRcReadyStore();
+// ★★ C3：把 AGENTS.md 的"速度电脑 ≠ 实际"排查法搬上屏 ——
+//   **设定值（写入 40103 = 右上角滑块）**与**控制器 40003 实读**同屏并列 + 差值。
+//   ★ 诚实口径：后端快照里**没有** 40103 的回读（控制器不提供），所以"目标"一侧引用的
+//     就是滑块值本身；这一点在界面上明写，不假装读到了设定寄存器。
+//   ★ 容差唯一出处 = core/safetyConst.js 的 SPEED_DEV_TOL（**提示档**，不是真机安全限）：
+//     现场判定 1:1 的口径是 40103 == 40003，超出容差就值得去查 210 里的 vNNperc 与示教器倍率。
+const speedActual = computed(() => {
+  const v = rc.snap && !rc.stale ? rc.snap.speed_pct : null;
+  return Number.isFinite(v) ? v : null;
+});
+const speedDev = computed(() =>
+  (speedActual.value === null ? null : speedActual.value - exec.speed));
+const speedDevTitle = computed(() => {
+  if (speedActual.value === null) return "控制器 40003 实读：未知（快照过期或读不到控制器）";
+  const d = speedDev.value;
+  if (d === 0) return "实读与设定一致（1:1 直通）";
+  return `实读 ${speedActual.value}% − 设定 ${exec.speed}% = ${d > 0 ? "+" : ""}${d}`
+    + `（设定=右上角滑块，写入 40103 · 控制器不回读该寄存器）`
+    + (Math.abs(d) >= SPEED_DEV_TOL
+        ? ` · 偏差 ≥ ${SPEED_DEV_TOL}：按 AGENTS.md 查 210 内 vNNperc 与示教器速度倍率` : "");
+});
 // ★ 需求（用户 2026-10-08）："真实监控／模拟仿真／点位执行／程序执行／分拣／AI 执行
 //   全部要显示"18 块料 + A/B 托盘盒 + C 区摄像头。以前只有「分拣」页挂载时才拉一次
 //   /api/sorting/blocks 并在离开时隐藏 —— 别的页面看到的是空机器人。
@@ -233,11 +269,18 @@ function onKeydown(ev) {
 
 // 报警条：按配置的 banner_min 决定最低触发级别
 const showBanner = computed(() => {
+  // ★ 停摆提示**不受** alarm.banner 开关影响：那个开关关的是"报警横幅"，
+  //   而"此刻读数不可信"是数据完整性问题，操作员没有关掉"被蒙在鼓里"的选项。
+  if (healthStalled.value) return true;
   const a = safe.config && safe.config.alarm;
   if (!a || !a.banner) return false;
   const min = RANK[a.banner_min] ?? RANK.danger;
   return RANK[safety.value.state] >= min && RANK[safety.value.state] >= RANK.warn;
 });
+const bannerClass = computed(() => (healthStalled.value ? "stalled" : safety.value.state));
+const bannerText = computed(() => (healthStalled.value ? health.value.notice : safetyText.value));
+const bannerSub = computed(() => (healthStalled.value
+  ? `上一帧读数：${safetySub.value}（可能已过期）` : safetySub.value));
 // ★ 状态片（chip）的显示开关已随组件一起搬到 components/SafetyChip.vue
 //   （它自己读 safe.config.alarm.chip），这里不再保留第二份。
 
@@ -383,6 +426,7 @@ function restoreView() {
 // 页面会一直显示"控制中"、执行页入口也一直在，点进去全是 401。
 // ★ expiresAt === 0 = 不限时（阶段 7 默认），直接跳过。
 let ttlTimer = null;
+let healthTimer = null;   // ★ A6 评估健康的外部时钟（1s；判定三态用，不参与评估本身）
 function checkTtl() {
   if (auth.token && auth.expiresAt !== 0 && auth.expiresAt <= Date.now()) auth._clear();
   // ★ 审计修复 P1-D8：同一个 1 秒时钟顺带扫一次遥测新鲜度。
@@ -393,6 +437,24 @@ function checkTtl() {
   //   → 底栏挂着"旧绿"（最危险的假正常）。详见 stores/link.js::beat / rcReady.js::beat。
   try { link.beat(); } catch (e) { /* store 未就绪 */ }
   try { rc.beat(); } catch (e) { /* store 未就绪 */ }
+  // ★ B1：指标新鲜度水位同样必须**无条件**推进（同一病根：Date.now() 不是响应式依赖，
+  //   后端挂掉时 snap/at 冻结 → stale 永远算不出 true）。见 stores/metrics.js::beat。
+  try { metrics.beat(); } catch (e) { /* store 未就绪 */ }
+  // ★★ C3：关键参数的 60s 短趋势采样（utils/paramTrend.js 的环形缓冲）。
+  //   挂在这同一个 1 秒时钟上是刻意的：绑渲染循环 → 隐藏标签页就断档；
+  //   绑 WS 帧 → 掉线前最后一帧被复制成一条"刚刚还正常"的平线（§5.5 铁律①）。
+  try { sampleTrends(); } catch (e) { /* store 未就绪 */ }
+}
+
+/**
+ * ★ C3 趋势采样：**只采"这一路还新鲜"的数**。
+ *   数据冻结时不入环 —— 否则时间窗里会攒出一段假平线，比没有线更误导。
+ *   非有限数（未知/读不到）由 `trendSample` 自己拒收，这里不再判一遍（避免两处口径分叉）。
+ */
+function sampleTrends() {
+  if (!rc.stale && rc.snap) trendSample("speed", rc.snap.speed_pct);
+  if (robot.connected && !robot.telemetryStale) trendSample("j6", robot.telemetry.q[5]);
+  if (safe.health && safe.health.ok) trendSample("clearance", safe.last.clearance * 1000);
 }
 
 let rafId = null;
@@ -450,8 +512,8 @@ function stopLiveReports() {
 watch(() => robot.connected, (ok) => {
   // ★ 加 !document.hidden：后台标签页里 WS 恢复时不拉起轮询 ——
   //   visibilitychange 只管切页瞬间，管不了"隐藏期间重连成功"这种情况。
-  if (ok && !document.hidden) { startLiveReports(); link.start(); }
-  else { stopLiveReports(); link.stop(); }
+  if (ok && !document.hidden) { startLiveReports(); link.start(); metrics.start(); }
+  else { stopLiveReports(); link.stop(); metrics.stop(); }
 });
 // 多标签页场景下每个隐藏页继续轮询会把后端和 GPU 打满（现场出现过
 // WebGL context lost / ERR_INSUFFICIENT_RESOURCES），隐藏即停、可见即恢复。
@@ -461,10 +523,11 @@ function onVisibility() {
   if (document.hidden) {
     stopLiveReports();
     link.stop();
+    metrics.stop();              // ★ B1：指标轮询同样隐藏即停（多标签页不许各打各的）
     s3d.stop();                  // ★ 分拣 3D 状态轮询同样隐藏即停（与渲染帧一起停）
     stopLoop();                  // ★ 隐藏即停渲染帧（后台标签页不再空耗 GPU）
   } else {
-    if (robot.connected) { startLiveReports(); link.start(); }
+    if (robot.connected) { startLiveReports(); link.start(); metrics.start(); }
     if (auth.controlActive) s3d.start();
     startLoop();                 // 回到前台：场景与模型原地保留，直接续帧
   }
@@ -493,6 +556,9 @@ onMounted(async () => {
   if (auth.controlActive) s3d.start();
   onSafety((s) => { safety.value = s; safe.ingest(s); });
   asr.loadConfig();        // 语音字幕配置（是否启用/有没有密钥）→ 底栏按钮才能如实提示
+  // ★ C1：把"高性能画面模式"的本机偏好**应用**到渲染层（默认关 → 外观与今天逐字一致）。
+  //   只存 localStorage、不写后端配置：这是操作员各自的看法，不该互相影响。
+  ui.applyHiPerf();
   await robot.loadMeta();  // 初始化机器人模型（子组件 onMounted 已登记容器）
   robot.connect();         // 建立 WebSocket（连上后由上面的 watch 拉起轮询）
   // ★ 2026-10-11 口径变更：**不再"每次启动项目自动打开摄像头"**。
@@ -502,12 +568,20 @@ onMounted(async () => {
   switchView(HOME_VIEW);   // canvas 挂到 live 视图（restoreView 若不动作就停在这里）
   restoreView();           // 恢复上次停留的页面：刷新后回到同一页
   startLoop();             // 渲染循环（隐藏页/上下文丢失时自行停帧）
+  // ★★ A6：评估与渲染**解耦**。渲染循环隐藏即停（黑屏第一根因的修法，不许回退），
+  //   以前一停帧连围栏评估一起停 —— 后台标签页里机器人真撞了台面，界面还挂着
+  //   上一帧的"安全"。这条 250ms 低频评估只做几何不渲染（渲染循环在跑时会自动让位），
+  //   配套的三态健康度由下面的 1s 外部时钟判定（§5.5 铁律①：不许用"结论变没变"猜新鲜）。
+  startIdleSafetyEval();
+  safe.tickHealth();
+  healthTimer = setInterval(() => safe.tickHealth(), 1000);
   window.addEventListener("resize", onResize);
   reportLive();             // 打开页面先报一次互锁状态；后续定时器交给 watch 拉起
   checkTtl();
   ttlTimer = setInterval(checkTtl, 1000);      // 令牌到期 → 自动收回执行页入口
   connectEvents();                              // 订阅后端事件（用于语音播报）
   link.start();                                 // 链路自检轮询（状态灯 + 引导条共用）
+  metrics.start();                              // ★ B1：后端指标轮询（只读接口，无令牌）
   window.addEventListener("keydown", onKeydown); // 全局快捷键（1~9 / E / Q / 空格 / Esc / Enter）
   // 浏览器自动播放策略：首次手势（点击 / 按键）后再允许出声。
   // ★ AudioContext 必须在这个手势里创建（见 services/announcer.js），
@@ -536,6 +610,8 @@ onBeforeUnmount(() => {
   stopLoop();
   if (liveTimer) clearInterval(liveTimer);
   if (ttlTimer) clearInterval(ttlTimer);
+  if (healthTimer) clearInterval(healthTimer);      // ★ A6 评估健康时钟
+  stopIdleSafetyEval();                             // ★ A6 低频评估定时器（卸载后不许在后台继续量）
   if (uiSpeedTimer) clearTimeout(uiSpeedTimer);   // ★ 速度同步的节流定时器也要清
   disconnectEvents();
   // ★ 审计修复 P1-D11：卸载必须主动关掉姿态 WS 与执行域定时器。
@@ -545,6 +621,7 @@ onBeforeUnmount(() => {
   try { robot.disconnect(); } catch (e) { /* 卸载阶段异常不阻塞其他清理 */ }
   try { exec.dispose(); } catch (e) { /* 同上 */ }
   link.stop();
+  metrics.stop();      // ★ B1：指标轮询的 setInterval 也必须随组件卸载清掉（模块级句柄）
   s3d.stop();          // ★ 分拣 3D 的状态轮询同样必须停（否则卸载后仍在打后端）
   document.removeEventListener("visibilitychange", onVisibility);
   if (keyHintTimer) clearTimeout(keyHintTimer);
@@ -589,12 +666,22 @@ onBeforeUnmount(() => {
           <input type="range" :min="SPEED_MIN" :max="SPEED_MAX"
                  v-model.number="exec.speed" class="speed-slider" />
           <span class="speed-value">{{ exec.speed }}%</span>
+          <!-- ★ C3：设定 vs 实读 同屏（详见上面 speedActual/speedDev 的口径注释）。
+               未知就写未知，不拿 0 或滑块值冒充实读（§5.5 铁律③）。 -->
+          <span class="speed-actual" :class="{ unknown: speedActual === null, dev: Math.abs(speedDev ?? 0) >= SPEED_DEV_TOL }"
+                :title="speedDevTitle">实读 {{ speedActual === null ? "未知" : speedActual + "%" }}</span>
         </div>
       </div>
     </header>
-    <div v-if="showBanner" id="safety-banner" :class="safety.state">
-      <span>{{ safetyText }}</span>
-      <span class="sa-sub">{{ safetySub }}</span>
+    <div v-if="showBanner" id="safety-banner" :class="bannerClass">
+      <span>{{ bannerText }}</span>
+      <span class="sa-sub">{{ bannerSub }}</span>
+      <!-- ★ A5：报警就地给取证入口（danger/hit 上升沿后端已自动落盘）。
+           只在**能看到那一页**时出现 —— 运维审计是 needAdmin，没有管理员令牌还摆个
+           点了跳不过去的链接，就是本项目的老毛病"假显示"。 -->
+      <button v-if="allowedKeys.includes('ops')" class="sa-ev"
+              title="运维审计 → 事件取证包（事发前后的实时样本环 / 寄存器 / 事件）"
+              @click="setView('ops')">查看取证</button>
     </div>
     <div id="main">
       <RealMonitor v-show="robot.activeView === 'live'" />
@@ -831,6 +918,12 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 8px rgba(47,214,240,0.4); cursor: pointer; }
 .speed-value { font-size: 12px; color: var(--accent); font-weight: 700;
   font-family: var(--num); min-width: 36px; text-align: right; }
+/* ★ C3：实读值 —— 与"设定"并列（同一句结论必须同源：都读 rc.snap.speed_pct = 40003）。
+   文字本身已带"实读/未知"，颜色只是强化，不做唯一载体（C5 双编码口径）。 */
+.speed-actual { font-size: 11px; color: var(--txt2); font-family: var(--num);
+  border-left: 1px solid var(--line); padding-left: 8px; }
+.speed-actual.unknown { color: var(--muted); font-style: italic; }
+.speed-actual.dev { color: var(--warn); font-weight: 700; }
 
 /* ---- 底栏控制区 ---- */
 #control-zone { flex: none; display: flex; align-items: center; gap: 10px;

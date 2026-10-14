@@ -21,7 +21,7 @@
 > **不做"能连上"的远程控制，做"每一步都能自证"的远程控制。**
 > 下发必须回读确认；推断必须标注来源；不知道就说不不知道。
 
-**规模**：后端 59 个模块 / 前端 80 个源文件 / 后端测试 751 条 / 前端回归脚本 31 个 / 文档 58 份
+**规模**：后端 59 个模块 / 前端 94 个源文件 / 后端测试 1037 条 / 前端回归脚本 44 个 / 文档 61 份
 
 ---
 
@@ -98,8 +98,9 @@ REM    管理员口令见 .env 的 EFORT_ADMIN_PASSWORD（本机开发环境用�
 
 ```bat
 REM ---- 测试 ----
-cd backend && .venv\Scripts\python.exe -m pytest -q        REM 751 条，不连真机
-cd frontend && npm run verify                              REM 31 个 headless 回归脚本
+cd backend && .venv\Scripts\python.exe -m pytest -q        REM 1037 条，不连真机（★ 建议一次只跑一个进程，见 §5.5）
+cd frontend && npm run verify                              REM 44 个 headless 回归脚本（整套 ≈3s）
+cd frontend && npm run verify:time                         REM 逐个计时（预算：单步>20s / 总计>180s 才 WARN）
 cd frontend && npm run build                               REM 改完前端必须 build（8000 托管的是 dist）
 
 REM ---- 视觉（相机 venv 在 D:\EFORT_Projects\EFORT_Camera_Python_OpenCv\venv）----
@@ -500,9 +501,26 @@ REM ---- 运维 ----
 
 ### 5.5 工程纪律
 
-- **测试必须与生产隔离三样**：DB（`EFORT_DB_URL`）、模拟开关（`EFORT_SIMULATE=always`）、
-  **日志目录（`EFORT_LOGS_DIR`）**。漏掉日志会把测试 traceback 写进生产 `logs/app.log`，
-  现场排障时看到"凭空出现的报错"
+- **测试必须与生产隔离四样**：DB（`EFORT_DB_URL`）、模拟开关（`EFORT_SIMULATE=always`）、
+  **日志目录（`EFORT_LOGS_DIR`）**、**配置覆盖层文件（`EFORT_SETTINGS_PATH`，见下条）**。
+  漏掉日志会把测试 traceback 写进生产 `logs/app.log`，现场排障时看到"凭空出现的报错"
+- ★★ **第四项共享状态（2026-10-12 实测踩到的事故）**：配置**覆盖层文件**
+  `config/app_settings.json` 原本没有环境变量出口 —— `tests/conftest.py::_reset_settings_overlay`
+  每个用例前后**删那个真实文件**来兜污染，单跑一切正常；**并发跑两个 pytest** 就会同时读写同一个
+  真实文件，表现为 `test_settings.py` 6→2→0 个**随机假故障**（代码没有 bug）。
+- ★★ **第四项共享状态已隔离（2026-10-13，负责人批准后落地）**：`SETTINGS_PATH` 现在由
+  `app_settings.resolve_settings_path()` 解析，**环境变量 `EFORT_SETTINGS_PATH` 可覆盖** ——
+  **不设 = 生产路径逐字节不变**（`<项目根>/config/app_settings.json`，生产口径，改动仍需负责人点头）；
+  设了就用它（绝对路径原样、相对路径按项目根解析）。`tests/conftest.py` 在 **import app 之前**
+  把它指到 `tempfile.mkdtemp()` 的**每进程唯一**临时目录，所以 ① 用例照样每条从干净覆盖层开始、
+  ② **生产文件不再被测试删除**、③ 并发两进程各写各的目录（实测两个 pytest 同时跑
+  `test_settings.py` 都 31 passed）。守卫夹具 `conftest._production_overlay_untouched`
+  每个用例前后比对生产文件内容，**变一点就红**（比旧的"备份再还原"诚实 —— 还原会把事故吞掉）。
+  ★ 仍**建议一次只跑一个 pytest**：日志目录 `EFORT_LOGS_DIR` 等其它共享状态没有按进程分开。
+  回归钉：`tests/test_settings.py::test_settings_path_*` /
+  `::test_test_session_overlay_path_is_not_the_production_file` /
+  `::test_api_write_lands_on_tmp_and_never_the_production_file`。
+  详见 `docs/实施记录-创新四批落地与实测纠偏（B2GLB诊断与B6耗时预算）.md` §5。
 - **不要启动工业相机程序**（MVS 客户端等）—— 现场用 USB 相机
 - **Windows 中文系统**：`ipconfig`/`arp` 输出是 GBK，Python 里要 `decode('gbk')`；
   读文件路径含中文用 `cv2.imdecode` 而不是 `cv2.imread`
@@ -528,8 +546,9 @@ REM ---- 运维 ----
 
 | 层 | 命令 | 说明 |
 |---|---|---|
-| 后端单元/接口 | `cd backend && .venv\Scripts\python.exe -m pytest -q` | **751 条**，`EFORT_SIMULATE=always` 不连真机 |
-| 前端回归 | `cd frontend && npm run verify` | **31 个脚本**（headless，node 直接跑，含 3D/ kinematics/安全/UI） |
+| 后端单元/接口 | `cd backend && .venv\Scripts\python.exe -m pytest -q` | **1037 条**，`EFORT_SIMULATE=always` 不连真机（★ 一次只跑一个进程） |
+| 前端回归 | `cd frontend && npm run verify` | **44 个脚本**（headless，node 直接跑，含 3D/ kinematics/安全/UI），整套 ≈**3s** |
+| 回归耗时预算 | `cd frontend && npm run verify:time` | 逐个计时；单步>20s 或 总计>180s 才 WARN（**不改变退出码**，失败照样红） |
 | 视觉·算法 | `camera\tools\vision_color_test.py` | 合成图，测**逻辑**（旋转不变、门槛开关、边界） |
 | 视觉·链路 | `camera\tools\vision_e2e_replay.py` | **现场真图**，测**整条链路**（改阈值前必跑） |
 | 真机脚本 | `tools\` 下 | 需禁代理；**运行前先确认分拣未在跑** |

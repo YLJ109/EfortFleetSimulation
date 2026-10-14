@@ -8,11 +8,16 @@
   - 覆盖层不再稀疏 → 以后没法判断"哪一项被改过"；
   - 重置没拦住 → 现场配置被一键清空。
 
-## ★ 每个用例都必须还原现场的 app_settings.json
-本文件里的写操作会落到**真实路径** `config/app_settings.json`（不是 tmp_path）——
-因为 `app_settings.SETTINGS_PATH` 是模块级常量，Config 与 API 都读它。
-所以有 autouse 的 `_keep_overlay` 夹具：测试前备份、测试后原样还原（原本不存在就删掉）。
-不做这一步的话，跑一次 `pytest` 就会把开发者/现场的配置改掉，而且不会有任何提示。
+## ★★ 覆盖层落在哪儿：测试写临时文件，**绝不碰生产 config/app_settings.json**
+2026-10-13 之前：`app_settings.SETTINGS_PATH` 是硬编码生产路径的模块级常量，本文件的写操作
+会真的落到 `config/app_settings.json`，所以这里必须有 autouse 的 `_keep_overlay`
+（测试前备份、测试后原样还原）。那是"自我修复"式的保护 —— 真写错了也会被还原掉，没人知道。
+
+现在：`SETTINGS_PATH` 可由环境变量 `EFORT_SETTINGS_PATH` 覆盖，`tests/conftest.py` 在
+import app 之前把它指到临时目录，于是本文件的写操作全部落在临时文件上；
+保护生产文件的职责移到 conftest 的 `_production_overlay_untouched`
+（**比对内容、变了就红**，不还原、不吞事故），路径解析本身由本文件末尾的
+`test_settings_path_*` 钉住。默认行为（不设环境变量）仍是生产路径，一条都没变。
 """
 from __future__ import annotations
 
@@ -25,41 +30,13 @@ from app.api import auth as auth_mod
 from app.core import app_settings as st
 
 
-# ---------------------------------------------------------------------------
-# 现场配置保护
-# ---------------------------------------------------------------------------
-@pytest.fixture(autouse=True)
-def _keep_overlay():
-    """备份并还原 config/app_settings.json（含"原本不存在"这一种）。"""
-    path = st.SETTINGS_PATH
-    existed = os.path.isfile(path)
-    backup = None
-    if existed:
-        with open(path, "r", encoding="utf-8") as f:
-            backup = f.read()
-    try:
-        yield
-    finally:
-        try:
-            if existed and backup is not None:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(backup)
-            elif os.path.isfile(path):
-                os.remove(path)
-        except OSError:
-            pass
-        # 还原后清缓存，避免后面的用例读到本用例的值
-        try:
-            from app.core.config import reload_config
-            reload_config()
-        except Exception:
-            pass
-
-
 @pytest.fixture(autouse=True)
 def _clean_overlay():
-    """每个用例从"没有覆盖层"开始，避免用例之间互相串味。"""
+    """每个用例从"没有覆盖层"开始，避免用例之间互相串味。
+
+    ★ 清的是 `st.SETTINGS_PATH`（测试会话里 = 临时目录），生产覆盖层由 conftest 的
+    `_production_overlay_untouched` 守着，本夹具**不会**去删它。
+    """
     path = st.SETTINGS_PATH
     try:
         if os.path.isfile(path):
@@ -505,3 +482,92 @@ def test_real_motion_needs_double_confirmation(client):
     assert after["real_motion_env"] is False          # 测试进程环境强制 0
     assert after["real_motion_active"] is False, \
         "只打开配置项就生效了 —— 真实下发的双重确认失效"
+
+
+# ---------------------------------------------------------------------------
+# ★★ 覆盖层路径解析（EFORT_SETTINGS_PATH）与"测试不碰生产文件"隔离钉
+#    （AGENTS.md §5.5 的第四项共享状态；2026-10-13 负责人批准后落地）
+# ---------------------------------------------------------------------------
+# ★★ 这是**生产口径**的字面量：界面改的配置默认落在 <项目根>/config/app_settings.json。
+#    故意写死在这里 —— 它一旦变，"保存的文件"和"后端读的文件"就不是同一个，
+#    现场表现是"改了没生效"。**改动需负责人点头。**
+PRODUCTION_REL = os.path.join("config", "app_settings.json")
+
+
+def _production_path() -> str:
+    from app.core.config import project_root
+    return os.path.join(project_root(), PRODUCTION_REL)
+
+
+def _snap(path: str):
+    if not os.path.isfile(path):
+        return None
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def test_settings_path_defaults_to_the_production_path(monkeypatch):
+    """未设 EFORT_SETTINGS_PATH → 必须是历史那个生产路径（**逐字节一致，不许改**）。"""
+    monkeypatch.delenv("EFORT_SETTINGS_PATH", raising=False)
+    expected = _production_path()
+    assert st.resolve_settings_path() == expected
+    assert st.PRODUCTION_SETTINGS_PATH == expected, "生产路径常量本身漂移了"
+
+
+def test_settings_path_honours_env_override_absolute(monkeypatch, tmp_path):
+    """设了绝对路径 → 原样用它（测试隔离走的就是这一条）。"""
+    target = str(tmp_path / "overlay" / "app_settings.json")
+    monkeypatch.setenv("EFORT_SETTINGS_PATH", target)
+    assert st.resolve_settings_path() == target
+    assert st.resolve_settings_path() != _production_path()
+
+
+def test_settings_path_honours_env_override_relative(monkeypatch):
+    """相对路径按**项目根**解析（并 normpath，与默认路径同一套分隔符风格）。"""
+    from app.core.config import project_root
+    monkeypatch.setenv("EFORT_SETTINGS_PATH", "tmp_overlay/app_settings.json")
+    assert st.resolve_settings_path() == os.path.normpath(os.path.join(
+        project_root(), "tmp_overlay", "app_settings.json"))
+
+
+def test_test_session_overlay_path_is_not_the_production_file():
+    """★★ 本测试会话必须写到临时目录：并发跑两个 pytest 不再抢同一个真实文件。
+
+    这条是"6→2→0 个随机假故障"的根治钉（AGENTS.md §5.5）。
+    """
+    env = os.environ.get("EFORT_SETTINGS_PATH")
+    assert env, "conftest 必须在 import app 之前设置 EFORT_SETTINGS_PATH"
+    assert os.path.abspath(st.SETTINGS_PATH) == os.path.abspath(env)
+    assert os.path.abspath(st.SETTINGS_PATH) != os.path.abspath(_production_path()), \
+        "隔离失效：SETTINGS_PATH 仍指向生产覆盖层 → 用例会在删/写真实配置"
+    # 读写函数用的是**模块全局名**（调用时才取），所以运行期改它依然有效
+    assert st.runtime_flags()["settings_path"] == st.SETTINGS_PATH
+
+
+def test_api_write_lands_on_tmp_and_never_the_production_file(client):
+    """直接证据：走 API 真写一次覆盖层，临时文件里看得到、生产文件一个字节没动。"""
+    prod = _production_path()
+    before = _snap(prod)
+    try:
+        r = client.put("/api/settings", json={"values": {"robot.model": "OVERLAY-PIN"}},
+                       headers=_admin(client))
+        assert r.status_code == 200, r.text
+        assert st.load_overlay().get("robot", {}).get("model") == "OVERLAY-PIN"
+        assert os.path.abspath(st.SETTINGS_PATH) != os.path.abspath(prod)
+        assert _snap(prod) == before, "测试把覆盖层写进了生产文件"
+    finally:
+        # 生产文件原本不存在就**必须仍然不存在**（这是本钉的核心断言，不靠还原兜底）
+        assert _snap(prod) == before
+
+
+def test_module_level_path_is_monkeypatchable(monkeypatch, tmp_path):
+    """★ 兼容"运行期改 SETTINGS_PATH"的用法：读写函数每次都读模块全局名。"""
+    target = str(tmp_path / "nested" / "app_settings.json")
+    monkeypatch.setattr(st, "SETTINGS_PATH", target, raising=True)
+    out = st.save_patch({"robot.model": "ER8-700H-MP"})
+    assert out["changed"]["robot.model"]["new"] == "ER8-700H-MP"
+    assert os.path.isfile(target), "写入没有跟着 monkeypatch 的路径走"
+    assert st.load_overlay().get("robot", {}).get("model") == "ER8-700H-MP"
+    # 重置 = 删当前指向的文件（不是生产那个）
+    st.reset_settings()
+    assert not os.path.isfile(target)

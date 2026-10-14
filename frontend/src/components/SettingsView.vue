@@ -22,10 +22,12 @@ import { computed, onMounted, reactive, ref } from "vue";
 import Icon from "./Icon.vue";
 import { useSettingsStore } from "../stores/settings.js";
 import { useAuthStore } from "../stores/auth.js";
+import { useUiStore } from "../stores/ui.js";
 import { apiUrl } from "../config.js";
 
 const st = useSettingsStore();
 const auth = useAuthStore();
+const ui = useUiStore();
 
 // ---- 分组图标（SCHEMA 只给 id/label/desc，图标属于展示层） ----
 const GROUP_ICON = {
@@ -579,6 +581,25 @@ onMounted(() => {
       </div>
       <div v-if="ttlErr" class="stg-msg err"><Icon name="alert" :size="14" /> {{ ttlErr }}</div>
       <div v-else-if="ttlMsg" class="stg-msg ok"><Icon name="check" :size="14" /> {{ ttlMsg }}</div>
+    </div>
+
+    <!-- ===== ★ C1 界面模式（本机偏好，存 localStorage，**不写后端配置**） ===== -->
+    <div class="stg-group">
+      <div class="stg-group-h">
+        <Icon name="activity" :size="16" /><b>界面模式（只影响这台浏览器的这一位操作员）</b>
+        <span class="stg-tag">{{ ui.hiPerf ? "高性能画面（ISA-101 灰阶）" : "常规（彩色）" }}</span>
+      </div>
+      <p class="stg-group-d">
+        <b>高性能画面模式</b>＝ ISA-101 那套口径：底色灰阶、<b>颜色只留给异常</b>、
+        "推断 / 未知"除了颜色还加<b>虚线 + 斜纹 + 文字后缀</b>（不靠颜色也能看出是推断）。
+        关掉时外观与今天<b>逐字一致</b>（所有灰阶样式都挂在 <code>.hmi-hi-perf</code> 底下，模式不开一条都不命中）。
+        ★ 这是看法不是配置：<b>不写 <code>app_settings.json</code>、不动机器人、不影响别人</b>；
+        判据（报警等级、互锁、安全距离）一个都没变。
+      </p>
+      <label class="stg-confirm">
+        <input type="checkbox" :checked="ui.hiPerf" @change="ui.setHiPerf($event.target.checked)" />
+        <span>启用高性能画面模式（灰阶底 · 颜色只给异常 · 推断/未知加形状与文字冗余）</span>
+      </label>
     </div>
 
     <!-- ===== 危险区：重置所有参数 ===== -->

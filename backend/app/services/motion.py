@@ -28,6 +28,9 @@ from app.core.safety_const import (
 #   原先本文件自己写了一份（tuple 形式 + 自己做 NaN 检查），与 control/vision 各查各的。
 from app.services.limits import in_limits, load_ranges
 from app.services.modbus import ADDR_SET_SPEED, ModbusRobot
+# ★ E2 到位自证：**只读观测件**。它不 import 本模块、不产生任何动作，
+#   这里只在"段边界"登记（begin/end），任何异常都吞掉 —— 观测坏了绝不能影响下发。
+from app.services.twin_residual import twin_residual
 from app.services.sim_robot import sim_robot
 
 log = get_logger("motion")
@@ -209,7 +212,8 @@ class MotionService:
 
     def command(self, joints: List[float], speed_pct: int = 100,
                 dwell_ms: int = 0,
-                abort_check: Optional[Callable[[], bool]] = None) -> dict:
+                abort_check: Optional[Callable[[], bool]] = None,
+                source: str = "") -> dict:
         """执行一次目标到位。返回执行结果(含模式/是否真下发)。
 
         ★ 审计修复 P0-2：整段下发序列在 _exec_lock 内完成，
@@ -219,6 +223,9 @@ class MotionService:
           点动（死人开关/watchdog/松手停止）必须能**打断飞行中的下发**：
           rc_jog_execute 同步阻塞可达 30s，原来只有急停能中断，
           看门狗超时后要等这一发走完才停（远超 watchdog_ms=1500 的设计）。
+
+        @param source 这一段"是为什么下的"（点位名 / 点动 / 显式目标），
+                 只写进 E2 到位自证的记录与事件文案，便于现场对账；缺省不影响下发。
         """
         if not isinstance(joints, (list, tuple)) or len(joints) != 6:
             return {"ok": False, "error": "目标必须是 6 个关节角"}
@@ -235,13 +242,14 @@ class MotionService:
                     "busy": True}
         try:
             return self._command_locked(joints, speed_pct, dwell_ms, real,
-                                        abort_check)
+                                        abort_check, source)
         finally:
             self._exec_lock.release()
 
     def _command_locked(self, joints: List[float], speed_pct: int,
                         dwell_ms: int, real: bool,
-                        abort_check: Optional[Callable[[], bool]] = None) -> dict:
+                        abort_check: Optional[Callable[[], bool]] = None,
+                        source: str = "") -> dict:
         """已在 _exec_lock 内的下发主体。"""
         with self._lock:
             if self.stopped:
@@ -313,6 +321,10 @@ class MotionService:
             self.last_error = None
 
         mode = "real" if real else "sim"
+        # ★ E2 到位自证：登记"正在飞的这一段"（纯内存 + 只读，异常全吞）。
+        #   真机分支在 rc_jog_execute 阻塞期间由采集器逐拍喂实测 → 收敛过程被记录下来；
+        #   模拟分支同样登记（仿真机体位会走向目标 → 界面上看得到收敛）。
+        self._twin_begin(self.last_target, speed_pct, source)
         if real:
             # ★ Stage D：真实下发走"点动通道"（实测确认的唯一有效路径）——
             #   速度设定(40103) → 目标角(40139~44, FC6 逐发)+回读校验 → settle 0.15s
@@ -341,6 +353,7 @@ class MotionService:
                     self.moving = False
                     self.last_error = err
                     self.last_target = _prev_target     # ★ 失败回滚（见上）
+                self._twin_end("aborted")
                 return {"ok": False, "mode": mode, "error": "写速度设定失败: %s" % err}
             # ★ 全维度审查 B-03：速度是安全红线，必须**回读比对数值**
             #   （40139~40144 有完整回读，唯独速度这条最关键的通道原来只查错误码、
@@ -356,6 +369,7 @@ class MotionService:
                                        % (speed_40103, echo_i))
                     self.last_target = _prev_target     # ★ 失败回滚（见上）
                 log.error("速度回读不一致，已中止下发: %s", self.last_error)
+                self._twin_end("aborted")
                 return {"ok": False, "mode": mode, "error": self.last_error,
                         "speed_written": speed_40103, "speed_echo": echo_i}
             # ★ should_abort：急停置位后，飞行中的点动链路（写目标→触发→轮询
@@ -383,7 +397,9 @@ class MotionService:
                     self.moving = False
                     self.last_error = str(e)
                     self.last_target = _prev_target     # ★ 失败回滚（见上）
+                self._twin_end("aborted")
                 return {"ok": False, "mode": mode, "error": "下发异常: %s" % e}
+            fail = None
             with self._lock:
                 self.moving = False
                 self.last_executed_at = time.time()
@@ -393,8 +409,12 @@ class MotionService:
                     #   逻辑目标必须退回到下发前 —— 否则下一次增量点动会基于一个
                     #   "没发生过的位移"累加，误差逐次放大。
                     self.last_target = _prev_target
-                    return {"ok": False, "mode": mode, "error": err or "下发失败",
+                    fail = {"ok": False, "mode": mode, "error": err or "下发失败",
                             "detail": detail}
+            # ★ E2：段收尾放在 motion._lock **之外**（不给观测件引入嵌套锁路径）
+            self._twin_end("done" if ok else "aborted")
+            if fail is not None:
+                return fail
             return {"ok": True, "target": self.last_target,
                     "speed_pct": speed_pct, "speed_40103_written": speed_40103,
                     "mode": mode, "executed": True, "detail": detail}
@@ -415,10 +435,26 @@ class MotionService:
         with self._lock:
             return self.stopped
 
+    # ---------------- E2 到位自证：段边界登记（**只观测，绝不影响下发**）----------------
+    def _twin_begin(self, target: List[float], speed_pct: int, source: str = "") -> None:
+        try:
+            twin_residual.begin(target, source=source or "", speed_pct=speed_pct)
+        except Exception as e:                       # noqa: BLE001 —— 观测件坏了照常下发
+            log.debug("到位自证登记失败（已忽略）: %s", e)
+
+    def _twin_end(self, reason: str) -> None:
+        try:
+            twin_residual.end(reason)
+        except Exception as e:                       # noqa: BLE001
+            log.debug("到位自证收尾失败（已忽略）: %s", e)
+
     def estop(self) -> dict:
         with self._lock:
             self.stopped = True
             self.moving = False
+        # ★ E2 到位自证：急停按下那一刻，"在飞的那一段"如实收尾为 aborted
+        #   （绝不当成"已到位"，也不当成"机器没到位"—— 是人叫的停）。
+        self._twin_end("estop")
         # ★ 全维度审查 B-06：急停结果必须**可见**。
         #   原实现：下发失败只 log.error，然后照常返回 state()（含 stopped=True）
         #   → 前端/运维看到"急停已触发"，控制器其实没收到停止字。

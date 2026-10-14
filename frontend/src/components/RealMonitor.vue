@@ -21,6 +21,7 @@ import { highlightJoint } from "../three/manager.js";
 import CameraPanel from "./CameraPanel.vue";
 import MonitorLayout from "./MonitorLayout.vue";
 import RobotParamsCard from "./RobotParamsCard.vue";
+import TwinResidualCard from "./TwinResidualCard.vue";
 import Icon from "./Icon.vue";
 
 const robot = useRobotStore();
@@ -96,6 +97,9 @@ onBeforeUnmount(() => { highlightJoint(-1); robot.setDemo(false); });
       <!-- 关节角 + 末端 TCP：只读读数。连接状态已整合到底栏「机器人链路」状态灯，
            这里不再重复展示（重连动作也从底部状态灯里点开）。 -->
       <RobotParamsCard :connection="false" />
+      <!-- ★ E2 到位自证（只读）：下发那一段到底走没走到，用逐拍实测残差摊开给人看。
+           判据在后端一份（WS 位姿帧捎带 + GET /api/twin/residual），这里只渲染。 -->
+      <TwinResidualCard />
     </div>
   </MonitorLayout>
 </template>

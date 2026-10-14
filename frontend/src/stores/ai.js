@@ -22,6 +22,9 @@ export const useAiStore = defineStore("ai", {
     text: "",              // 输入框/语音识别落到这里的原文
     asrText: "",           // 语音识别到的原话（单独留一份，便于对照"听到的 vs 改过的"）
     parsed: null,          // /parse 的完整返回（含 plan_id / echo / warnings）
+    // ★★ E1 意图编译器（`/ai/plan`，**只编译不动作**）：这句话会变成哪几段、每段闸门怎么说。
+    //   与 `parsed` 用**同一个 plan_id** 挂勾（对不上就不显示，防"看的不是这一句"）。
+    planCard: null,
     err: "",               // 解析或执行失败的原因（**原样展示，不美化**）
     busy: false,
     running: false,
@@ -78,7 +81,7 @@ export const useAiStore = defineStore("ai", {
     async parse() {
       const txt = (this.text || "").trim();
       if (!txt) { this.err = "先输入或说一条指令"; return null; }
-      this.busy = true; this.err = ""; this.parsed = null;
+      this.busy = true; this.err = ""; this.parsed = null; this.planCard = null;
       try {
         const r = await apiControl("/ai/parse", {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -102,6 +105,33 @@ export const useAiStore = defineStore("ai", {
         this.err = "解析请求失败：" + ((e && e.message) || e);
         return null;
       } finally { this.busy = false; }
+    },
+
+    /**
+     * ★★ E1 意图编译器预检（**只编译、不动作**）：这句话会变成哪几段、每段闸门怎么说。
+     *   走 `POST /api/ai/plan`，**必须带刚解析出的同一个 plan_id** —— 与「确认的就是执行的那一份」
+     *   同一条口径；请求失败要**如实留一张失败的卡**，不能清空成"没有隐患"（§5.5 铁律 5）。
+     */
+    async compilePlan(pid = "") {
+      const id = String(pid || (this.parsed && this.parsed.plan_id) || "").trim();
+      if (!id) { this.planCard = null; return null; }
+      try {
+        const r = await apiControl("/ai/plan", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ plan_id: id }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (d && d.compiled) { this.planCard = d; return d; }
+        this.planCard = { plan_id: id, compiled: false,
+                          error: d.detail || d.error || ("预检失败：HTTP " + r.status),
+                          segments: [], notes: [], warnings: [] };
+        return this.planCard;
+      } catch (e) {
+        this.planCard = { plan_id: id, compiled: false,
+                          error: "预检请求失败：" + ((e && e.message) || e),
+                          segments: [], notes: [], warnings: [] };
+        return this.planCard;
+      }
     },
 
     /**

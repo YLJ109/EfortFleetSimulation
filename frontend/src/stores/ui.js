@@ -10,6 +10,7 @@
 // 所有写入都做 try/catch：无痕模式 / 禁用 localStorage 时不能整个页面崩掉。
 // =====================================================================
 import { defineStore } from "pinia";
+import { setHiPerfMode } from "../utils/colorSemantics.js";
 
 export const LS_KEY = "efort.ui.v1";
 
@@ -97,6 +98,15 @@ export const useUiStore = defineStore("ui", {
        * ★★ 2026-10-11 用户口径：**进入页面默认开「运行日志」**（运行日志在最左侧）。
        */
       statusPopover: "log",
+      /**
+       * ★ C1「高性能画面模式」（ISA-101 灰阶底 + 颜色只给异常 + 非颜色冗余）。
+       *   默认**关**：关掉时渲染层外观与今天逐字一致（所有灰阶样式都挂在 `.hmi-hi-perf`
+       *   底下，模式不开一条都不命中 —— 非破坏式）。
+       *   ★ 这是**本机界面偏好**，存 localStorage，**不写后端配置**：
+       *     同一台控制器上不同操作员可以各看各的，不该互相影响。
+       *   ★ 真正的开关在 `utils/colorSemantics.js`（全站唯一 ref），这里只是持久化外壳。
+       */
+      hiPerf: s.hiPerf === true,
     };
   },
   getters: {
@@ -118,6 +128,7 @@ export const useUiStore = defineStore("ui", {
           sideCollapsed: this.sideCollapsed,
           view: this.view,
           camVisible: this.camVisible,
+          hiPerf: this.hiPerf,
         }));
       } catch (e) { /* 忽略：无痕模式等场景下存不了也不影响使用 */ }
     },
@@ -145,6 +156,17 @@ export const useUiStore = defineStore("ui", {
       this._persist();
     },
     toggleCamVisible() { this.setCamVisible(!this.camVisible); },
+    /** ★ C1：设置/切换"高性能画面模式"（同时改全站唯一 ref 与 <html data-hmi>）。 */
+    setHiPerf(v) {
+      const on = !!v;
+      this.hiPerf = on;
+      setHiPerfMode(on);          // ← 真正的开关在这里（colorSemantics 里那一个 ref）
+      this._persist();
+      return on;
+    },
+    toggleHiPerf() { return this.setHiPerf(!this.hiPerf); },
+    /** App 启动时把持久化偏好**应用**到渲染层（读得到但没应用 = 假开关）。 */
+    applyHiPerf() { return setHiPerfMode(this.hiPerf); },
     /** 底栏状态灯浮层：同一时刻只允许开一个（三个并排弹会挡住整个底栏）。 */
     setStatusPopover(k) { this.statusPopover = typeof k === "string" ? k : ""; },
     toggleStatusPopover(k) { this.statusPopover = this.statusPopover === k ? "" : k; },

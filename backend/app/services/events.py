@@ -16,12 +16,14 @@ actor:    system | admin | operator | anonymous | vision
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from app.core.logger import get_logger
 from app.db.crud import insert_system_event
 from app.db.database import SessionLocal
+from app.services import metrics
 from app.services.hub import hub
 
 log = get_logger("events")
@@ -60,6 +62,9 @@ def emit(category: str, level: str, action: str, message: str = "",
         detail_txt = ""
 
     payload: Dict[str, Any] = {}
+    # ★ B1 只读指标：emit 是**同步落库**（没有内存队列 → 不存在「积压」这一说，
+    #   写入耗时就是背压的真实体现）。计时只包落库段，不含广播/日志。
+    t0 = time.perf_counter()
     try:
         s = SessionLocal()
         try:
@@ -80,9 +85,11 @@ def emit(category: str, level: str, action: str, message: str = "",
                 "message": row.message,
                 "detail": row.detail,
             }
+            metrics.incr("event.writes")
         finally:
             s.close()
     except Exception as e:   # 落库失败也不能影响调用方
+        metrics.incr("event.write_fail")
         log.warning("事件落库失败(%s/%s): %s", cat, action, e)
         payload = {
             "type": "event",
@@ -92,6 +99,7 @@ def emit(category: str, level: str, action: str, message: str = "",
             "actor": str(actor or "system"), "ip": str(ip or ""),
             "message": str(message or ""), "detail": detail_txt,
         }
+    metrics.stat("event.write_ms", (time.perf_counter() - t0) * 1000.0)
 
     # 实时广播（前端时间线可即时刷新）
     if broadcast:
@@ -118,6 +126,18 @@ def emit(category: str, level: str, action: str, message: str = "",
             log.info(line)
     except Exception:
         pass
+
+    # ★★ C2 报警合理化：把这条事件交给**报警层**观察（分级 / 折叠 / 延时 / 搁置的原料）。
+    #   · 放在最后、整段包在 try 里：报警层只是**显示与处置层**，它出错绝不能影响
+    #     事件落库、广播，更不能把调用 emit 的主流程（运动控制 / 采集 / 鉴权）带崩；
+    #   · 只读 payload，不改任何字段 —— 各报警源怎么判定（围栏 danger/hit、就绪闸门、
+    #     5005 清报警顺序）一个字节都没动，见 services/alarms.py 模块注释；
+    #   · 报警层自己的审计事件（action 以 alarms. 开头）会被它自己忽略，不会递归。
+    try:
+        from app.services import alarms
+        alarms.ingest(payload)
+    except Exception as e:                   # noqa: BLE001 —— 观测层不许带崩主控
+        log.debug("报警层摄入失败(已忽略): %s", e)
 
     return payload
 

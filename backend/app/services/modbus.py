@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import get_config
 from app.core.logger import get_logger
+from app.services import metrics
 
 log = get_logger("modbus")
 
@@ -224,14 +225,18 @@ class ModbusRobot:
 
     def read_pose(self) -> Tuple[Optional[List[float]], Optional[str]]:
         """返回 (6 个关节角 deg, None) 或 (None, 错误信息)。复用长连接。"""
+        # ★ B1 只读指标：只量「IO 往返段」（连接+发送+收帧），解析失败不计入往返。
+        t0 = time.perf_counter()
         try:
             with self._io_lock:               # ★ 与点动写链路共用 socket，必须整帧持锁
                 s = self._ensure_sock()
                 s.sendall(_build(self.func, self.base_addr, self.count, self.uid))
                 data = self._recv_frame(s)
         except Exception as e:
+            metrics.incr("modbus.read_pose_fail")
             self._close()          # 出错断开, 下次重建
             return None, "timeout/error: %s" % e
+        metrics.stat("modbus.read_pose_rt_ms", (time.perf_counter() - t0) * 1000.0)
 
         if len(data) < 9:
             return None, "响应过短 %d 字节" % len(data)
@@ -310,14 +315,18 @@ class ModbusRobot:
 
     def read_regs(self, addr: int, qty: int) -> Tuple[Optional[List[int]], Optional[str]]:
         """FC3 读任意寄存器区。返回 (寄存器列表, None) 或 (None, 错误)。"""
+        # ★ B1 只读指标：单次寄存器读的 IO 往返（点动/吸放链路的逐拍读都从这里过）。
+        t0 = time.perf_counter()
         try:
             with self._io_lock:
                 s = self._ensure_sock()
                 s.sendall(_build(3, int(addr), int(qty), self.uid))
                 data = self._recv_frame(s)
         except Exception as e:
+            metrics.incr("modbus.read_regs_fail")
             self._close()
             return None, "timeout/error: %s" % e
+        metrics.stat("modbus.read_regs_rt_ms", (time.perf_counter() - t0) * 1000.0)
         if len(data) < 9:
             return None, "响应过短 %d 字节" % len(data)
         fc = data[7]

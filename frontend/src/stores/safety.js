@@ -10,9 +10,12 @@ import { defineStore } from "pinia";
 import { apiUrl } from "../config.js";
 import { apiControl } from "../net/control.js";
 import { useAuthStore } from "./auth.js";
-import { setSafetyConfig, getCameraPose, applyCameraPose } from "../three/manager.js";
+import {
+  setSafetyConfig, getCameraPose, applyCameraPose, getSafetyHealth,
+} from "../three/manager.js";
 import { updateAlarm } from "../utils/alarm.js";
 import { defaultSafety, normalizeSafetyConfig } from "../utils/safetyConfig.js";
+import { evalHealth } from "../utils/safetyLabels.js";
 
 // 兼容旧的导入路径（面板等曾从 store 里取默认配置）
 export { defaultSafety, normalizeSafetyConfig };
@@ -43,11 +46,45 @@ export const useSafetyStore = defineStore("safety", {
     lastSource: "robot",
     last: { state: "safe", ratio: 1, clearance: 0, zoneId: "", zoneName: "" },
     appliedJson: "",
+    /**
+     * ★ A6 评估健康（三态，绝不塌成布尔）：由**外部 1s 时钟**调 `tickHealth()` 刷新。
+     *   `beat` = 累计评估次数（单调，只增不减）；`at` = 最后一次评估的 performance.now()；
+     *   `health.state` = never | fresh | stale | stopped。
+     *   为什么单独存：`last` 在评估停帧时会**冻在上一帧**，界面若照读 `last.state`
+     *   就能把"页面卡住的 30 秒"显示成"安全"—— 现场真撞台面也不会重新判定（§5.5 铁律①③）。
+     */
+    beat: 0,
+    at: 0,
+    // ★ C3：**外部时钟水位**（与 rc.clk / link.clk / metrics.clk 同一病根同一治法）：
+    //   四元组画趋势要按"现在"取时间窗，而 `Date.now()` 不是响应式依赖 ——
+    //   组件自己调它就会出现"趋势线停在渲染那一秒"。由 App 的 1s 时钟无条件推进。
+    clk: 0,
+    health: { state: "never", ok: false, label: "未开始", notice: "", title: "" },
   }),
   getters: {
     zones: (s) => (s.config && s.config.zones) || [],
   },
   actions: {
+    /**
+     * 刷新评估健康（App.vue 的 1s 时钟调用；★ 不许用"结论有没有变"来推断新鲜度）。
+     */
+    tickHealth() {
+      const h = getSafetyHealth();
+      this.beat = h.ticks;
+      this.at = h.at;
+      // ★ C3：新鲜度水位**无条件**推进（不参与"要不要写 health"的判据，见 state 里 clk 的注释）
+      this.clk = Date.now();
+      const ageMs = h.at ? performance.now() - h.at : null;
+      const next = evalHealth({ ageMs, ticks: h.ticks });
+      const cur = this.health;
+      // ★ 只有真的变化才写（避免每秒产生一次无意义的响应式更新）；
+      //   但 state/notice 里的秒数是会变的，所以按整个对象比较。
+      if (cur.state !== next.state || cur.notice !== next.notice || cur.title !== next.title) {
+        this.health = next;
+      }
+      return next;
+    },
+
     /** 启动时拉取配置并应用到 3D 场景。 */
     async load() {
       try {

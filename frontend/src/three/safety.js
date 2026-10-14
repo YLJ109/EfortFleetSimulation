@@ -582,6 +582,17 @@ export class SafetyFence {
     const out = {
       state: "safe", ratio: 1, clearance: 0, zoneId: "", zoneName: "", zones: [],
     };
+    // ★★★ 测量前先把**世界矩阵**补算一遍。
+    //   Box3.setFromObject 只刷新对象自己的矩阵，父级矩阵必须已经是最新的；
+    //   而 Three 只在 renderer.render() 里做 scene.updateMatrixWorld()。
+    //   于是"还没渲染过就测量"（开机首帧 / 界面 watcher 直接调 evalSafety /
+    //   页面隐藏时渲染循环整个停帧）会拿到**没旋转、没抬升**的局部矩阵：
+    //   站在 180mm 站台上的机器人被量成 min.y = -0.132（= -底座半径），
+    //   净空 -312mm → 假"碰撞报警！机器人已触及台面"。
+    //   2026-10-12 现场：真实监控页那条碰撞就是这条（页面在后台时渲染停帧，
+    //   开机首帧的假结论一直挂在屏上没人纠正）。
+    if (root) root.updateWorldMatrix(true, true);
+    else if (groundRoot) groundRoot.updateWorldMatrix(true, true);
     const g = this.cfg && this.cfg.ground;
     const gOn = !!(g && g.enabled !== false && this.cfg.enabled !== false);
 

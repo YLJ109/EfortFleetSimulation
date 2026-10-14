@@ -4,6 +4,9 @@
 测试环境策略：
 - EFORT_SIMULATE=always  强制模拟，避免测试时连接真实 Modbus (192.168.1.12:502)
 - EFORT_DB_URL 指向临时 SQLite，不污染生产 data/robot.db
+- EFORT_LOGS_DIR 指向临时目录，测试注入的异常不写进生产 logs/app.log
+- EFORT_SETTINGS_PATH 指向临时目录，配置覆盖层不写/不删生产 config/app_settings.json
+  （★ 三者 + `.env` 合起来是"测试与生产隔离"的全部共享状态，见 AGENTS.md §5.5）
 """
 from __future__ import annotations
 
@@ -39,6 +42,79 @@ os.environ["EFORT_LLM_API_KEY"] = ""
 #   分不清是真故障还是测试噪音。这里指到临时目录（在任何 app 模块被 import 之前设置）。
 os.environ.setdefault("EFORT_LOGS_DIR", os.path.join(tempfile.gettempdir(),
                                                      "efort_test_logs"))
+
+# ★★ 第四项共享状态：配置覆盖层文件 `config/app_settings.json`（2026-10-13 落地）★★
+#   它原本是 `app/core/app_settings.py` 里一个**硬编码生产路径**的模块级常量，
+#   而本文件的 autouse 夹具 `_reset_settings_overlay` 过去靠"**每个用例前后删掉那个真实文件**"
+#   来保证干净起点 → 并发跑两个 pytest 就会同时读写同一个真实文件，
+#   表现为 `test_settings.py` 出现 6→2→0 个**随机假故障**（代码本身没有 bug，见 AGENTS.md §5.5）。
+#   现在给 `SETTINGS_PATH` 加了环境变量覆盖 `EFORT_SETTINGS_PATH`：测试进程把覆盖层写到
+#   **独立的临时目录**，于是 ① 用例照样每条从干净覆盖层开始，② **生产文件永不被测试删除/改写**。
+#   ★★ 目录用 `mkdtemp()` 而不是固定名字 —— 固定名字的话两个 pytest 进程还是会抢同一个文件，
+#     那正是本次要根治的现象；每个进程一个目录才是真隔离。
+#   ★ 必须在 import 任何 app 模块之前设置（模块级常量在 import 时就解析一次）。
+#   ★ 默认行为不变：**不设**这个环境变量时路径仍是 `project_root()/config/app_settings.json`，
+#     那是生产口径；这里**只在没设的时候**才指到临时目录，所以现场/CI 想自己指定也还能。
+_SETTINGS_TMP_DIR = None          # 只有"本文件自己创建的"目录才会在会话结束时删除
+if not os.environ.get("EFORT_SETTINGS_PATH"):
+    _SETTINGS_TMP_DIR = tempfile.mkdtemp(prefix="efort_test_settings_")
+    os.environ["EFORT_SETTINGS_PATH"] = os.path.join(_SETTINGS_TMP_DIR, "app_settings.json")
+
+# 生产覆盖层的应有位置（测试**不许**碰它）；与 app_settings.PRODUCTION_SETTINGS_REL 同一口径
+_PRODUCTION_OVERLAY_REL = os.path.join("config", "app_settings.json")
+
+
+def _production_overlay_path() -> str:
+    from app.core.config import project_root
+    return os.path.join(project_root(), _PRODUCTION_OVERLAY_REL)
+
+
+def _snapshot(path: str):
+    """(是否存在, 内容字节)。读失败按 (True, None) 记 —— 只用于事后比对，不做判断。"""
+    if not os.path.isfile(path):
+        return (False, None)
+    try:
+        with open(path, "rb") as f:
+            return (True, f.read())
+    except OSError:
+        return (True, None)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_settings_tmpdir():
+    """会话结束把**本进程自己创建**的临时覆盖层目录收掉（不留"上次跑测试留下的配置"）。
+
+    ★ 现场/CI 自己指定的 `EFORT_SETTINGS_PATH` 目录**绝不动**（`_SETTINGS_TMP_DIR` 为 None）。
+    """
+    yield
+    if _SETTINGS_TMP_DIR:
+        import shutil
+        shutil.rmtree(_SETTINGS_TMP_DIR, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _production_overlay_untouched():
+    """★★★ 红线：测试**绝不允许**删除或改写生产覆盖层 `config/app_settings.json` ★★★
+
+    这条夹具是上一项隔离的**守卫**（而不是"备份再还原"那种自我修复 —— 还原会把事故吞掉）：
+      ① 会话装配后 `app_settings.SETTINGS_PATH` 必须**不是**生产路径，否则用例的写入
+         就是在写真实配置（隔离失效，先炸在这里，别让后面的假绿掩盖它）；
+      ② 每个用例前后比对生产文件的内容，**变了一点就红**，并说明是哪一侧变的。
+    """
+    from app.core import app_settings as st
+
+    path = _production_overlay_path()
+    assert os.path.abspath(st.SETTINGS_PATH) != os.path.abspath(path), (
+        "测试隔离失效：app_settings.SETTINGS_PATH 仍指向生产覆盖层 %s —— "
+        "conftest 必须在 import app 之前设置 EFORT_SETTINGS_PATH" % path)
+    before = _snapshot(path)
+    yield
+    after = _snapshot(path)
+    if before != after:
+        pytest.fail(
+            "生产覆盖层被测试改动了：%s（用例前 %s / 用例后 %s）。"
+            "测试只允许写 EFORT_SETTINGS_PATH 指向的临时文件（AGENTS.md §5.5）。"
+            % (path, "存在" if before[0] else "不存在", "存在" if after[0] else "不存在"))
 
 
 @pytest.fixture(scope="session")
@@ -84,20 +160,28 @@ def _reset_settings_overlay():
     """★ 跨文件状态污染兜底：robot.model 等配置来自 `get_config()` 单例 + 覆盖层文件。
 
     `test_settings.py::test_operator_can_write_non_admin_field` 会把
-    `robot.model="ER8-700H-OP"` 写进 config/app_settings.json 并 reload 到全局
-    Config 单例；若该文件在用例结束后残留（或被其它文件的用例读到），
+    `robot.model="ER8-700H-OP"` 写进配置覆盖层并 reload 到全局 Config 单例；
+    若该文件在用例结束后残留（或被其它文件的用例读到），
     `/api/health`、`/api/meta` 等只读接口就会读到被污染的机型名而误报失败。
 
     这里在每个用例前后都清掉覆盖层文件并 reload 配置，保证任何用例都不继承
     上一个用例写下的差异。绝不碰 config/robot.yaml（只读合并来源）。
+
+    ★★ 2026-10-13：删的是 `SETTINGS_PATH` **当前指向的那个文件**，而测试会话里它已经由
+    `EFORT_SETTINGS_PATH` 指到临时目录（见本文件顶部）—— 也就是"干净起点"这条职责不变，
+    只是**不再删生产 `config/app_settings.json`**（那才是并发跑两个 pytest 互相踩的根因）。
+    运行时读 `st.SETTINGS_PATH`（不是 import 时取值），用例内 monkeypatch 也能打中。
     """
+    from app.core import app_settings as st
     from app.core.config import reload_config
-    from app.core.app_settings import SETTINGS_PATH
 
     def _clean():
         try:
-            if os.path.isfile(SETTINGS_PATH):
-                os.remove(SETTINGS_PATH)
+            if os.path.isfile(st.SETTINGS_PATH):
+                os.remove(st.SETTINGS_PATH)
+            tmp = st.SETTINGS_PATH + ".tmp"
+            if os.path.isfile(tmp):
+                os.remove(tmp)
         except OSError:
             pass
         try:

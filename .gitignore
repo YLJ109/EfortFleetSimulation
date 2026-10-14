@@ -53,3 +53,6 @@ desktop.ini
 
 # WorkBuddy 本地会话数据(AI 记忆/技能), 不入库
 .workbuddy/
+
+# B2 数模诊断产物（tools/dump_mesh_lowpoints.mjs 一键重生成，40 万行顶点数据不入库）
+frontend/tools/fixtures/

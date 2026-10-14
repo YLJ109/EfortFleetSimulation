@@ -680,6 +680,9 @@ def fresh_run_state(dry_run: bool, max_pieces: int, judge: bool) -> Dict:
         "sim_color": False,
         # 3D 可视化用（按流程推断，非真空传感器实测）
         "holding": False, "suspect_pick": False,
+        # ★ E5′：最近一条**持件证据**（送检那几帧的再读结果，三档；None = 本轮还没观测过）。
+        #   ★ 它不改变上面 `holding` 的含义（流程推断），只是给"推断"补一个观测旁证。
+        "hold_evidence": None,
         # ★★ 2026-10-10 双面（一趟两件）新增：两个吸盘槽（下板 lower / 上板 upper），
         #   各为 None 或 {"piece": 来源A格, "color": str, "ok": bool, "conf": float}。
         #   ★ **现场没有真空传感器 → 槽里有什么全是"流程推断"**，界面/3D 必须如实标注。
@@ -1091,6 +1094,27 @@ def _ang_diff(a: float, b: float) -> float:
     """两角的**环形最小差**（度）：±360 属同一姿态，故 175° 与 −185° 的差视为 0。"""
     d = abs((float(a) - float(b)) % 360.0)
     return min(d, 360.0 - d)
+
+
+def joint_deviation(a: Any, b: Any) -> Optional[float]:
+    """两份 6 轴关节角的**最大偏差（度）**：J1~J5 绝对差、**J6 按环形差**（整圈同一姿态）。
+
+    ★ 唯一实现：E7「一格三证」的位姿这一证用它，**不在别处再写一遍逐轴比对**
+      （`_best_pose_match` 判"在哪一格"时忽略 J6 是另一件事 —— 那里 J6 被升降段冻结故意改过，
+        判位置不该看 J6；而"到没到这个目标"**该**看 J6，只是要按环形差看）。
+    形状不对 / 长度不是 6 / 有 NaN → None（调用方**如实标未校验**，不塌成 0）。
+    """
+    try:
+        av = [float(x) for x in (a or [])]
+        bv = [float(x) for x in (b or [])]
+    except (TypeError, ValueError):
+        return None
+    if len(av) != 6 or len(bv) != 6:
+        return None
+    if any(x != x for x in av + bv):        # NaN → 当作拿不到
+        return None
+    return round(max([abs(av[i] - bv[i]) for i in range(5)]
+                     + [_ang_diff(av[5], bv[5])]), 3)
 
 
 def _best_pose_match(target, poses, tol: float = ORIGIN_POSE_TOL_DEG,

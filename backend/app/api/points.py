@@ -144,6 +144,74 @@ def api_create_point(body: PointIn, db: Session = Depends(get_db),
     return _detail(row)
 
 
+# ---------- D2 点位数值体检（★ 必须排在 /{pid} 之前，否则 "audit" 会被当成 pid） ----------
+@router.get("/audit")
+def api_points_audit(group: Optional[str] = None, db: Session = Depends(get_db)):
+    """点位**数值**体检：±327 可表示性 / 软限位裕度 / 粗略奇异指示。
+
+    ★ 与 `GET /api/points` 同口径：只读、不要令牌（体检不新暴露任何数据）。
+    ★★ **绝不写库、绝不"顺手把 −360 折成 0"** —— 那是替操作员改数据。
+       这里只输出 `advice`（建议重录/调整），改不改由人决定。
+    ★ 排序 = 最该重录的在前（bad → warn → unknown → ok，同级按余量小者优先）。
+    """
+    from app.services.point_audit import audit_rows      # 延迟导入：体检是可选诊断件
+    return audit_rows(list_points(db, group))
+
+
+# ---------- E3 反事实试跑（★ 必须排在 /{pid} 之前，否则 "whatif" 会被当成 pid） ----------
+class WhatIfIn(BaseModel):
+    """试跑入参：只有**场景描述**，没有任何"动作"字段（本接口不产生动作）。"""
+    scenario: Optional[dict] = None          # {tray:{dx,dy,dz}mm, face, order, points, speed_gear_pct}
+    n: Optional[int] = Field(default=None, ge=1, le=300)
+    seed: int = 1
+    live: Optional[List[float]] = None       # 当前实时 6 关节（度），仅用于"从哪一格起步"
+
+
+@router.post("/whatif")
+def api_points_whatif(body: WhatIfIn, db: Session = Depends(get_db),
+                      tok: str = Depends(require_control)):
+    """**离线**回答「这样改值不值得上真机」：参数扫描 + 蒙特卡洛 → 输出**分布**。
+
+    ★★ 这个接口**不产生任何动作**：不写寄存器、不碰触发位与气路、不下发、不改速度口径，
+       连"就绪才放行"那一套门都不需要（它不动机器人，谈何"现在能不能动"）。
+       所以要控制令牌**只是**因为它会把点位库和围栏几何读给调用方看（与写操作同一道门）。
+    ★ 节拍那一档**只代已发生的实测段**，样本不足就如实回「无实测样本·不给节拍估计」，
+      绝不外推 —— 上位机拿不到速度曲线（AGENTS.md §4 关键机理 1），任何 ETA 都是编故事。
+    ★ 几何/间隙用既有纯函数（保守包络扫掠 + FK/IK），抖动来源逐项列明并标 `assumed`；
+      结论一律是「离线统计估计 · 非认证」。**不引入新依赖、不引入仿真引擎**。
+    ★ `n`（样本数）由 `services/whatif.py` 顶部那条离线计时定；超墙钟预算会**少跑并如实改写 n**
+      —— 界面显示的样本数 = 真跑出来的那个（§5.5 铁律②）。
+    ★ 不写事件流：试跑不改变任何东西，改变真机的动作才配留痕（见 `services/whatif.py`）。
+    """
+    from app.services import whatif                    # 延迟导入：实验台是可选诊断件
+    from app.utils.joints import parse_joints
+    poses: dict = {}
+    skipped: List[str] = []
+    for row in list_points(db):                        # 只读点位库
+        name = str(getattr(row, "name", "") or "")
+        if not name:
+            continue
+        try:
+            poses[name] = parse_joints(getattr(row, "joints", None), where="点位「%s」" % name)
+        except Exception:                              # noqa: BLE001 —— 坏行跳过，别打挂整片评估
+            skipped.append(name)
+    live = None
+    if body.live is not None:
+        try:
+            live = [float(x) for x in body.live]
+            if len(live) != 6:
+                live = None
+        except (TypeError, ValueError):
+            live = None
+    res = whatif.run(body.scenario, n=body.n, seed=int(body.seed or 1), poses=poses, live=live)
+    if skipped:
+        res["failures"] = list(res.get("failures") or []) + [
+            "点位库里 %d 个点位关节角读不出（%s%s）→ 未纳入本次评估"
+            % (len(skipped), "、".join(skipped[:5]), "…" if len(skipped) > 5 else "")]
+    res["actor"] = _actor(tok)
+    return res
+
+
 # ---------- 导出 ----------
 @router.get("/{pid}/export")
 def api_export_point(pid: int, db: Session = Depends(get_db)):

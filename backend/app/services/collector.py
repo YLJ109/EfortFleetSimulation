@@ -16,12 +16,30 @@ from app.db.crud import insert_pose
 from app.services.events import emit as emit_event
 from app.services.hub import hub
 from app.services.kinematics import tcp_of
+from app.services import metrics
 from app.services.modbus import ModbusRobot
 from app.services.motion import motion, real_write_enabled, snapshot_ready
 from app.services.runmode import runmode
+from app.services.safety_eval import evaluate as safety_evaluate
+from app.services.safety_evidence import note as safety_note
+from app.services.safety_guard import update_server as safety_update_server
 from app.services.sim_robot import sim_robot
+# ★ E2 到位自证：只读观测件（不 import 写路径、不产生任何动作）
+from app.services.twin_residual import twin_residual
 
 log = get_logger("collector")
+
+
+def twin_observe(joints, at) -> None:
+    """E2：每拍把**刚从控制器读到的**关节角喂给到位自证观测器。
+
+    ★ 与 safety_note 同一条纪律：观测件绝不带崩采集 —— 一切异常吞掉。
+    ★ 独立成模块级函数（而不是内联调用），单测可 monkeypatch 它来冻结/伪造喂帧。
+    """
+    try:
+        twin_residual.observe(joints, at=at)
+    except Exception as e:                     # noqa: BLE001
+        log.debug("到位自证喂帧失败（已忽略）: %s", e)
 
 # 寄存器快照（rc-status）并入 WS 的广播周期：与旧前端 4s 轮询节奏一致，
 # 点到 / 适度 —— rc_snapshot 是 3 个 FC3 事务，太高会拖采集循环，太低则点动体验迟钝。
@@ -182,13 +200,22 @@ class Collector:
         # ★ P1-A6：最近一次真实读取是否失败（失败帧必须标 stale，绝不冒充真机数据）
         read_stale = False
         last_rc_at = 0.0
+        # ★ A1：后端独立围栏评估的节流钟（0.2s 一次；采集本身是 0.1s 一拍）
+        last_guard_at = 0.0
+        guard_error_at = 0.0
         # ★ P1-C3：循环变量先给默认值，随后每轮（按 rate_next 节流）重读配置。
         allow_real = str(get_config().connection.get("simulate", "auto")).lower() != "always"
         interval, read_interval, db_interval = 0.05, 0.1, 0.5
         rate_next = 0.0
+        prev_loop = 0.0    # ★ B1 指标：上一拍开始时刻（算采集间隔；只读观测，不改变任何行为）
 
         while self._running:
             loop_start = time.time()
+            # ★ B1（只读指标）：拍间隔与连续失败次数进 metrics —— 拿不到就是没测，
+            #   不在这里做任何决策（采集逻辑本身一行没改）。
+            if prev_loop:
+                metrics.stat("collector.loop_period_ms", (loop_start - prev_loop) * 1000.0)
+            prev_loop = loop_start
             joints = None
 
             # ★ P1-C3：采样频率每轮重读（设置页标的是 live/reload，原来只在线程
@@ -241,12 +268,14 @@ class Collector:
                     rj, err = self.modbus.read_pose()
                     if err is None:
                         fail_count = 0
+                        metrics.gauge("collector.read_fail_streak", 0)
                         self.connected = True
                         last_joints = rj
                         joints = rj
                         read_stale = False
                     else:
                         fail_count += 1
+                        metrics.gauge("collector.read_fail_streak", fail_count)
                         self.connected = False
                         if fail_count >= FAIL_LIMIT:
                             log.warning("连续 %d 次读取失败: %s -> 临时降级模拟(将持续自动重试)",
@@ -294,6 +323,13 @@ class Collector:
                     cmd_tcp = None
             tracking = bool(sim_tracking) if self.simulated else False
 
+            # ★ E2 到位自证：用**本帧**实测喂观测器（stale 帧不喂 —— 拿冻结的旧姿态
+            #   连续喂会伪装成"停止收敛"，把通讯故障说成机器不准：§5.5 铁律③）。
+            #   顺带取一份紧凑快照并入下面的位姿帧（同屏同源，前端不再自己算判据）。
+            if not read_stale:
+                twin_observe(joints, loop_start)
+            residual_seg = twin_residual.ws_view()
+
             payload = {
                 "type": "pose",
                 "j1": joints[0], "j2": joints[1], "j3": joints[2],
@@ -309,9 +345,44 @@ class Collector:
                 "tracking": tracking,
                 "t": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
             }
+            if residual_seg:
+                # 只在"有在飞的段"时携带（不含曲线 —— 曲线走 REST，WS 不变成下载通道）
+                payload["residual"] = residual_seg
             with self._lock:
                 self.latest = payload
             hub.broadcast(payload)
+
+            # ★ A1（方案·服务端独立评估）：后端**自己**每 0.2s 用实时关节算一遍围栏余量。
+            #   为什么不能只信前端上报：脚本直连 /api/control/move、第三方客户端、浏览器停帧
+            #   这三种情况下前端那一路是哑的，互锁就形同虚设（这正是 §5.5 铁律④的反例）。
+            #   · stale 帧不评估 —— 拿冻结的旧姿态算出来的"安全"是假的；
+            #   · 异常绝不能打断采集（外层重试逻辑兜的是连接故障，不是我们的评估崩）；
+            #   · 默认 server_guard=shadow：只记录+可观测，不参与拦截（见 safety_guard）。
+            if not read_stale and loop_start - last_guard_at >= 0.2:
+                last_guard_at = loop_start
+                try:
+                    res = safety_evaluate(joints)
+                    # ★ A5 取证环形缓冲：与后端评估同一节拍（0.2s）推一条实时样本。
+                    #   note() 内部只 append、吞掉一切异常 —— 取证坏了不能带崩采集。
+                    safety_note({
+                        "at": loop_start,
+                        "joints": list(joints),
+                        "tcp": {"x": tcp[0], "y": tcp[1], "z": tcp[2]},
+                        "simulated": self.simulated,
+                        "stale": bool(read_stale),
+                        "state": res.get("state"),
+                        "zone_id": res.get("zone_id"),
+                        "zone_name": res.get("zone_name"),
+                        "clearance": res.get("clearance"),
+                        "ground_mm": (res.get("ground") or {}).get("clearance_mm")
+                        if isinstance(res.get("ground"), dict) else None,
+                    })
+                    safety_update_server(res)
+                except Exception as e:
+                    # 同一个错误 60s 内只报一次，别让坏配置把日志刷爆
+                    if loop_start - guard_error_at >= 60.0:
+                        guard_error_at = loop_start
+                        log.warning("服务端围栏评估失败（已跳过，互锁退回前端上报口径）: %s", e)
 
             # rc-status：低频并入 WS 推流（省去前端一路 HTTP 轮询）
             if loop_start - last_rc_at >= RC_STATUS_INTERVAL:
@@ -327,6 +398,7 @@ class Collector:
                     self._db_write(joints, tcp)
 
             elapsed = time.time() - loop_start
+            metrics.stat("collector.loop_ms", elapsed * 1000.0)   # ★ B1 只读指标（含广播/入库段）
             sleep_t = interval - elapsed
             if sleep_t > 0:
                 time.sleep(sleep_t)

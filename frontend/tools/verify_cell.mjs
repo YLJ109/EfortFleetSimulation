@@ -18,6 +18,11 @@ import {
 import { SafetyFence } from "../src/three/safety.js";
 import { buildRobot } from "../src/robot/robotModel.js";
 import { FALLBACK_DH } from "../src/config.js";
+// ★ D5′ 同源钉要读仓库根的 yaml 与后端源码（第 7 节），故需要 fs/path
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+const root = dirname(dirname(fileURLToPath(import.meta.url)));   // → frontend/
 
 // ---------------------------------------------------------------------
 // cell.js 用 document.createElement("canvas") 生成程序化贴图（地坪/阴影）。
@@ -361,6 +366,29 @@ console.log("\n== 6. 常量自洽 ==");
     PLATFORM_SIZE >= 1.0, String(PLATFORM_SIZE));
   ok("PLATFORM_SIZE 小于工作区地坪",
     PLATFORM_SIZE < FLOOR_SIZE, `${PLATFORM_SIZE} < ${FLOOR_SIZE}`);
+}
+
+console.log("\n== 7. ★ D5′ 立足面高度：前端常量与后端配置必须是同一个数 ==");
+{
+  // A1 后端独立评估地面净空时读的是 `config/robot.yaml` 的 `safety.platform_height_mm`，
+  // 而 3D 画面里机器人"站在多高"用的是这里的 PLATFORM_H。**两个数一旦分叉**：
+  // 界面显示"离台面还有 190mm"、后端却按 180mm 判 —— 报警与画面互相打脸（§5.5 铁律④）。
+  const yaml = readFileSync(join(root, "..", "config", "robot.yaml"), "utf8");
+  const m = /^  platform_height_mm:\s*([-\d.]+)/m.exec(yaml);
+  ok("config/robot.yaml 里有 safety.platform_height_mm（后端不再靠猜）", !!m,
+     m ? "" : "配置项缺失");
+  if (m) {
+    const cfgMm = Number(m[1]);
+    ok(`platform_height_mm(${cfgMm}) == PLATFORM_H×1000(${f3(PLATFORM_H * 1000)})`,
+       Math.abs(cfgMm - PLATFORM_H * 1000) < 0.001, `${cfgMm} vs ${PLATFORM_H * 1000}`);
+    // 后端默认兜底值也必须与配置一致（配置读坏时会退回它，不能是另一个数）
+    const be = readFileSync(join(root, "..", "backend", "app", "services", "safety_eval.py"), "utf8");
+    const fb = /platform_height_mm",\s*([-\d.]+)\)/.exec(be);
+    ok("后端读取的**兜底默认值**与配置同一个数（配置坏了也不分叉）",
+       !!fb && Math.abs(Number(fb[1]) - cfgMm) < 0.001, fb ? fb[1] : "没读到默认值");
+    ok("后端确实从配置读立足面高度（不是硬编码 0.18）",
+       /platform_height_mm/.test(be) && !/refFloorY\s*=\s*0\.18/.test(be));
+  }
 }
 
 console.log(`\n结果: ${pass} PASS / ${fail} FAIL`);

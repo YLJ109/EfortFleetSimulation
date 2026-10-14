@@ -742,7 +742,7 @@ def test_move_returns_exactly_what_it_dispatches(monkeypatch):
     monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
     cap = {}
 
-    def _fake_command(joints, speed, dwell=0, abort_check=None):
+    def _fake_command(joints, speed, dwell=0, abort_check=None, **_kw):
         cap["joints"] = [float(v) for v in joints]
         return {"ok": True}
 
@@ -880,7 +880,7 @@ def test_flip_only_overrides_j6_keeps_other_five(monkeypatch):
     monkeypatch.setattr(API, "_live_joints", lambda: list(base))
     cap = {}
 
-    def _fake_command(joints, speed, dwell=0, abort_check=None):
+    def _fake_command(joints, speed, dwell=0, abort_check=None, **_kw):
         cap["joints"] = [float(v) for v in joints]
         return {"ok": True}
 
@@ -917,7 +917,7 @@ def test_flip_rejects_when_base_unavailable(monkeypatch):
     monkeypatch.setattr(API, "_live_joints", _boom)
     cap = {}
 
-    def _fake_command(joints, speed, dwell=0, abort_check=None):
+    def _fake_command(joints, speed, dwell=0, abort_check=None, **_kw):
         cap["joints"] = [float(v) for v in joints]
         return {"ok": True}
 
@@ -1062,7 +1062,7 @@ def test_sorting_goto_face_point_is_in_place(client, monkeypatch, face_points):
     monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
     cap = {}
 
-    def _fake_command(joints, speed, dwell=0, abort_check=None):
+    def _fake_command(joints, speed, dwell=0, abort_check=None, **_kw):
         cap["joints"] = [float(v) for v in joints]
         return {"ok": True}
 
@@ -1110,7 +1110,7 @@ def test_control_move_by_point_id_face_point_is_in_place(client, monkeypatch, fa
     monkeypatch.setattr(C, "guard_check", lambda: (True, "", None))
     cap = {}
 
-    def _fake_command(joints, speed, dwell=0, abort_check=None):
+    def _fake_command(joints, speed, dwell=0, abort_check=None, **_kw):
         cap["joints"] = [float(v) for v in joints]
         return {"ok": True}
 
@@ -1192,7 +1192,7 @@ def test_ghost_target_equals_dispatch_target_face_point(client, monkeypatch, fac
     monkeypatch.setattr(C, "guard_check", lambda: (True, "", None))
     cap = {}
 
-    def _fake_command(joints, speed, dwell=0, abort_check=None):
+    def _fake_command(joints, speed, dwell=0, abort_check=None, **_kw):
         cap["joints"] = [float(v) for v in joints]
         return {"ok": True}
 
@@ -1244,7 +1244,7 @@ def test_ghost_target_no_rotation_for_plain_point(client, monkeypatch, face_poin
         monkeypatch.setattr(C, "guard_check", lambda: (True, "", None))
         cap = {}
 
-        def _fake_command(joints, speed, dwell=0, abort_check=None):
+        def _fake_command(joints, speed, dwell=0, abort_check=None, **_kw):
             cap["joints"] = [float(v) for v in joints]
             return {"ok": True}
 
@@ -1398,7 +1398,7 @@ def test_move_face_back_needs_rotation_authorization(monkeypatch):
     monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
     cap = {}
 
-    def _fake_command(joints, speed, dwell=0, abort_check=None):
+    def _fake_command(joints, speed, dwell=0, abort_check=None, **_kw):
         cap["joints"] = [float(v) for v in joints]
         return {"ok": True}
 
@@ -1540,7 +1540,7 @@ def test_move_keep_at_raw_slot_keeps_face_and_records_it(monkeypatch):
     monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
     cap = {}
 
-    def _fake_command(joints, speed, dwell=0, abort_check=None):
+    def _fake_command(joints, speed, dwell=0, abort_check=None, **_kw):
         cap["joints"] = [float(v) for v in joints]
         return {"ok": True}
 
@@ -1725,7 +1725,7 @@ def test_single_piece_at_a_slot_uses_keep_equivalent_to_front(monkeypatch):
     monkeypatch.setattr(API, "guard_check", lambda: (True, "", None))
     cap = {}
 
-    def _fake_command(joints, speed, dwell=0, abort_check=None):
+    def _fake_command(joints, speed, dwell=0, abort_check=None, **_kw):
         cap["joints"] = [float(v) for v in joints]
         return {"ok": True}
 

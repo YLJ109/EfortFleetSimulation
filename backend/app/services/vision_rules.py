@@ -401,7 +401,8 @@ def execute_rule(rule: dict, *, color: str = "", seq: int = 0,
                     pass
             # ★ 运行中关闭 auto_execute 开关也能立即停，不必等这一发走完
             rr = motion.command([float(x) for x in target], sp, dw,
-                                abort_check=lambda: not auto_execute_enabled())
+                                abort_check=lambda: not auto_execute_enabled(),
+                                source=str(st.get("name") or "视觉规则"))
             run.append({"index": st["index"], "name": st.get("name"),
                         "ok": bool(rr.get("ok")), "mode": rr.get("mode"),
                         "target": [round(float(v), 2) for v in target],

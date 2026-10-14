@@ -9,7 +9,15 @@
 import { ref, computed, watch } from "vue";
 import { useSafetyStore } from "../stores/safety.js";
 import { setAlarmEnabled } from "../utils/alarm.js";
+// C1 高性能画面模式：徽标的**颜色出口**统一走全站唯一语义表（判据一个字没改，见下）
+import {
+  hiPerfMode, clsFor, styleVarsFor, labelSuffix, markOf, MODE_HI_PERF,
+} from "../utils/colorSemantics.js";
+import { safetySemantic, healthSemantic } from "../utils/safetyLabels.js";
+// ★ C3：阈值线(mm) 由**分级基准的唯一实现**换算，面板不再自己算一遍
+import { basisOf } from "../three/safety.js";
 import Icon from "./Icon.vue";
+import ParamQuad from "./ParamQuad.vue";   // ★ C3：四元组唯一实现
 
 const safety = useSafetyStore();
 
@@ -41,6 +49,25 @@ const cur = computed(() => {
 });
 
 const STATE_TEXT = { safe: "安全", warn: "接近", danger: "危险", hit: "碰撞" };
+
+// ★ A6：面板顶部那颗状态徽标同样受"评估健康"约束 —— 评估不新鲜时**不许**显示"安全"，
+//   要显示"评估已停止/延迟"（与 SafetyChip、顶部报警条同一个判据：store 的 health）。
+const headState = computed(() => (safety.health && !safety.health.ok
+  ? { cls: "stalled", text: `评估${safety.health.label}` }
+  : { cls: safety.last.state, text: STATE_TEXT[safety.last.state] || "安全" }));
+
+// ---------------- C1：徽标的语义着色出口（分级判定仍是上面那一份，没另立） ----------------
+//   stalled → `unknown`（这个数不可信）；其余按 STATE_SEMANTIC（safe→normal / warn / danger / hit→danger）。
+const headSem = computed(() => (safety.health && !safety.health.ok
+  ? healthSemantic(safety.health) : safetySemantic(safety.last)));
+const headMode = computed(() => hiPerfMode());
+const headCls = computed(() => clsFor(headSem.value, headMode.value));
+const headVars = computed(() => styleVarsFor(headSem.value, headMode.value));
+//   模式关闭时以下三项都退成"不显示"，徽标外观与改动前完全一致（非破坏式）。
+const headHiPerf = computed(() => headMode.value === MODE_HI_PERF);
+const headMark = computed(() => (headHiPerf.value ? markOf(headSem.value, headMode.value) : ""));
+const headSuffix = computed(() => (
+  headHiPerf.value && headSem.value === "unknown" ? labelSuffix("unknown") : ""));
 
 // ---------------- 数值字段 ----------------
 const zoneFields = computed(() => {
@@ -110,6 +137,39 @@ function setPost(z, k, e) {
 const warnPct = computed(() => Math.round(((cur.value && cur.value.thresholds.warn) || 0.3) * 100));
 const dangerPct = computed(() => Math.round(((cur.value && cur.value.thresholds.danger) || 0.1) * 100));
 const basis = computed(() => (cur.value && cur.value.thresholds.basis) || "halfwidth");
+
+// ---------------- ★ C3：净空「当前 + 阈值线 + 偏差 + 30s 趋势 + 结论来源」 ----------------
+//   方案 §C3 的围栏那一行。三条口径（都有回归钉 tools/verify_param_quad.mjs）：
+//   ① **评估不新鲜就不给数**：`safety.last.clearance` 在停摆时会冻在上一帧，
+//      照读就是把"页面卡住的 30 秒"显示成实测余量（§5.5 铁律①③）。
+//   ② **阈值线只由 basisOf × warn 换算**（`three/safety.js::basisOf` 是唯一实现），
+//      不在面板里再算一遍分级基准 —— 两处算法必然漂移。
+//   ③ 来源标签写的是**这一路到底量的是谁**（实体机实测 / 残影预演=推断），
+//      服务端的独立评估（A1）另有结论，界面上不混为一句。
+const CLEARANCE_TREND_MS = 30000;
+/** 当前净空来自"最严重的那一面墙/那一个区"—— 阈值线也必须取**同一个区**，否则两边不同源。 */
+const clearanceZone = computed(() => {
+  const id = safety.last && safety.last.zoneId;
+  if (!id || id === "ground") return null;
+  return zones.value.find((z) => (z.id || "") === id) || null;
+});
+const warnLineMm = computed(() => {
+  const id = safety.last && safety.last.zoneId;
+  if (id === "ground") return groundWarn.value;      // 地面按固定 mm 配置，没有比例基准
+  const z = clearanceZone.value || cur.value;
+  if (!z) return null;
+  const b = basisOf(z);
+  const w = z.thresholds && Number.isFinite(z.thresholds.warn) ? z.thresholds.warn : 0.3;
+  return Number.isFinite(b) ? Math.round(b * w * 1000) : null;
+});
+const clearanceMm = computed(() => {
+  if (!safety.health || !safety.health.ok) return null;
+  const c = safety.last && safety.last.clearance;
+  return Number.isFinite(c) ? Math.round(c * 1000) : null;
+});
+const clearanceSrc = computed(() =>
+  (safety.lastSource === "ghost" ? "残影预演（流程推断）" : "实体机实测")
+  + (safety.last && safety.last.zoneName ? "·" + safety.last.zoneName : ""));
 
 function setWarn(z, pct) {
   const w = Math.min(99, Math.max(2, pct)) / 100;
@@ -252,7 +312,12 @@ watch(open, (v) => { if (v) safety.refreshEvents(); });
   <div v-if="cfg && cur" class="card sp">
     <div class="sp-head" @click="open = !open">
       <h3>安全围栏调试</h3>
-      <span class="sp-state" :class="safety.last.state">{{ STATE_TEXT[safety.last.state] }}</span>
+      <span
+        class="sp-state"
+        :class="[headState.cls, headCls]"
+        :style="headVars"
+        :title="safety.health.notice || '评估实时'"
+      >{{ headMark ? headMark + " " : "" }}{{ headState.text }}{{ headSuffix }}</span>
       <span v-if="safety.last.zoneName" class="sp-zone">{{ safety.last.zoneName }}</span>
       <span v-if="safety.dirty" class="sp-dot" title="有未保存改动"></span>
       <button class="hud-toggle">{{ open ? "−" : "+" }}</button>
@@ -346,8 +411,19 @@ watch(open, (v) => { if (v) safety.refreshEvents(); });
             <input type="number" min="50" max="2000" step="10" :value="cur.thresholds.fixed_mm"
                    @change="setFixed(cur, $event)" />
           </div>
-          <div class="small">调大 = 更早报警（更"敏感"）；调小 = 更晚报警。当前余量
-            <b>{{ (safety.last.clearance * 1000).toFixed(0) }} mm</b>。</div>
+          <div class="small">调大 = 更早报警（更"敏感"）；调小 = 更晚报警。</div>
+          <!-- ★★ C3（方案 §C3 围栏那一行）：净空 + 阈值线 + 偏差 + 最近 30s 趋势 + 结论来源。
+               「当前」在评估停摆时**如实是未知**（冻结的上一帧不是实测余量）；
+               趋势采的是全局最严重那一处，与上方阈值线**同一个区**（同源，不各算一遍）。 -->
+          <ParamQuad class="pq-clear" label="当前净空"
+                     :current="clearanceMm" :target="warnLineMm"
+                     :cur-source="clearanceSrc" tgt-source="该区接近告警线"
+                     unit="mm" :decimals="0"
+                     trend-key="clearance" :trend-window-ms="CLEARANCE_TREND_MS"
+                     :as-of-now="safety.clk" :stale="!safety.health || !safety.health.ok"
+                     target-null-text="未设阈值" />
+          <div class="small muted">服务端另有独立评估（互锁与 safety.server_* 报警用它），
+            本行是<b>界面这一路</b>的读数。</div>
         </div>
       </div>
 
@@ -511,3 +587,22 @@ watch(open, (v) => { if (v) safety.refreshEvents(); });
     </div>
   </div>
 </template>
+
+<style scoped>
+/* =====================================================================
+   C1 高性能画面模式：只覆盖顶部状态徽标的**着色出口**。
+   ★ 所有规则都带 .hmi-hi-perf —— 该类只在模式开启时挂上 ⇒ 默认（关）时
+     以下一条都不命中，徽标外观与改动前完全一致（非破坏式）。
+   ★ 这里不写任何颜色字面量：值全部来自 styleVarsFor()（唯一出处 = utils/colorSemantics.js）。
+   ★ 围栏 3D 配色（「颜色 / 闪烁」那一节的取色器）属于**业务配置**（写进 safety.json、
+     由 three/safety.js 用来画围栏面板与地面报警垫），不是界面装饰色，**不参与灰阶**。
+   ===================================================================== */
+.sp-state.hmi-hi-perf {
+  color: var(--hmi-fg);
+  background-color: var(--hmi-bg);
+  background-image: var(--hmi-bg-image);
+  border-width: var(--hmi-border-width);
+  border-style: var(--hmi-border-style);
+  border-color: var(--hmi-border);
+}
+</style>

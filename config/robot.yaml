@@ -93,12 +93,82 @@ dh:
 mounting:
   type: "floor"      # floor | wall | ceiling  (H = 桌面/地装)
 
+# ---- 服务端独立安全评估(方案 A1/A2/A3) ----
+# 围栏几何与报警阈值在 config/safety.json(与前端出厂同源); 这里只放**机器人本体包络**。
+# ★ 包络是"胶囊体(线段+半径)"的保守外扩, 宁可偏大不可偏小。
+# ★ links_calibrated=false 表示半径是**默认近似值、未经现场卡尺复核** ——
+#   此时 server_guard 即使写成 enforce 也会被**自动降级为 shadow**(不拿猜出来的半径去拒动作)。
+safety:
+  server_guard: "shadow"      # off | shadow(只记录不拦截) | enforce(参与互锁)
+  # ★ "标定"的含义 = r_mm 不是猜的, 而是**官方数模反解**出来的(见下方 links 注释)。
+  #   换机型 / 换数模 / 加末端工具后必须重跑一遍(命令就在 links 注释里), 否则改回 false。
+  links_calibrated: true
+  platform_height_mm: 180.0   # 立足面(站台台面)高度; 必须与前端 three/cell.js PLATFORM_H 同一个数
+  # ---- 连杆包络（胶囊 = 两个 DH 帧原点连成的线段 + 半径）----
+  # ★★ 这六个数是**算出来的，不是猜的**：
+  #   ① `cd frontend && node tools/dump_mesh_lowpoints.mjs`
+  #      → 用官方 GLB(public/models/robot_full.glb) 逐顶点量 503 个采样姿态下每根刚体的真实包围盒
+  #   ② `cd backend && python tools/fit_safety_links.py`
+  #      → 反解"每个姿态都把刚体包住"所需的最小半径(上取整到 5mm)
+  #   ③ 钉在 `tests/test_safety_envelope.py`：任何姿态下**服务端包络最低点 ≤ 数模最低点**、
+  #      水平外接 ≥ 数模外接（= 永远比真实本体更早报警），并把半径改小一条就会红。
+  #   为什么必须这样：原先手写的 130/115/95/75/62/50 在零位算出最低点 **261mm**，
+  #   数模真实值是 **191.5mm** —— 猜的包络比本体**更高**，等于把"快贴台面"说成"还早"（假安全）。
+  links:                      # link i = DH 第 i 坐标系原点 → 第 i+1 个原点(frames[0]=base, frames[6]=法兰)
+    - { from_frame: 0, to_frame: 1, r_mm: 225.0 }   # 底座(实测外廓 220) + 转座水平外廓；不参与地面净空
+    - { from_frame: 1, to_frame: 2, r_mm: 185.0 }   # 大臂 + **转座的地面覆盖**(零位 191.5mm 就靠这段压住)
+    - { from_frame: 2, to_frame: 3, r_mm: 130.0 }   # 肘部
+    - { from_frame: 3, to_frame: 4, r_mm: 105.0 }   # 小臂
+    - { from_frame: 4, to_frame: 5, r_mm: 95.0 }    # 腕
+    - { from_frame: 5, to_frame: 6, r_mm: 55.0 }    # 法兰前(不含末端工具, 装夹爪后需重标定)
+  stop_time_s: null           # A3 SSM 的 T: 该速度档下从指令到完全停止的时间, **必须现场实测**; null = 未知 → 不给建议
+  ssm_k100_mm_s: null         # A3 SSM 的 K100: 100% 速度时的接近线速度(mm/s), **必须现场实测**(抄"典型值"= 编安全距离)
+  ssm_c_mm: null              # A3 SSM 的 C: 停机过冲 + 工具/工件形状裕量; null = 未知 → 不给建议
+
+# ---- 事件取证包(方案 A5) ----
+# ★★ 落盘位置 = {logs_dir()}/evidence/<UTC时间>-<seq>/ —— **必须**跟着 EFORT_LOGS_DIR 走
+#   (测试隔离三样之一), 所以现场排障看生产日志时, 取证包就在同一个目录树里。
+# ★ seq 只增不减(计数在 evidence/.seq); 列表刷新水位用 seq, 不用数组长度。
+evidence:
+  enabled: true               # false = 完全不落盘(取证关掉, 互锁不受影响)
+  buffer_seconds: 10.0        # 环形缓冲窗口(实时样本); 按**时间**裁剪, 不按条数
+  keep_days: 7                # 保留天数(方案边界: 不做永久保留)
+  max_packs: 200              # 再少也不删当日: 超出部分按最旧先清
+
 # ---- 采样与推送 ----
 sampling:
   read_hz: 10.0          # Modbus 读取频率
   db_write_hz: 2.0       # 入库频率(防止库膨胀)
   ws_push_hz: 20.0       # WebSocket 推送频率
   history_retention_days: 30   # 历史自动清理保留天数
+
+# ---- E2 到位自证（段级残差带 · ★只读观测件，不参与任何控制）----
+# 为什么不是"轨迹跟踪精度": 执行者是控制器里的常驻程序 210，PC 只写"目标 + 触发位"，
+# 拿不到速度曲线 → 无法逐拍算"此刻应该在哪"。能自证的只有**段级**收敛过程:
+# 动没动(stuck) / 峰值残差与收敛耗时 / 到位后回弹(overshoot) / 超时无进展(not_reached)。
+# 残差单位是**关节角差(°)**不是 mm；"带" = 到位容差 + 一拍采样延迟(read_hz 决定)的不确定度。
+# ★ 超差只发**一条 warn 事件**并在界面提示 —— 不自动暂停、不自动重试、不急停（刹车必须人点）。
+twin_residual:
+  enabled: true
+  tol_deg: 1.0              # 到位容差(°)，与 C 位到位校验 3.0 同量级、更严一档
+  start_timeout_ms: 1500    # 下发后这么久残差没下降 = stuck（没动起来）
+  band_max_deg: 5.0         # 不确定带上限(°)：只由**本段**速率决定，不被上一段撑宽
+  settle_hold_ms: 300       # 连续落在带内这么久才算"到位"（单拍落带不算）
+  slow_ms: 8000             # 到位但耗时超过它 → 如实标 slow（不改成 arrived）
+  overshoot_factor: 2.0     # 到位后又弹出 > 带×该系数且不再回来 = overshoot
+  max_ms: 30000             # 单段最长观测窗口（对齐 rc_jog_execute 的 30s 上限）
+  profile_max: 240          # 每段残差曲线最多留多少点（取证包会带出去）
+
+# ---- E5′ 持件/吸空证据（固定相机反用法）----
+# ★★ 只读观测件：把**送检本来就要抓的那几帧**再读一遍 → 三档证据
+#   「有证据支持 / 仅流程推断 / 证据与流程矛盾」。现场**没有真空传感器**，
+#   今天"手上有没有件"纯靠流程推断，这是 §7 明文的能力缺口。
+#   **不新增拍摄、不新增移动**；矛盾只发一条 warn 事件并在界面提示，
+#   **不会自动暂停、不会重试、不会急停**（刹车必须人点）。
+hold_state:
+  enabled: true
+  history_max: 40           # 环形历史（每条 = 一轮送检的帧证据）
+  area_ratio_max: 2.0       # 多帧块面积最大/最小 超过它 → 证据不足，退回"仅推断"
 
 # ---- 数据库 ----
 database:

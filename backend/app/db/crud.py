@@ -549,3 +549,182 @@ def prune_vision_records(session, days: int, batch: int = PRUNE_BATCH) -> int:
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     return prune_batched(session, VisionRecord, VisionRecord.timestamp < cutoff,
                          batch=batch)
+
+
+# =====================================================================
+# ★ E4 判色样本环 (vision_samples) + 阈值建议提案 (color_advice_proposals)
+#   方案：docs/方案-创新功能四批…§E4。写入方唯一 = services/vision_samples.ingest()，
+#   读取方 = api/vision.py 的 /samples* 三条 + services/color_advice.py。
+#   ★ 同样是**新建表**，不给 vision_records 加列（create_all() 不补列，见 models.py）。
+# =====================================================================
+from app.db.models import ColorAdviceProposal, VisionSample  # noqa: E402
+
+SAMPLE_MAX_CHARS = 24000   # frames/votes/thr 三段 JSON 的单列上限（防脏值撑爆库）
+
+
+def insert_vision_sample(session, data: dict) -> VisionSample:
+    """落一条判色样本。★ 不做幂等（每一次判色都是一次观测，重复本身是信息）。
+
+    `data` 由 `services/vision_samples.sample_from()` 产出（纯函数，已过白名单抽取），
+    这里只负责类型收敛与截断 —— 任何脏值都夹成能写的形态，不抛异常。
+    """
+    now = data.get("dt") or datetime.now(timezone.utc)
+    row = VisionSample(
+        timestamp=now,
+        cell=str(data.get("cell") or "")[:16],
+        color=str(data.get("color") or "")[:16],
+        hex=str(data.get("hex") or "")[:9],
+        conf=float(data.get("conf") or 0.0),
+        valid_colors=str(data.get("valid_colors") or "")[:128],
+        vote_ok=1 if data.get("vote_ok") else 0,
+        placeholder=1 if data.get("placeholder") else 0,
+        votes=str(data.get("votes") or "{}")[:SAMPLE_MAX_CHARS],
+        reason=str(data.get("reason") or "")[:128],
+        frames=str(data.get("frames") or "[]")[:SAMPLE_MAX_CHARS],
+        frame_count=int(data.get("frame_count") or 0),
+        failed_frames=int(data.get("failed_frames") or 0),
+        outcome=str(data.get("outcome") or "unreviewed")[:16],
+        true_color=str(data.get("true_color") or "")[:16],
+        source=str(data.get("source") or "sorting")[:16],
+        stage=str(data.get("stage") or "")[:32],
+        thr_snapshot=str(data.get("thr_snapshot") or "")[:SAMPLE_MAX_CHARS],
+        note=str(data.get("note") or "")[:255],
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
+def list_vision_samples(session, color: str | None = None, outcome: str | None = None,
+                        source: str | None = None, since=None,
+                        limit: int = 100, offset: int = 0):
+    stmt = select(VisionSample)
+    if color:
+        stmt = stmt.where(VisionSample.color == color)
+    if outcome:
+        stmt = stmt.where(VisionSample.outcome == outcome)
+    if source:
+        stmt = stmt.where(VisionSample.source == source)
+    if since is not None:
+        stmt = stmt.where(VisionSample.timestamp >= since)
+    stmt = stmt.order_by(VisionSample.id.desc()).limit(limit).offset(offset)
+    return list(session.execute(stmt).scalars())
+
+
+def sample_color_counts(session, since=None) -> dict:
+    """逐色样本数（界面"青：n=6"这种；★ 没有的色**不出现**在字典里，
+    由上层显式补 0 —— 「读不到」与「读到 0」不能在这一层就混掉）。"""
+    from sqlalchemy import func
+    stmt = select(VisionSample.color, func.count(VisionSample.id))
+    if since is not None:
+        stmt = stmt.where(VisionSample.timestamp >= since)
+    stmt = stmt.group_by(VisionSample.color)
+    return {str(c or "?"): int(n) for c, n in session.execute(stmt).all()}
+
+
+def count_vision_samples(session, since=None) -> int:
+    from sqlalchemy import func
+    stmt = select(func.count(VisionSample.id))
+    if since is not None:
+        stmt = stmt.where(VisionSample.timestamp >= since)
+    return int(session.execute(stmt).scalar() or 0)
+
+
+def get_vision_sample(session, sid: int) -> VisionSample | None:
+    return session.get(VisionSample, sid)
+
+
+def review_vision_sample(session, sid: int, judgement: str,
+                         true_color: str | None = None,
+                         note: str | None = None) -> VisionSample | None:
+    """人工复核回流（方案 §E4 的"免费标注"）。
+
+    judgement="correct" → outcome=confirmed；"wrong" → outcome=corrected（真色必填才有意义）。
+    ★ 只改标签三列（outcome/true_color/reviewed_at），**不动**逐帧特征与当时的结论 ——
+      样本环的价值就在于"原始观测 + 事后标签"两份都在，改结论就等于把证据涂掉了。
+    """
+    row = session.get(VisionSample, sid)
+    if row is None:
+        return None
+    j = str(judgement or "").lower()
+    if j == "correct":
+        row.outcome = "confirmed"
+    elif j == "wrong":
+        row.outcome = "corrected"
+        if true_color:
+            row.true_color = str(true_color)[:16]
+    else:
+        row.outcome = "reviewed"
+    if true_color and j != "wrong":
+        row.true_color = str(true_color)[:16]
+    if note is not None:
+        row.note = str(note)[:255]
+    row.reviewed_at = datetime.now(timezone.utc)
+    session.commit()
+    return row
+
+
+def samples_for_advice(session, limit: int = 3000):
+    """建议派生的取数窗口（最新 N 条，含未复核 —— 未复核的只进"样本数"，不进误判统计）。"""
+    return list_vision_samples(session, limit=limit)
+
+
+def prune_vision_samples(session, days: int, batch: int = PRUNE_BATCH) -> int:
+    if days <= 0:
+        return prune_batched(session, VisionSample, true(), batch=batch)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    return prune_batched(session, VisionSample, VisionSample.timestamp < cutoff,
+                         batch=batch)
+
+
+# ---------------- 阈值建议提案（账面动作，永不下发）----------------
+def insert_advice_proposal(session, diff_json: str, summary: str = "",
+                           thr_current_json: str = "", actor: str = "system",
+                           note: str = "") -> ColorAdviceProposal:
+    """新增一条提案，并把上一条 active 顶成 superseded（保留下来 = 可回滚的那一版）。"""
+    prev = session.execute(
+        select(ColorAdviceProposal).where(ColorAdviceProposal.status == "active")
+    ).scalars().all()
+    for p in prev:
+        p.status = "superseded"
+    row = ColorAdviceProposal(
+        created_at=datetime.now(timezone.utc),
+        actor=str(actor or "system")[:16],
+        status="active",
+        summary=str(summary or "")[:512],
+        diff=str(diff_json or "[]")[:SAMPLE_MAX_CHARS],
+        thr_current=str(thr_current_json or "")[:SAMPLE_MAX_CHARS],
+        note=str(note or "")[:255],
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
+def list_advice_proposals(session, limit: int = 20):
+    stmt = (select(ColorAdviceProposal).order_by(ColorAdviceProposal.id.desc())
+            .limit(max(1, int(limit))))
+    return list(session.execute(stmt).scalars())
+
+
+def get_active_proposal(session) -> ColorAdviceProposal | None:
+    stmt = (select(ColorAdviceProposal).where(ColorAdviceProposal.status == "active")
+            .order_by(ColorAdviceProposal.id.desc()).limit(1))
+    return session.execute(stmt).scalars().first()
+
+
+def get_latest_superseded(session) -> ColorAdviceProposal | None:
+    """回滚的目标 = 最近一条被顶掉的提案（"上一版"）。"""
+    stmt = (select(ColorAdviceProposal).where(ColorAdviceProposal.status == "superseded")
+            .order_by(ColorAdviceProposal.id.desc()).limit(1))
+    return session.execute(stmt).scalars().first()
+
+
+def mark_proposal(session, pid: int, status: str) -> ColorAdviceProposal | None:
+    row = session.get(ColorAdviceProposal, pid)
+    if row is None:
+        return None
+    row.status = str(status or "")[:16]
+    session.commit()
+    return row

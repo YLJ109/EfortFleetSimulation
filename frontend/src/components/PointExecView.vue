@@ -17,6 +17,8 @@ import MonitorLayout from "./MonitorLayout.vue";
 import Icon from "./Icon.vue";
 import CameraPanel from "./CameraPanel.vue";
 import ExecControlCard from "./ExecControlCard.vue";
+import TwinResidualCard from "./TwinResidualCard.vue";
+import WhatIfCard from "./WhatIfCard.vue";
 import { useAuthStore } from "../stores/auth.js";
 import { useRobotStore } from "../stores/robot.js";
 import { useSafetyStore } from "../stores/safety.js";
@@ -127,6 +129,94 @@ function isMarked(p) { return !!(p && p.name && p.name.startsWith("标记点"));
 const J6_FACE_POINTS = new Set(["J6正面", "J6反面"]);
 const isJ6Face = (p) => !!(p && J6_FACE_POINTS.has(p.name));
 
+// ---- D2 点位数值体检（★ **只读**：接口不写库、不改点，界面也只显示建议）----
+//   防的是真发生过的事故：库里 J6 录成 −360 → encode_angle 拒绝 → 整条流程终止。
+//   体检给三档：±327 可表示 / 软限位裕度 / 粗略奇异指示（相对信号，不当严格判据）。
+const audit = ref(null);
+const auditErr = ref("");
+const auditBusy = ref(false);
+/** 「最该重录在前」开关：默认开 —— 体检的价值就是第一眼看到该处理的点。 */
+const worstFirst = ref(true);
+/** 上一次体检对应的点位签名（见 loadAudit 的签名去重） */
+let auditSig = "";
+
+async function loadAudit(force) {
+  // 签名 = 体检真正消费的字段（id/名称/关节值/类型）。存/删/改点后签名会变 → 自动重跑；
+  // 没变（例如只是重新拉了一次同样的库）就不重复算。
+  const sig = exec.points.map((p) => `${p.id}|${p.name}|${p.kind}|${(p.joints || []).join(",")}`).join("#");
+  if (!force && sig === auditSig) return;
+  auditSig = sig;
+  auditBusy.value = true;
+  auditErr.value = "";
+  try {
+    // 与 GET /api/points 同口径：只读、不需令牌（体检不新暴露任何数据）
+    const r = await fetch(apiUrl("/points/audit"));
+    if (!r.ok) { auditErr.value = `体检读取失败（HTTP ${r.status}）`; return; }
+    audit.value = await r.json();
+  } catch (e) {
+    auditErr.value = `体检读取失败：${e.message}`;
+  } finally {
+    auditBusy.value = false;
+  }
+}
+
+/** 按 **id** 对齐（同名点位不能靠名字映射）。 */
+const auditById = computed(
+  () => new Map(((audit.value && audit.value.points) || []).map((a) => [a.id, a])));
+const auditRank = (p) => {
+  const a = auditById.value.get(p.id);
+  if (!a) return null;      // 体检没覆盖到这个点 → 不假装绿
+  return GRADE_RANK[a.grade];
+};
+const GRADE_RANK = { bad: 0, warn: 1, unknown: 2, ok: 3 };
+
+/** 列表显示顺序：最该重录的在前；**体检缺失的点排最后但不丢弃**（不许静默消失）。 */
+const shownPoints = computed(() => {
+  const list = exec.points.slice();
+  if (!worstFirst.value) return list;
+  return list.sort((a, b) => {
+    const ra = auditRank(a), rb = auditRank(b);
+    if (ra !== rb) return (ra === null ? 1e9 : ra) - (rb === null ? 1e9 : rb);
+    const ma = auditById.value.get(a.id), mb = auditById.value.get(b.id);
+    const va = ma && ma.worst_margin_deg != null ? ma.worst_margin_deg : 1e9;
+    const vb = mb && mb.worst_margin_deg != null ? mb.worst_margin_deg : 1e9;
+    return va - vb;
+  });
+});
+
+const GRADE_LABEL = { ok: "正常", warn: "建议重录", bad: "下发会被拒", unknown: "无法体检" };
+/** ★ 未知不得塌成"没问题"（§5.5 铁律③）：没有体检结果就照实说"未体检"。 */
+function gradeOf(p) {
+  const a = auditById.value.get(p.id);
+  if (!a) return { key: "none", label: "未体检", title: "该点没有体检结果（点「重跑体检」）" };
+  const notApplicable = a.applicable === false || a.evaluable === false;
+  return {
+    key: a.grade,
+    label: notApplicable ? (a.applicable === false ? "不适用" : "无法体检") : GRADE_LABEL[a.grade],
+    title: (a.reasons || []).join("\n") || "数值体检通过（可表示、在软限位内、不接近奇异）",
+  };
+}
+/** 裕度条宽度：最紧轴余量 / **显示刻度** AUDIT_SCALE_DEG（只决定条画多长，
+ *  ±327 与软限位数值永远来自后端，界面不复制一套）。 */
+function marginPct(a) {
+  if (!a || a.worst_margin_deg == null) return null;
+  const g = Math.max(0, Math.min(a.worst_margin_deg, AUDIT_SCALE_DEG));
+  return (g / AUDIT_SCALE_DEG) * 100;
+}
+const AUDIT_SCALE_DEG = 30;   // 30° 以上就画满（再宽也不算"更该重录"）
+
+/** 该行是否值得展开详情：正常点不占版面；坏/紧/无法体检/未体检都要说清。 */
+function auditIssue(p) {
+  const a = auditById.value.get(p.id);
+  return !!(a && a.grade !== "ok");
+}
+/** 条件数只在**真算出来**时显示；算不出留空（不写 0 冒充"不奇异"）。 */
+function auditCond(p) {
+  const a = auditById.value.get(p.id);
+  const s = a && a.singularity;
+  return s && s.measured && s.cond != null ? Number(s.cond).toExponential(1) : null;
+}
+
 function triggerImport() { fileInput.value && fileInput.value.click(); }
 async function onImport(e) {
   const f = e.target.files && e.target.files[0];
@@ -160,7 +250,13 @@ onMounted(async () => {
   if (exec.pointsErr) exec.logLine?.("warn", exec.pointsErr);
   if (auth.controlActive) exec.refreshState();
   setTimeout(() => exec.syncTeachFromRobot(), 300);
+  // 体检只读、不需令牌，也不动机器人 —— 进页面就顺手跑一次（签名去重，不会重复算）
+  loadAudit();
 });
+
+// ★ 点位一有增删改（存点 / 删除 / 导入 / 标记当前点都会重新拉列表）就重新体检，
+//   免得"刚录的 −360 那个点"要刷新页面才知道有问题。
+watch(() => exec.points, () => { loadAudit(); });
 
 // 挂载时若还没有控制权限，loadFiles 会被 apiControl 在本地拦下（不发请求、不打 401）；
 // 拿到权限后再补一次，用户不必为了看文件清单去刷新页面。
@@ -183,6 +279,9 @@ watch(() => auth.controlActive, (v) => {
     <!-- ★ 右栏顶部：与「程序执行」共用的页内 tab 条（由 App.vue 传入 —— 两页合并成一个入口） -->
     <slot name="sidebarTop" />
     <ExecControlCard />
+    <!-- ★ E2 到位自证（只读）：点动/到点之后就在这里看"这一段走没走到"。
+         判据在后端一份（WS 位姿帧捎带 + GET /api/twin/residual），这里只渲染。 -->
+    <TwinResidualCard />
 
     <!-- 关节点动（合并：滑块示教 + 点动 J1~J6） -->
     <div class="card">
@@ -284,6 +383,35 @@ watch(() => auth.controlActive, (v) => {
         点列表里任意点位 → 残影常驻跟随其位置；「执行」需在 AUTO 下一键就绪后。
       </p>
 
+      <!-- ★ D2 数值体检（±327 可表示 / 软限位裕度 / 粗略奇异指示）
+           防的是真事故：库里 J6 录成 −360 → encode_angle 拒绝 → 整条流程被终止。
+           ★ 只读：不写库、不改点、不下发；界面显示的永远是**建议**。 -->
+      <div class="pt-aud">
+        <div class="pa-head">
+          <span class="pa-title"><Icon name="shield" :size="13" /> 数值体检</span>
+          <template v-if="audit">
+            <span class="pa-chip g-bad">下发会被拒 {{ audit.by_grade.bad }}</span>
+            <span class="pa-chip g-warn">建议重录 {{ audit.by_grade.warn }}</span>
+            <span class="pa-chip g-unknown">无法体检 {{ audit.by_grade.unknown }}</span>
+            <span class="pa-chip g-ok">正常 {{ audit.by_grade.ok }}</span>
+          </template>
+          <span v-else-if="auditErr" class="pa-chip g-unknown">{{ auditErr }}</span>
+          <span v-else class="pa-chip g-unknown">还没跑过 —— 下方徽标是「未体检」，不假装全绿</span>
+          <span class="pa-spacer" />
+          <label class="pa-sort" title="按 bad → warn → unknown → ok 排；体检没覆盖的点排最后但不丢弃">
+            <input v-model="worstFirst" type="checkbox" /> 最该重录在前
+          </label>
+          <button :disabled="auditBusy" @click="loadAudit(true)">
+            <Icon name="refresh" :size="13" /> {{ auditBusy ? "体检中…" : "重跑体检" }}
+          </button>
+        </div>
+        <p v-if="audit" class="small pa-not">
+          <Icon name="info" :size="12" />
+          <b>本体检不查：</b>{{ (audit.not_checked || []).join("；") }}。
+          {{ audit.note }}
+        </p>
+      </div>
+
       <div v-if="editing" class="pt-form">
         <div class="pf-row">
           <label>名称</label>
@@ -330,7 +458,7 @@ watch(() => auth.controlActive, (v) => {
       </div>
 
       <div class="pt-list">
-        <div v-for="p in exec.points" :key="p.id" class="pt-item"
+        <div v-for="p in shownPoints" :key="p.id" class="pt-item"
              :class="{ selected: exec.pinnedPointId === p.id }"
              @mouseenter="exec.hoverPoint(p)" @mouseleave="onLeavePoint(p)"
              @click="onSelectPoint(p)">
@@ -342,6 +470,9 @@ watch(() => auth.controlActive, (v) => {
               <span class="pt-tag" :class="{ warn: p.kind === 'cartesian' }">
                 {{ p.kind === "cartesian" ? "直角" : "关节" }}
               </span>
+              <!-- ★ D2 数值体检徽标：unknown/未体检**绝不显示成绿**（§5.5 铁律③） -->
+              <span class="pt-tag audit" :class="'g-' + gradeOf(p).key"
+                    :title="gradeOf(p).title">{{ gradeOf(p).label }}</span>
             </div>
           </div>
           <div class="pt-coords">
@@ -355,6 +486,27 @@ watch(() => auth.controlActive, (v) => {
                 <b>J{{ ji + 1 }}</b>{{ Number(jv).toFixed(3) }}
               </span>
             </template>
+          </div>
+          <!-- ★ D2 体检详情：只在**有问题/无法体检**时展开一行（正常点不占版面）。
+               裕度条 = 最紧轴离软限位还剩几度；文字是后端的 reasons/advice，
+               **只是建议**，界面不会替操作员改点。 -->
+          <div v-if="auditIssue(p)" class="pt-audit" @click.stop>
+            <div v-if="auditById.get(p.id).worst_margin_deg != null" class="pa-bar"
+                 :title="'最紧轴离软限位 ' + auditById.get(p.id).worst_margin_deg + '°'">
+              <i :class="'g-' + auditById.get(p.id).grade"
+                 :style="{ width: (marginPct(auditById.get(p.id)) || 0) + '%' }" />
+              <span class="pa-num">余量 {{ auditById.get(p.id).worst_margin_deg }}°</span>
+            </div>
+            <div v-if="auditCond(p) != null" class="pa-cond"
+                 title="雅可比条件数：相对指标，只用于点位之间横向比较，不是严格奇异判据">
+              条件数 {{ auditCond(p) }}（相对指标）
+            </div>
+            <ul v-if="(auditById.get(p.id).reasons || []).length" class="pa-why">
+              <li v-for="(w, wi) in auditById.get(p.id).reasons" :key="wi">{{ w }}</li>
+            </ul>
+            <p v-if="auditById.get(p.id).advice" class="pa-adv">
+              <Icon name="alert" :size="12" /> {{ auditById.get(p.id).advice }}
+            </p>
           </div>
           <div v-if="p.note" class="pt-note"><Icon name="note" :size="12" /> {{ p.note }}</div>
           <div class="pt-ops" @click.stop>
@@ -383,6 +535,12 @@ watch(() => auth.controlActive, (v) => {
         </p>
       </div>
     </div>
+
+    <!-- ★ E3 反事实试跑（只读实验台）：与上面的「数值体检」配套 ——
+         体检管"这个点数本身能不能下发"，试跑管"这样改（偏移/面/次序）值不值得上真机"。
+         本卡**没有任何**执行入口：唯一请求是 POST /api/points/whatif（离线算分布），
+         决定权在人（见 stores/whatif.js 与 backend/tests/test_whatif.py 的静态钉）。 -->
+    <WhatIfCard />
   </MonitorLayout>
 </template>
 
@@ -451,6 +609,52 @@ watch(() => auth.controlActive, (v) => {
   margin: 5px 2px 2px; font-size: 11px; color: var(--muted); line-height: 1.4;
 }
 .pt-note svg { color: var(--muted); flex: none; }
+
+/* ---- D2 点位数值体检（只读徽标 + 裕度条 + 建议） -------------------
+   四档配色里 unknown / 未体检 **一律虚线灰**，不给绿色 —— "不知道"绝不能画成"没问题"。 */
+.pt-aud {
+  margin: 2px 0 10px; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel2);
+}
+.pa-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.pa-title {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; font-weight: 600; color: var(--txt);
+}
+.pa-spacer { flex: 1 1 auto; }
+.pa-sort {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; color: var(--muted); cursor: pointer;
+}
+.pa-not { margin: 6px 0 0; line-height: 1.5; }
+.pa-chip, .pt-tag.audit {
+  font-size: 11px; padding: 0 7px; border-radius: 20px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+}
+.pa-chip.g-ok, .pt-tag.audit.g-ok { color: var(--ok); border-color: var(--ok-line); background: var(--ok-soft); }
+.pa-chip.g-warn, .pt-tag.audit.g-warn { color: var(--warn); border-color: var(--warn-line); background: var(--warn-soft); }
+.pa-chip.g-bad, .pt-tag.audit.g-bad { color: var(--err); border-color: var(--err-line); background: var(--err-soft); }
+/* 无法体检 / 不适用 / 未体检：虚线 = "这里没有结论" */
+.pa-chip.g-unknown, .pt-tag.audit.g-unknown, .pt-tag.audit.g-none { border-style: dashed; }
+.pt-audit { display: flex; flex-direction: column; gap: 4px; margin: 7px 0 2px; cursor: default; }
+.pa-bar { display: flex; align-items: center; gap: 7px; }
+.pa-bar i { flex: none; height: 6px; border-radius: 4px; min-width: 2px; }
+.pa-bar i.g-ok { background: var(--ok); }
+.pa-bar i.g-warn { background: var(--warn); }
+.pa-bar i.g-bad { background: var(--err); }
+.pa-bar i.g-unknown { background: var(--muted); }
+.pa-num { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pa-cond { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pa-why { margin: 0; padding-left: 16px; font-size: 11px; color: var(--warn-fg); line-height: 1.5; }
+.pa-adv {
+  display: flex; align-items: flex-start; gap: 4px; margin: 0;
+  font-size: 11px; color: var(--muted); line-height: 1.5;
+}
+.pa-adv svg { flex: none; margin-top: 2px; }
+@media (max-width: 1200px) {
+  .pa-head { gap: 4px; }
+  .pa-spacer { flex-basis: 100%; }
+}
 .pt-ops { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
 /* ★ P6：「⋯」更多菜单（导出 / 删除） */
 .pt-more { position: relative; flex: none; }

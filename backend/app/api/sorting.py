@@ -43,12 +43,16 @@ from app.services import sorting as S
 from app.services.events import emit as emit_event
 from app.services.collector import collector
 from app.services.kinematics import forward_kinematics as FK
+# ★ E5′：把送检那几帧**再读一遍**当持件/吸空证据（只读观测件，不经它下发任何东西）。
+from app.services.hold_state import hold_state
 from app.services.motion import motion, real_write_enabled
 # ★★ 2026-10-11：气路动作 → 40135 位号的**唯一映射口**（用户 210 位表，见 modbus 顶部注释）。
 #   本文件不写死位号；`_air` 只把 (动作, 面) 解析成 `VAC_ACTIONS` 的键名再交给 rc_vacuum。
 from app.services.modbus import VAC_ACTIONS
 from app.services.safety_guard import check as guard_check
 from app.services import ui_speed                     # ★ 上位机当前速度（长流程跟随滑块）
+from app.services import cell_evidence as CE          # ★ E7 一格三证（只读装订，不参与控制）
+from app.services import vision_samples as VS         # ★ E4 判色样本环（只登记，不改阈值）
 from app.utils.joints import parse_joints
 
 log = get_logger("sorting")
@@ -293,7 +297,37 @@ def api_blocks(block: Optional[str] = None, cam_h: Optional[float] = None,
                             "plane_z 是示教法兰高度，仅用于共面性体检，不作为摆放高度")}
 
 
-# ---------------------------------------------------------------- 启停
+# ---------------------------------------------------------------- ★ E7 一格三证（只读复盘）
+@router.get("/cells")
+def api_cells(limit: int = 30, cell: Optional[str] = None):
+    """★ 一格三证（**只读**，不需要控制令牌 —— 与 `/api/twin/residual` 同口径）：
+
+    回答的是现场最常问的那句「**这一格当时到底看到了什么、机器人真到了没有**」：
+    照片 / 判色结论 / 位姿（含 E2 到位自证）用**同一个格号**装订，缺哪一样就写缺哪一样。
+    · `limit` / `cell` 只做过滤，**不改判据**；齐全度由 `CE.stats()` 给（界面只渲染）。
+    · `seq` 是**只增不减的水位**（§5.5 铁律①）—— 前端刷新用它判断"有没有新记录"，
+      **不用 `records.length`**（内存有上限 `RECENT_CAP`，满了长度就恒定、水位失效）。
+    """
+    rows = CE.recent(limit=max(1, min(200, int(limit))), cell=(cell or "").strip().upper())
+    return {"ok": True, "latest_seq": CE.latest_seq(), "records": rows,
+            "stats": CE.stats(), "evidence_keys": list(CE.EVIDENCE_KEYS),
+            "note": ("三证 = 照片 / 判色 / 位姿；格号唯一派生自点位名（`B3` 与 `B3上` 是同一格）。"
+                     "缺的证据**如实写缺 + 为什么缺**，不为凑齐补拍、不重新判色、不重新判到位。")}
+
+
+@router.get("/cells/{cell}")
+def api_cell(cell: str, limit: int = 20):
+    """单格复盘：这一格最近的三证（`cell` = `A1`…`A9` / `B1`…`B9` / `C`）。"""
+    cid = (cell or "").strip().upper()
+    if not cid:
+        raise HTTPException(status_code=400, detail="格号不能为空（如 B3 / C）")
+    rows = CE.recent(max(1, min(200, int(limit))), cell=cid)
+    one = next((c for c in CE.stats()["cells"] if c["cell_id"] == cid), None)
+    return {"ok": True, "cell_id": cid, "records": rows,
+            "found": bool(rows), "summary": one,
+            "note": (None if rows else
+                     "这一格没有三证记录（本机本次会话内没往它放过件 / 没放回过件）—— "
+                     "**没有记录 ≠ 没有发生**，历史请按日志目录 `cells/cells-YYYYMMDD.jsonl`")}
 
 
 # ---------------------------------------------------------------- 启停
@@ -509,7 +543,7 @@ def _move(ctx, pmap, name, speed, dry, stage, st=None, face=S.FACE_AUTO,
     if not ok:
         raise _Stop("安全围栏互锁：%s" % reason, stage)
     r = motion.command([float(v) for v in target], int(speed), 0,
-                       abort_check=lambda: ctx.cancelled())
+                       abort_check=lambda: ctx.cancelled(), source=name)
     _set(st, stage=stage, last_point=name, face=face_rec)
     if not r.get("ok"):
         raise _Stop("运动到「%s」失败：%s" % (name, r.get("error")), stage)
@@ -605,8 +639,64 @@ _HINT_NO_PIECE = "（若 A 区已无料/未放料请先补料；也可能是件�
 FRAME_GAP_S = 0.15
 
 
+def _hold_record(source: str, frames: List[Dict], vote: Optional[Dict],
+                 st=None, expect_present: bool = True) -> None:
+    """★ E5′：把**已经抓到的**那几帧再读一遍 → 持件/吸空三档证据。
+
+    · 只读观测件：不新增拍摄、不新增移动、不产生任何动作（矛盾只发一条 warn 事件）；
+    · 判色结论本身**一字不动**（`vote` 只是被"读"，证据与判色各算各的）；
+    · 观测件坏了不许带走检流程 —— 一切异常吞掉（同 `twin_residual` / `safety_note` 的纪律）。
+    """
+    try:
+        snap = hold_state.record(source, frames, vote, expect_present=expect_present)
+    except Exception as e:                       # noqa: BLE001
+        log.debug("持件证据登记失败（已忽略）: %s", e)
+        return
+    if snap is None:
+        return
+    _set(st, hold_evidence={"id": snap["id"], "at": snap["at"], "state": snap["state"],
+                            "state_label": snap["state_label"], "source": snap["source"],
+                            "note": snap["note"], "frames": snap["frames"],
+                            "present": snap["present"]})
+
+
+def _cell_evidence(point: str, v: Optional[Dict] = None,
+                   target: Optional[List[float]] = None,
+                   dry: bool = False,
+                   extra: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """★★ E7 一格三证：把"这一格当时看到了什么 / 判成了什么 / 机器人真到了没有"装成一条记录。
+
+    ★ 与 `_hold_record` 同一条纪律：**观测件坏了不许带走检主线** —— 一切异常吞掉、
+      只写 debug；不新增拍摄、不新增移动、不新增读库、不产生任何动作。
+    ★ 期望值取 `_move` **返回的实发目标**（与到位校验同源）；残差取 **E2 到位自证**里
+      同一个点名的那一段 —— **绝不**在这里再按点位表推第二遍（那是"第二秩序权威"）。
+    · 非料格点位（`开始/结束点` / `J6正面` …）→ 格号派生为空 → **如实跳过**，不硬造格子。
+    · 照片这一证：分拣的判色走 `/vision/detect`（一次性返回、**不归档图片**），
+      所以这里传的是"已知没有" + 真实原因，**不是**"相机没开"，也不会为凑齐去补拍。
+    """
+    try:
+        cell = CE.cell_id(point)
+        if not cell:
+            return None
+        rec = CE.bind(
+            cell,
+            photo=CE.photo_evidence(
+                None, reason="分拣链路的判色走 /vision/detect（一次性返回、不归档图片）→ "
+                            "照片这一证**没有**（不为凑三证补拍）"),
+            colour=CE.colour_evidence(v),
+            pose=CE.pose_evidence(live=_live_joints_or_none(), target=target,
+                                  residual=CE.residual_for(point), simulated=bool(dry)),
+            extra=dict(extra or {}, at_point=point))
+        CE.record(rec)
+        return rec
+    except Exception as e:                        # noqa: BLE001
+        log.debug("一格三证登记失败（已忽略）: %s", e)
+        return None
+
+
 def _capture(ctx, frames: int, min_conf: float, stage: str, st=None,
-             valid_colors: Optional[Sequence[str]] = None) -> Dict:
+             valid_colors: Optional[Sequence[str]] = None,
+             point: str = "") -> Dict:
     """停顿后连抓 N 帧 → 投票。任何一帧失败都记下来，最终交给投票判"检测不到"。
 
     ★ `valid_colors`（2026-10-10，用户口径"用户提到的颜色才是有效色"）：
@@ -629,7 +719,34 @@ def _capture(ctx, frames: int, min_conf: float, stage: str, st=None,
     v = S.vote_color(got, min_conf, valid_colors=valid_colors)
     log.info("判色 %d 帧 → %s (conf=%s) %s", len(got), v.get("color"),
              v.get("conf"), v.get("votes"))
+    # ★ E5′：同一批帧第二次利用 = 持件/吸空证据（纯后处理，不新增拍摄、不新增移动、不产生动作）
+    _hold_record(stage, got, v, st)
+    # ★ E4：同一批帧第三次利用 = 判色样本环（纯登记，不拍、不动、不改阈值、不产生动作）。
+    #   观测件纪律与 _hold_record 一样：任何异常都不许带走检主线。
+    _sample_record(got, v, stage=stage, point=point, valid_colors=valid_colors)
     return v
+
+
+def _sample_record(frames: List[Dict], v: Dict, stage: str = "", point: str = "",
+                   valid_colors: Optional[Sequence[str]] = None) -> None:
+    """★ E4 判色样本环的唯一接线点（**只登记，不建议、不写配置**）。
+
+    为什么放在这里而不是别处：这是"一批帧 → 一个判色结论"的**唯一出口**，
+    样本必须与判色**同源同批**（换个地方取帧就是另一件事）。
+    ★ 空跑走不到这里（`judge = (not dry) and real` 的 else 分支才调 `_capture`），
+      而 `vote.placeholder` 在样本层已按"未判色"如实处理 —— 两层都不拿占位色当真结论。
+    ★ 刻意不做：不改 `vision_color.py` 的任何阈值；不自动复核；不自动下发。
+      阈值提案只能由人在「系统设置」页点确认（方案 §E4 的硬边界）。
+    """
+    try:
+        VS.ingest(frames, v, {
+            "source": "sorting",
+            "stage": stage,
+            "cell_id": CE.cell_id(point),
+            "valid_colors": list(valid_colors) if valid_colors else None,
+        })
+    except Exception as e:                     # noqa: BLE001 —— 观测件绝不带崩主控
+        log.debug("判色样本登记失败（已忽略）: %s", e)
 
 
 # ---------------------------------------------------------------- 双面（一趟两件）原语
@@ -776,7 +893,8 @@ def _dual_drop(ctx, dry: bool, face: str = S.FACE_FRONT, st=None) -> None:
 
 
 def _capture_per_face(ctx, faces: Sequence[str], frames_per_face: int,
-                      min_conf: float, stage: str, set_face=None) -> List[Dict]:
+                      min_conf: float, stage: str, set_face=None,
+                      st=None, point: str = "") -> List[Dict]:
     """**按面**抓帧投票：每个面各抓 `frames_per_face` 帧 → `vote_color_per_face` 分组结论。
 
     ★ 判据**完全复用现有 `vote_color`**（经 `vote_color_per_face` 只做分组）——
@@ -808,13 +926,20 @@ def _capture_per_face(ctx, faces: Sequence[str], frames_per_face: int,
     vs = S.vote_color_per_face(groups, min_conf)
     log.info("双面判色 每面 %d 帧 → %s", int(frames_per_face),
              [(v.get("slot"), v.get("color")) for v in vs])
+    # ★ E5′：双面 = 每组帧各出一条证据（两件各自"有没有吸住"是两件事，不能合成一条）
+    for _slot, _grp, _v in zip(list(faces), groups, vs):
+        _hold_record("%s·%s" % (stage, _slot), _grp, _v, st)
+    # ★ E4：同一批帧第三次利用 = 判色样本环（双面 = 两个独立结论各登记一条）。
+    for _slot, _grp, _v in zip(list(faces), groups, vs):
+        _sample_record(_grp, _v, stage="%s·%s" % (stage, _slot), point=point)
     return vs
 
 
 def _put_back(ctx, pmap, src_slot: str, speed: int, dry: bool,
               blow_ms: int = S.BLOW_MS, prefix: str = "放回原位", st=None,
               go_home: bool = True,
-              face: str = S.FACE_FRONT) -> None:
+              face: str = S.FACE_FRONT,
+              v: Optional[Dict] = None, piece: Optional[int] = None) -> None:
     """★ 2026-10-10 用户口径：**判不出色（或自证不符）→ 把件原路放回取料格**。
 
     调用前提：件正被吸着、机器人停在半路（分拣停在 C 检测位）。
@@ -830,6 +955,9 @@ def _put_back(ctx, pmap, src_slot: str, speed: int, dry: bool,
       **取消**原"共用一路真空"专用的 `keep`（复吸）参数：放这一面**只动这一面那一路**，
       不影响另一面。`face` 决定用哪一路（front → 1~4 位 / back → 5~8 位），
       "用哪面取的就用哪面放回"。默认 `front` → 单件路径 / 井字棋**逐字不变**（零回归）。
+    ★ `v` / `piece`（★ E7 一格三证）：调用方把**手里已有的判色结论**原样传进来当"判色"这一证
+      （放回的原因通常正是"判不出色"，那条 reason 就是这一格最有价值的证据）；
+      **不传 → 三证里如实记"没有判色"**，绝不编一个结论。放回本身是**移动**，不是新拍照。
     """
     _move(ctx, pmap, src_slot + "上", speed, dry, "%s·到原格上方" % prefix, st, face=face)
     # ★★ 2026-10-11 用户口径：「原位禁止旋转」+「如果正面保持正面，如果反面保持反面，
@@ -837,12 +965,15 @@ def _put_back(ctx, pmap, src_slot: str, speed: int, dry: bool,
     #   用 `face="keep"` 而不是该件的面（用件的面会把 J6 按"该点自身∓180"重算 = 在原料位翻面；
     #   用 front 又会把反面件**翻回正面** → 正是用户报的"让它去反面位却总弄成正面"）。
     #   `keep` = J6 沿用当前面（正面/反面/判不出取更近），**全程不主动翻面**，与"原料位严禁旋转"相容。
-    _move(ctx, pmap, src_slot, speed, dry, "%s·下落" % prefix, st, face=S.FACE_KEEP)
+    down_target = _move(ctx, pmap, src_slot, speed, dry, "%s·下落" % prefix, st, face=S.FACE_KEEP)
     _air(ctx, "release", dry, "%s·停止吸" % prefix, st, face=face)
     _air(ctx, "blow", dry, "%s·放气" % prefix, st, face=face)
     if int(blow_ms) > 0:
         ctx.sleep(int(blow_ms) / 1000.0)
     _air(ctx, "unblow", dry, "%s·停止放气" % prefix, st, face=face)
+    # ★★ E7 一格三证：件放回了哪一格、当时判成了什么、机器人真到了没有（纯观测件）
+    _cell_evidence(src_slot, v=v, target=down_target, dry=dry,
+                   extra={"piece": piece, "face": face, "purpose": prefix})
     # 这一面的件已放下 → 该面空槽。`st` 是双面 state 时，由调用方随后的 face_slot_take 刷新 holding；
     # 单件路径 st 为 None → 不设 holding（异常分支会置 False）。
     _set(st, stage="%s·完成" % prefix)
@@ -972,7 +1103,7 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
                     raise _Stop("未到达 C 检测点（实际偏差 %.1f° > %.1f°），不判色"
                                 % (dev, CAM_ARRIVE_TOL_DEG), "判色", idx)
                 _set(stage="判色")
-                v = _capture(ctx, int(body.frames), min_conf, "判色")
+                v = _capture(ctx, int(body.frames), min_conf, "判色", point=cam)
                 # ★ 逐帧明细一起落进 state：界面要显示"捕捉 N 张、只突出置信度最高那张"
                 _set(color=v["color"], conf=v["conf"], votes=v["votes"],
                      frame_detail=v.get("frame_detail") or [],
@@ -984,7 +1115,8 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
                     #    也不做"跳过继续"（用户明确否掉）—— 放回完这一轮就结束。
                     _set(stage="无法识别·放回原位", target="")
                     _put_back(ctx, pmap, a_slot, speed, dry,
-                              blow_ms=int(body.blow_ms), prefix="放回原位 %s" % a_slot)
+                              blow_ms=int(body.blow_ms), prefix="放回原位 %s" % a_slot,
+                              v=v, piece=idx)
                     suck_on = False          # 两路气已在 _put_back 内正常关断
                     blow_on = False
                     raise _Stop("颜色无法识别（%s）%s，已放回原位 %s"
@@ -998,7 +1130,7 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
             _set(target=tgt)
             # 5) 放料（★ 用户 2026-10-08 口径：**只到 B 槽正上方，不下落到槽位**，
             #    件靠停止吸 + 吹气掉下去 —— 少一次下落/抬起，节拍更短）
-            _move(ctx, pmap, tgt + "上", speed, dry, "放料·正上方")
+            drop_target = _move(ctx, pmap, tgt + "上", speed, dry, "放料·正上方")
             # ★★ 落料三步（用户 2026-10-08 第二轮口径，顺序即工艺，别调换）：
             #    ① 停止吸（Bit2）—— 先断负压阀
             #    ② 放气（Bit3）—— 吹断杯内残余真空，件才真掉下来
@@ -1015,12 +1147,23 @@ def _run_sorting(ctx, body: StartIn, pmap: Dict[str, object], min_conf: float) -
             blow_on = False
             S.place(placement, v["color"], tgt)
             _set(placement=S.placement_summary(placement), holding=False)
+            # ★★ E7 一格三证：放完这一件就把"照片 / 判色 / 位姿"按同一个格号装订
+            #   （纯观测件：不新增拍摄、不新增移动、不新增读库；坏了也不影响主线）。
+            ev = _cell_evidence(tgt + "上", v=v, target=drop_target, dry=dry,
+                                extra={"piece": idx, "color": v.get("color"),
+                                       "slot": tgt, "purpose": "放料"})
             # 6) 回起点（此时吸/吹都已关断，可以干净地走）
             _move(ctx, pmap, start, speed, dry, "回起点")
             emit_event("sorting", "info", "sorting.piece",
                        "第 %d 件：%s → %s（conf %.2f）" % (idx, v["color"], tgt, v["conf"]),
                        {"piece": idx, "color": v["color"], "slot": tgt,
-                        "conf": v["conf"], "votes": v["votes"], "dry_run": dry},
+                        "conf": v["conf"], "votes": v["votes"], "dry_run": dry,
+                        # ★ 格号 + 三证齐全度（缺哪一样、为什么缺由 `/api/sorting/cells` 查，
+                        #   事件里只带结论，不把整条记录塞进事件表）
+                        "cell_id": CE.cell_id(tgt),
+                        "evidence": (None if ev is None else
+                                     {"complete": ev["complete"],
+                                      "missing": ev["missing"], "seq": ev["seq"]})},
                        actor="control")
 
         # 收尾：循环内每件已回起点，这里只在"没跑完就正常结束"时兜一次（幂等）
@@ -1302,7 +1445,8 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
                     _cur["face"] = S.norm_face(f)
 
                 verdicts = _capture_per_face(ctx, faces, DUAL_FRAMES_PER_FACE,
-                                             min_conf, "判色", set_face=_set_cam_face)
+                                             min_conf, "判色", set_face=_set_cam_face,
+                                             point=cam)
                 if verdicts:
                     _set(frame_detail=verdicts[0].get("frame_detail") or [],
                          best_frame=verdicts[0].get("best_frame"),
@@ -1328,7 +1472,7 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
                         raise _Stop("%s" % plan["detail"], "选槽", done + 1)
                     tgt = plan["slot"]
                     _set(target=tgt)
-                    _move(ctx, pmap, tgt + "上", speed, dry, "放料·正上方", face=face)
+                    drop_target = _move(ctx, pmap, tgt + "上", speed, dry, "放料·正上方", face=face)
                     # ★★ 只放**这一面那一路**（front→1~4 位 / back→5~8 位）——
                     #   两面独立：放下板不碰反面、放反面不碰下板（独立钉，test_double_face.py）。
                     _dual_drop(ctx, dry, face=face, st=state)
@@ -1340,20 +1484,30 @@ def _run_sorting_dual_face(ctx, body: StartIn, pmap: Dict[str, object],
                         blow_on = False
                     S.place(placement, v.get("color"), tgt)
                     _set(placement=S.placement_summary(placement))
+                    # ★★ E7 一格三证（双面：extra 里带**这一件是哪一面**，同格两件也能分开复盘）
+                    ev = _cell_evidence(tgt + "上", v=v, target=drop_target, dry=dry,
+                                        extra={"piece": done + 1, "color": v.get("color"),
+                                               "slot": tgt, "face": slot,
+                                               "dual_face": True, "purpose": "放料"})
                     emit_event("sorting", "info", "sorting.piece",
                                "第 %d 件：%s → %s（双面 %s，conf %.2f）" % (
                                    done + 1, v.get("color"), tgt, slot,
                                    v.get("conf") or 0.0),
                                {"piece": done + 1, "color": v.get("color"), "slot": tgt,
                                 "face": slot, "conf": v.get("conf") or 0.0,
-                                "dual_face": True, "dry_run": dry}, actor="control")
+                                "dual_face": True, "dry_run": dry,
+                                "cell_id": CE.cell_id(tgt),
+                                "evidence": (None if ev is None else
+                                             {"complete": ev["complete"],
+                                              "missing": ev["missing"], "seq": ev["seq"]})},
+                               actor="control")
                 else:
                     # 无效件 → 原路放回它自己的 A 原位（复用 _put_back 的移动+落料工艺）
                     _set(stage="无法识别·放回原位", target="")
                     _put_back(ctx, pmap, src, speed, dry,
                               blow_ms=int(body.blow_ms),
                               prefix="放回原位 %s" % src, st=state,
-                              go_home=False, face=face)
+                              go_home=False, face=face, v=v, piece=done + 1)
                     if back:
                         suck_back_on = False
                         blow_back_on = False

@@ -29,6 +29,8 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import MonitorLayout from "./MonitorLayout.vue";
 import CameraPanel from "./CameraPanel.vue";   // ★ 复用现成的摄像头窗口，绝不重做
 import Icon from "./Icon.vue";
+import HoldEvidence from "./HoldEvidence.vue";
+import CellEvidenceCard from "./CellEvidenceCard.vue";
 import { apiControl } from "../net/control.js";
 import { useAuthStore } from "../stores/auth.js";
 import { useRobotStore } from "../stores/robot.js";
@@ -37,6 +39,7 @@ import { useRcReadyStore } from "../stores/rcReady.js";
 import { useSorting3dStore } from "../stores/sorting3d.js";
 import { speak, stageSpeech } from "../ai/speak.js";
 import SortFlow from "./SortFlow.vue";       // ★ 执行流程可视化（for 循环步骤条）
+import ParamQuad from "./ParamQuad.vue";     // ★ C3：当前+目标+偏差+短趋势的唯一实现
 import { updateSortingState } from "../three/manager.js";
 
 const auth = useAuthStore();
@@ -519,11 +522,29 @@ const faceNow = computed(() => {
   const f = st.value && st.value.face;
   return f === "front" ? "正面" : f === "back" ? "反面" : "";
 });
+// ---------- ★ C3（方案 §C3「J6：角度 + 面 + 与目标偏差」） ----------
+//   当前角 = WS 遥测实读；目标角 = 后端 `motion.last_target`（随位姿帧捎来，**不是前端猜**）。
+//   ★ 偏差走**环形差**（ParamQuad 的 `wrap`）：J6 整圈是同一姿态，直接相减会把"差 1°"
+//     显示成"差 359°" —— 与后端 `current_raw_slot` 的 J6 环形口径同一件事。
+//   ★ 面仍然只取后端 `state.face`（**不在前端按角度算面**，那是后端 `face_of_j6` 的活）。
+const j6Now = computed(() => {
+  const q = robot.telemetry && robot.telemetry.q;
+  if (!robot.connected || robot.telemetryStale) return null;
+  return q && Number.isFinite(q[5]) ? q[5] : null;
+});
+const j6Target = computed(() => {
+  const c = robot.telemetry && robot.telemetry.cmd;
+  return c && Number.isFinite(c[5]) ? c[5] : null;
+});
 // ★ 空跑占位色：颜色不是相机判出来的，界面必须说清楚（否则会被误当成真实判色结果）
 const simColor = computed(() => !!(st.value && st.value.sim_color));
 // ★ 3D 提示：疑似没取到（失败停止时方块画回 A 格并标红）+ 3D 画不了的槽位原因
 const suspect = computed(() => !!(st.value && st.value.suspect_pick));
 const handHold = computed(() => !!(st.value && st.value.holding));
+// ★ E5′：送检那几帧的**第二次读法** = 持件/吸空证据（三档；判据在后端 services/hold_state.py）。
+//   与上面 `handHold` 同源同一份 state —— 不在前端另算一套，也不轮询第二路。
+const holdEv = computed(() => (st.value && st.value.hold_evidence) || null);
+const isDry = computed(() => !!(dryRun.value || (st.value && st.value.dry_run)));
 const blocksWarn = computed(() => (blocksInfo.value && blocksInfo.value.warned) || []);
 /** 托盘盒尺寸文本（A/B 各一个盒，[宽,深,壁高] mm）。 */
 const trayText = computed(() => {
@@ -744,11 +765,16 @@ watch(() => rc.readyTick, (n) => {
           <template v-if="suspect">疑似没取到：该方块已画回 A 格并标红（不显示夹持）。</template>
           <template v-else>手上有件（按流程推断：取料吸合已完成）—— 现场无真空反馈，不代表真的吸住了。</template>
         </p>
+        <!-- ★ E5′：同一批送检帧的第二次读法 = 有没有"观测"支持上面那句（三档；矛盾只提示不动作） -->
+        <HoldEvidence :evidence="holdEv" :holding="handHold" :dry="isDry" />
         <p v-if="blocksWarn.length" class="small muted" style="margin-top:5px">
           未画：{{ blocksWarn.slice(0, 4).join("；") }}<span v-if="blocksWarn.length > 4"> 等
           {{ blocksWarn.length }} 项</span>
         </p>
       </div>
+
+      <!-- ★★ E7 一格三证（只读复盘）：照片 / 判色 / 位姿 按同一个格号装订，缺哪样写哪样 -->
+      <CellEvidenceCard />
 
       <div class="card">
         <h3><Icon name="activity" :size="15" /> 运行状态
@@ -763,6 +789,18 @@ watch(() => rc.readyTick, (n) => {
             <template v-if="faceNow">{{ faceNow }}<span class="muted">（流程推断·现场无面传感器）</span></template>
             <template v-else>—<span class="muted">（未知）</span></template>
           </span>
+        </div>
+        <!-- ★★ C3：J6 四元组（实读角 / 最后下发目标角 / 环形偏差 / 60s 趋势）。
+             与上一行"当前面"**同一份后端结论**（面不由前端按角度推算）；
+             读不到实时姿态 → 当前如实"未知"，不拿 0 顶（§5.5 铁律③）。 -->
+        <div class="row"><span class="k">J6</span>
+          <ParamQuad class="pq-j6"
+                     :current="j6Now" :target="j6Target"
+                     cur-source="WS 遥测实读" tgt-source="后端最后下发目标"
+                     unit="°" :decimals="1" wrap
+                     trend-key="j6" :trend-window-ms="60000"
+                     :as-of-now="robot.clk" :stale="robot.telemetryStale"
+                     target-null-text="无在飞目标" />
         </div>
         <div class="row"><span class="k">进度</span>
           <span class="v">{{ piece }}/{{ total }} 件{{ dryRun ? "（空跑）" : "" }}</span>

@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import (
     ai,
+    alarms,
     asr,
     auth,
     control,
@@ -35,7 +36,7 @@ from app.api import (
     vision,
     ws,
 )
-from app.core.config import get_config, public_dir, db_path, dotenv_loaded
+from app.core.config import get_config, public_dir, dotenv_loaded
 from app.core.brand import (
     DEVICE_MODEL,
     SERVICE_NAME,
@@ -46,7 +47,7 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logger import get_logger
 from app.core.middleware import RequestLogMiddleware
 from app.db.crud import prune_old_poses, prune_system_events
-from app.db.database import SessionLocal, init_db
+from app.db.database import SessionLocal, engine_url, init_db
 from starlette.middleware.base import BaseHTTPMiddleware
 from app.services.collector import collector
 from app.services.events import emit as emit_event
@@ -151,7 +152,10 @@ async def _prune_loop():
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_db()
-    log.info("数据库就绪: %s", db_path())
+    # ★ 打**真正在用**的库地址：`db_path()` 是默认值，`EFORT_DB_URL`（测试）与
+    #   `database.url`（配置）都会顶掉它 —— 原来这里在测试里也报"data/robot.db"，
+    #   看着像在写生产库（日志不许编没发生的事，§5.5 铁律⑤）。
+    log.info("数据库就绪: %s", engine_url())
     # ★ P0-4：prune 已改为分批 + 短事务，启动不再可能因欠账 OOM/长锁。
     #   为避免"启动即做大量 IO 拖慢就绪"，启动只清理一次，后续交给周期任务。
     await asyncio.to_thread(_prune_all)
@@ -254,6 +258,8 @@ app.include_router(auth.router)
 app.include_router(points.router)
 app.include_router(programs.router)
 app.include_router(events.router)
+# ★ C2 报警合理化：报警台账只读接口（免令牌，与 rc-status 同口径）+ 人操作（要令牌）
+app.include_router(alarms.router)
 app.include_router(system.router)
 app.include_router(vision.router)
 app.include_router(frames.router)

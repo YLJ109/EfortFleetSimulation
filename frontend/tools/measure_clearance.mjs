@@ -103,7 +103,13 @@ const OFFS = [0, 90, 0, 0, 0, 0];
 
 const glbRoot = new THREE.Group();
 glbRoot.rotation.x = -Math.PI / 2; glbRoot.scale.setScalar(0.001); scene.add(glbRoot);
+// ★★ attach() 前先把链条摆到**机械零位（含 theta_offset）**，与 manager.js
+//    buildArticulatedOfficial 一致。少了这一步，零件被补偿进"没加 J2 偏置"的局部系，
+//    q=0 时整具模型是"大臂横着、小臂竖着"（与真实零位差 90°），量出来的最低点全是错的
+//    —— 这条已在 tools/dump_mesh_lowpoints.mjs 的注释里记过，两个工具必须同一个姿势。
 const nodes = [root, joints[0], joints[1], joints[2], joints[3], joints[4], joints[5]];
+applyJoints([0, 0, 0, 0, 0, 0]);
+root.updateMatrixWorld(true);
 parts.forEach((p) => {
   const k = classify(p);
   if (k < 0) return;

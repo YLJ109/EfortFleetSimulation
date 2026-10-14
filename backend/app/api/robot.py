@@ -21,6 +21,8 @@ from app.services.collector import collector, feed_run_mode
 from app.services.hub import hub
 from app.services.motion import motion, real_write_enabled, snapshot_ready
 from app.services.rc_ready import ReadinessService
+# ★ E2 到位自证：只读观测件的快照入口（与 WS 位姿帧里的 residual **同一份 state**）
+from app.services.twin_residual import twin_residual
 
 router = APIRouter(prefix="/api", tags=["robot"])
 _ready = ReadinessService()
@@ -206,3 +208,14 @@ def meta():
         "dh": cfg.dh.get("joints", []),
         "joint_limits": cfg.get("joint_limits", default=[]),
     }
+
+
+@router.get("/twin/residual")
+def twin_residual_state():
+    """★ E2 到位自证（**只读**，不需要控制令牌）：在飞段的残差带 + 最近段的历史与曲线。
+
+    与 WS 位姿帧里的 `residual` **同源**（就是同一份 state()）—— 前端只渲染，
+    不再自己算一遍判据（§5.5 铁律④：同一屏同一结论必须同源）。
+    残差是**关节角差（°）**，带 = 到位容差 + 一拍采样延迟的不确定度。
+    """
+    return twin_residual.state()

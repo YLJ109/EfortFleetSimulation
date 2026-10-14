@@ -361,5 +361,63 @@ console.log("\n== 9. 兜底色表自洽 ==");
   ok("opacityOf 未知状态回退数字", Number.isFinite(opacityOf("nope", {})));
 }
 
+console.log("\n== 10. ★ 世界矩阵新鲜度：还没渲染过也绝不能假报碰撞 ==");
+{
+  // 现场事故（2026-10-12）：真实监控页开机即挂「碰撞报警！机器人已触及台面」，
+  // 而机器人离台面实际还有两百多毫米。根因不在阈值，也不在模型：
+  //   Box3.setFromObject 只刷新**对象自己**的矩阵，父级矩阵要等 renderer.render()
+  //   里的 scene.updateMatrixWorld() 才算好。于是"没渲染过就测量"的两种场合
+  //   —— 开机首帧、以及页面在后台（App.vue 的循环 document.hidden 时整个停帧，
+  //   首帧的假结论再没人纠正）—— 量到的是**没翻转、没抬升**的局部坐标：
+  //   root 的 rotX(-90)+站台 180mm 全部丢失，轴承环的半径 0.132 直接变成 -0.132m
+  //   的"净空" → -312mm → hit。
+  // 上面 1~9 节的夹具都在测量前调过 scene.updateMatrixWorld(true)，
+  // 所以它们**天生看不见**这个坑 —— 本节故意不调。
+  const PLATFORM_H = 0.18;
+  /** 与 robotModel.js 同构：root 做 DH+Z→Three+Y 的 -90° 翻转并抬上台面，J1 挂轴承环。 */
+  const build = () => {
+    const scene = new THREE.Scene();
+    const root = new THREE.Group();
+    root.name = "robot-root";
+    root.rotation.x = -Math.PI / 2;
+    root.position.y = PLATFORM_H;
+    const j1 = new THREE.Group();
+    j1.name = "J1";
+    const ring = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.132, 0.132, 0.012, 36), new THREE.MeshBasicMaterial());
+    ring.rotation.x = Math.PI / 2;
+    ring.position.z = 0.331;                       // d1 - 0.045
+    j1.add(ring);
+    root.add(j1);
+    scene.add(root);
+    return { scene, root, j1 };
+  };
+  // 真实净空（世界矩阵算好后）：环轴向沿局部 Z → 世界 y = 0.18 + (0.331 - 0.006)
+  const TRUE_CLR = 0.331 - 0.006;
+
+  const fence = new SafetyFence(new THREE.Scene());
+  fence.applyConfig(normalizeSafetyConfig(cfgWith(Object.assign({}, GROUND_FULL))));
+
+  const a = build();                                // ① 首帧：不碰 updateMatrixWorld
+  const rA = fence.update(a.root, a.j1, 1.0, PLATFORM_H);
+  const clrA = fence.groundBox.min.y - PLATFORM_H;   // 地面这一路的实测净空
+  const b = build();
+  b.scene.updateMatrixWorld(true);                  // ② 同一棵树的"渲染过"版本
+  const rB = fence.update(b.root, b.j1, 1.0, PLATFORM_H);
+  const clrB = fence.groundBox.min.y - PLATFORM_H;
+  fence.dispose();
+
+  ok("首帧（未渲染）不报地面碰撞", rA.zoneId !== "ground",
+    `state=${rA.state} zone=${rA.zoneId} 地面净空=${(clrA * 1000).toFixed(0)}mm`);
+  ok("首帧不判 hit", rA.state !== "hit", `state=${rA.state}`);
+  ok("首帧地面净空 == 渲染后地面净空（一毫米都不许差）",
+    Math.abs(clrA - clrB) < 1e-9, `A=${clrA.toFixed(4)} B=${clrB.toFixed(4)}`);
+  ok("地面净空 == 真值 325mm（口径本身没漂）",
+    Math.abs(clrB - TRUE_CLR) < 1e-6 && Math.abs(clrA - TRUE_CLR) < 1e-6,
+    `A=${clrA.toFixed(4)} B=${clrB.toFixed(4)} 期望=${TRUE_CLR.toFixed(4)}`);
+  ok("该姿态总判 safe（离台面 325mm > 接近阈值 150mm）",
+    rA.state === "safe" && rB.state === "safe", `A=${rA.state} B=${rB.state}`);
+}
+
 console.log(`\n结果: ${pass} PASS / ${fail} FAIL`);
 process.exit(fail ? 1 : 0);

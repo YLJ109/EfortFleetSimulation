@@ -74,6 +74,12 @@ export const useRobotStore = defineStore("robot", {
       at: 0,                   // 本帧到达时刻（性能排查用）
     },
 
+    // ★ E2 到位自证：后端把"在飞那一段"的残差快照**捎在同一条位姿帧**里推来
+    //   （判据只有后端一份 —— 前端只渲染，不再自己算，§5.5 铁律④同屏同源）。
+    //   residualSeq = **只增不减**的水位（铁律①：不拿对象引用/长度当"变了没"的判据）。
+    residual: null,
+    residualSeq: 0,
+
     // ---- ② 未连接占位：唯一被允许接管显示姿态的特例（未连接 → 全 0）----
     demo: { on: false, q: zeroQ(), tcp: zeroTcp() },
 
@@ -83,6 +89,10 @@ export const useRobotStore = defineStore("robot", {
     // ---- 连接与元数据 ----
     simulated: false,          // 兼容字段：与 telemetry.simulated 同步
     connected: false,
+    // ★ C3：**外部时钟水位**（由 App 的 1s 时钟在 `sweepTelemetry()` 里无条件推进）。
+    //   用途 = 给"按时间窗取样本"的趋势组件当 `asOfNow`：`Date.now()` 不是响应式依赖，
+    //   组件自己调它就会退化成"停在渲染那一秒"（与 rc.clk / link.clk / metrics.clk 同一治法）。
+    clk: 0,
     // ★ 审计修复 P1-D8：遥测是否已"冻住"（WS 还连着，但后端不再推新帧）。
     //   telemetry.at 以前**只写不读** —— 后端卡死 / 采集线程崩溃 / WS 半死时
     //   画面定格，界面却还挂着"已连接(真实)"。因为 Date.now() 不是响应式依赖，
@@ -158,6 +168,8 @@ export const useRobotStore = defineStore("robot", {
       const at = this.telemetry.at;
       const stale = !!at && (Date.now() - at) > TELEM_STALE_MS;
       if (stale !== this.telemetryStale) this.telemetryStale = stale;
+      // ★ C3：无条件推进水位（帧一停，telemetry.at 就不再变，只有这里还在走）
+      this.clk = Date.now();
     },
 
     /**
@@ -182,6 +194,14 @@ export const useRobotStore = defineStore("robot", {
         this.telemetry.cmdTcp = { x: +p.cmd_tcp.x || 0, y: +p.cmd_tcp.y || 0, z: +p.cmd_tcp.z || 0 };
       }
       if (typeof p.tracking === "boolean") this.telemetry.tracking = p.tracking;
+      // ★ E2 到位自证：帧里带 residual 就更新；不带 = 当前没有在飞的段 → 如实清空
+      //   （绝不让上一段的"已到位"停在屏上冒充这一帧的事实）。
+      const r = p.residual && typeof p.residual === "object" ? p.residual : null;
+      const prev = this.residual;
+      const changed = (!!r) !== (!!prev)
+        || (r && prev && (r.id !== prev.id || r.samples !== prev.samples));
+      this.residual = r;
+      if (changed) this.residualSeq += 1;
       this.telemetry.at = Date.now();
     },
 

@@ -201,3 +201,80 @@ class VisionRecord(Base):
     note: Mapped[str] = mapped_column(String(255), default="")
     source: Mapped[str] = mapped_column(String(16), default="camera")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class VisionSample(Base):
+    """★ E4「判色样本环」：每一次判色留下的 **ROI 特征 + 判据值 + 结论 + 事后人工标签**。
+
+    ★★ 为什么是**新建表**（项目约定，见 `VisionRecord` / `SystemEvent` 的同款注释）：
+        `create_all()` 不会给已存在的表补列，给旧表加字段会让线上库直接
+        "no such column"。样本环与视觉记录（`vision_records`）问的是两件不同的事：
+        那张表记"相机服务报了什么"，这张表记"**后端这一次判色凭什么这么判**"
+        （逐帧特征 + 投票明细 + 当时的阈值快照 + 人工复核回流），是**建议派生的唯一数据源**。
+
+    ★ 只存**数字特征**，不存像素：`frames` 里每帧只有 Lab/hue/fill/ΔE/chroma/conf/reason。
+      ★ `mask`（numpy 数组的 JSON 形态）**绝不入表** —— 一帧就是几十万字节的噪声，
+        体积爆炸且对"阈值该怎么挪"没有任何信息量（要图去相机侧归档链路
+        `GET /vision/image?p=`，那里已经有）。白名单抽取，见 `services/vision_samples.py`。
+
+    outcome（复核回流 = 方案说的"免费标注"）：
+      unreviewed 未复核 → confirmed 人工确认判对 → corrected 人工改判（true_color 有值）
+      put_back   无效色/判不出 → 原路放回（流程事实，由调用方在 meta 里如实带上）
+    placeholder=1（空跑占位色）**不是判色结论**：`vote_ok` 会写成 0，
+    建议派生一律排除占位样本（拿编出来的色当已标定证据 = §5.5 铁律③禁止的假显示）。
+
+    thr_snapshot: 当时生效阈值的快照 JSON（{"thr","min_conf","state",...}）。
+      ★ state="unknown" 是**有效值**（相机服务没回显 = 不知道现场用的是什么），
+        它必须和"快照里确实没有这个键"分得开 —— 建议面据此拒绝给数值（三态不塌）。
+    """
+
+    __tablename__ = "vision_samples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    cell: Mapped[str] = mapped_column(String(16), default="", index=True)   # 格号（可空）
+    color: Mapped[str] = mapped_column(String(16), default="", index=True)  # 投票结论色
+    hex: Mapped[str] = mapped_column(String(9), default="")
+    conf: Mapped[float] = mapped_column(Float, default=0.0)
+    valid_colors: Mapped[str] = mapped_column(String(128), default="")      # "红,绿,蓝"
+    vote_ok: Mapped[int] = mapped_column(Integer, default=0)
+    placeholder: Mapped[int] = mapped_column(Integer, default=0)            # 空跑占位 → 不算结论
+    votes: Mapped[str] = mapped_column(Text, default="{}")                  # 投票明细 JSON
+    reason: Mapped[str] = mapped_column(String(128), default="")            # 判不出的真原因
+    frames: Mapped[str] = mapped_column(Text, default="[]")                 # 逐帧特征 JSON
+    frame_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_frames: Mapped[int] = mapped_column(Integer, default=0)          # {}＝抓取失败帧数
+    outcome: Mapped[str] = mapped_column(String(16), default="unreviewed", index=True)
+    true_color: Mapped[str] = mapped_column(String(16), default="")
+    source: Mapped[str] = mapped_column(String(16), default="sorting")      # sorting|tictactoe|vision_rule
+    stage: Mapped[str] = mapped_column(String(32), default="")
+    thr_snapshot: Mapped[str] = mapped_column(Text, default="")
+    note: Mapped[str] = mapped_column(String(255), default="")
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+
+class ColorAdviceProposal(Base):
+    """★ E4：判色阈值**建议提案**（落库=账面动作，绝不等于下发）。
+
+    ★★ 为什么单独一张表：提案必须"保留上一版可回滚"，而 `vision_samples` 是逐帧事实流水，
+        把提案塞进样本环会让两种生命周期完全不同的东西互相污染。
+    ★ 本表**没有任何**"已生效"状态：生效只发生在人显式走既有下发通道
+      （`POST /api/vision/config` → 相机服务 `/vision/config`），那条路不写这张表。
+      所以"表里有一条 active 提案"永远不等于"现场阈值被改了" —— 界面也不许这么写。
+
+    status: active（当前提案）| superseded（被新提案顶掉，可回滚到这里）| rolled_back（已回滚）
+    diff:         建议项 JSON 数组 [{key, from, to, color, n, misjudged, ...}]
+    thr_current:  提案时读到的现场阈值快照（state=unknown 时如实标 unknown）
+    """
+
+    __tablename__ = "color_advice_proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    actor: Mapped[str] = mapped_column(String(16), default="system")
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    summary: Mapped[str] = mapped_column(String(512), default="")
+    diff: Mapped[str] = mapped_column(Text, default="[]")
+    thr_current: Mapped[str] = mapped_column(Text, default="")
+    note: Mapped[str] = mapped_column(String(255), default="")

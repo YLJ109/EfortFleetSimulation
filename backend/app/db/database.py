@@ -74,6 +74,18 @@ def SessionLocal():
     return _SessionLocal()
 
 
+def engine_url() -> str:
+    """**真正在用**的数据库连接串（初始化之后才有意义）。
+
+    ★ 启动日志原来打的是 `db_path()`（默认路径），而 `EFORT_DB_URL` / `database.url`
+      都能把它顶掉 —— 于是测试日志里出现"数据库就绪: …data/robot.db"，
+      看着像在写生产库（§5.5 铁律⑤：日志不许编没发生的事）。
+    """
+    if _engine is None:
+        return _engine_url()
+    return str(_engine.url)
+
+
 def _migrate(eng) -> None:
     """轻量迁移: create_all 不会给已存在的表加列, 这里按需补列(幂等)。"""
     insp = inspect(eng)

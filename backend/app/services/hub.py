@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Dict, FrozenSet, Optional
 
 from app.core.logger import get_logger
+from app.services import metrics
 
 log = get_logger("hub")
 
@@ -60,9 +62,20 @@ class WsHub:
             return len(self._clients)
         return sum(1 for c in self._clients.values() if kind in c.kinds)
 
+    def pending(self) -> int:
+        """★ B1 只读指标：当前「有未发出积压帧」的客户端数。
+
+        背压设计下每客户端最多积压 **1 帧**（新帧覆盖旧帧），所以这个数
+        就是积压上界的真值 —— 大于 0 = 至少一个慢客户端还没发完上一帧。
+        """
+        return sum(1 for c in self._clients.values() if c.latest is not None)
+
     def broadcast(self, payload: dict) -> None:
         if not self._clients:
             return
+        # ★ B1 只读指标：量「序列化 + 入队」耗时（实际 send 在事件循环里，量不到，
+        #   如实命名 broadcast_enqueue_ms，不冒充整条推送延迟）。
+        t0 = time.perf_counter()
         kind = _kind_of(payload)
         data = json.dumps(payload, ensure_ascii=False)
         for c in list(self._clients.values()):
@@ -77,6 +90,8 @@ class WsHub:
             except Exception as e:
                 log.debug("broadcast skip: %s", e)
                 self.unregister(c.ws)
+        metrics.stat("ws.broadcast_enqueue_ms", (time.perf_counter() - t0) * 1000.0)
+        metrics.incr("ws.broadcast_frames")
 
     def _drain(self, c: "_Client") -> None:
         """在事件循环线程内执行: 连续发送直到无积压。"""

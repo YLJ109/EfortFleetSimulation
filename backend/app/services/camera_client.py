@@ -21,6 +21,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from app.core.config import get_config
 from app.core.logger import get_logger
+from app.services import metrics
 
 log = get_logger("camera_client")
 
@@ -64,13 +65,6 @@ def _timeout() -> float:
 #   项目里早就把这条写进纪律（真机脚本必须禁代理），但生产代码这里一直没做 —— 现在补上。
 _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-# ★★ 相机服务永远是**本机**（默认 127.0.0.1:8100）：请求必须**绕开 HTTP 代理**。
-#   踩过的坑（2026-10-08）：本机 shell 里设了 https_proxy（如 127.0.0.1:56638），
-#   urllib 默认会把**连本机 8100 的请求也丢给代理** → 代理拒绝/中止连接
-#   → WinError 10053 → 相机服务"不可达"、11 条 vision 用例整片红。
-#   项目里早就把这条写进纪律（真机脚本必须禁代理），但生产代码这里一直没做 —— 现在补上。
-_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
 def _request(method: str, path: str, body: Optional[dict] = None,
              timeout: Optional[float] = None, base: Optional[str] = None) -> Tuple[int, Any, Optional[str]]:
     """返回 (status, 解析后的内容, 错误信息)。
@@ -80,7 +74,26 @@ def _request(method: str, path: str, body: Optional[dict] = None,
 
     ★ 一律不抛异常: 调用方(代理接口)只需要把错误原样透给前端,
       后端不该因为"相机服务没开"而返回 500 堆栈。
+
+    ★ B1 只读指标：本函数只做「计时 + 计数」，真正的请求体在 `_request_once`
+      （原实现逐字搬过去，一行语义没改）。往返耗时只统计**拿到 HTTP 响应**的调用
+      —— 连不上/超时的那些进 `vision.http_fail`，不冒充"正常延迟"。
     """
+    t0 = time.perf_counter()
+    st, data, err = _request_once(method, path, body, timeout, base)
+    metrics.incr("vision.http_calls")
+    metrics.text("vision.last_path", path)
+    if st != 0:
+        metrics.stat("vision.http_rt_ms", (time.perf_counter() - t0) * 1000.0)
+    else:
+        metrics.incr("vision.http_fail")
+        metrics.text("vision.last_error", err or "")
+    return st, data, err
+
+
+def _request_once(method: str, path: str, body: Optional[dict] = None,
+                  timeout: Optional[float] = None,
+                  base: Optional[str] = None) -> Tuple[int, Any, Optional[str]]:
     url = (str(base).rstrip("/") if base else base_url()) + path
     data = None
     headers = {"Accept": "*/*"}

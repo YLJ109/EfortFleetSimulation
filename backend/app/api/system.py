@@ -27,7 +27,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -39,7 +40,10 @@ from app.core.safety_config import load_safety, save_safety
 from app.db import crud
 from app.db.database import SessionLocal
 from app.services.collector import collector
+from app.services import daily_report
+from app.services import metrics
 from app.services.events import emit as emit_event
+from app.services.hold_state import hold_state
 from app.services.hub import hub
 from app.services.motion import motion
 from app.services.runmode import runmode
@@ -673,3 +677,175 @@ def api_info():
         "docs": "/docs",
         "ws": "/ws/pose",
     }
+
+
+# ---------------------------------------------------------------- 只读观测件（E2 / E5′）
+@router.get("/metrics/hold-state")
+def api_hold_state():
+    """★ E5′「固定相机反用法」：最近一轮送检帧的**持件/吸空证据**（三档）+ 历史。
+
+    只读、不要求控制令牌 —— 观测不属于控制。判据唯一实现见
+    `app/services/hold_state.py`（同屏同源：这张卡与 3D 里"推断"用的是同一份 state）。
+    """
+    return hold_state.state()
+
+
+@router.get("/metrics/platform")
+def api_platform_metric():
+    """立足面高度（D5′：前端 three/cell.js 与后端 A1 扫掠必须读**同一个数**）。"""
+    cfg = get_config()
+    safety = cfg.get("safety", default=None) or {}
+    hold = cfg.get("hold_state", default=None) or {}
+    return {
+        "platform_height_mm": float(safety.get("platform_height_mm", 0.0) or 0.0),
+        "hold_state_enabled": bool(hold.get("enabled", True)),
+        "area_ratio_max": float(hold.get("area_ratio_max", 2.0) or 2.0),
+    }
+
+
+# ---------------------------------------------------------------- ★ B1：实时指标（只读）
+def _live(value: Any, unit: str, source: str, desc: str = "",
+          note: str = "") -> Dict[str, Any]:
+    """请求时刻**直接从真实结构读**的四元组（不经过计数器）。"""
+    return {"kind": "live", "value": value, "unit": unit, "ts": _now_iso(),
+            "source": source, "measured": value is not None,
+            "desc": desc or "读取时刻的真实结构值", "note": note}
+
+
+@router.get("/metrics")
+def api_metrics():
+    """★ B1（B 批·可观测性）：进程级实时指标（**只读**，不要求控制令牌）。
+
+    与 `/api/system/health`、`/api/rc-status`、`/metrics/hold-state` 同一条只读
+    口径：观测不属于控制。每一项都是「值 + 单位 + 时间戳 + 来源」四元组；
+    本进程启动以来没采到过样 ⇒ **value=null + note 如实写「没测」** ——
+    「0」与「没测」必须能区分（§5.5 铁律③，绝不假显示）。
+
+    唯一埋点清单见 `app/services/metrics.py` 顶部 docstring；
+    ws 在线数/积压、run 登记数这类**没有计数器**的项，改为请求时刻直接读
+    真实结构（`hub.count()/hub.pending()`、`control._RUN_ACTIVE`），kind="live"。
+    """
+    snap = metrics.snapshot()
+    uptime = time.time() - _START
+
+    # —— 线程池 / 执行登记：直接读真实结构（唯一事实来源 = api/control.py）——
+    from app.api import control as control_api      # 延迟导入：避免模块级循环
+    with control_api._RUN_CANCEL_LOCK:
+        active_runs = list(control_api._RUN_ACTIVE.keys())
+        progress_entries = len(control_api._RUN_PROGRESS)
+        last_run_id = control_api._LAST_RUN_ID
+
+    # —— 事件写入速率：计数 ÷ 运行秒数（**自启动以来的平均**，不是滑动窗口 —— 如实标注）
+    ev_writes = snap["event.writes"]["value"]
+    rate = _live(None, "条/秒", "派生：event.writes ÷ uptime_sec",
+                 note="没测：尚无任何事件写入样本")
+    if ev_writes:
+        rate = _live(round(float(ev_writes) / max(1.0, uptime), 4), "条/秒",
+                     "派生：event.writes ÷ uptime_sec",
+                     note="自启动以来的平均值，非滑动窗口（没做窗口，就不装作有）")
+
+    return {
+        "time": _now_iso(),
+        "uptime_sec": int(uptime),
+        "groups": {
+            "collector": {
+                "loop_period_ms": snap["collector.loop_period_ms"],
+                "loop_ms": snap["collector.loop_ms"],
+                "read_fail_streak": snap["collector.read_fail_streak"],
+                "configured_read_hz": _live(
+                    float(get_config().sampling.get("read_hz", 10) or 10), "Hz",
+                    "config/robot.yaml sampling.read_hz", desc="配置的目标读取频率（不是实测）"),
+            },
+            "modbus": {
+                "read_pose_rt_ms": snap["modbus.read_pose_rt_ms"],
+                "read_pose_fail": snap["modbus.read_pose_fail"],
+                "read_regs_rt_ms": snap["modbus.read_regs_rt_ms"],
+                "read_regs_fail": snap["modbus.read_regs_fail"],
+            },
+            "ws": {
+                "clients_total": _live(hub.count(), "个", "hub.count()",
+                                       desc="在线 WS 客户端总数（pose + events 两条流）"),
+                "clients_pose": _live(hub.count("pose"), "个", "hub.count('pose')"),
+                "clients_events": _live(hub.count("events"), "个", "hub.count('events')"),
+                "backlog_clients": _live(hub.pending(), "个", "hub.pending()",
+                                         desc="有未发出积压帧的客户端数",
+                                         note="背压设计每客户端至多积压 1 帧（新帧覆盖旧帧）"),
+                "broadcast_enqueue_ms": snap["ws.broadcast_enqueue_ms"],
+                "broadcast_frames": snap["ws.broadcast_frames"],
+            },
+            "runs": {
+                "active_runs": _live(len(active_runs), "个",
+                                     "api/control._RUN_ACTIVE（请求时刻直接读）"),
+                "active_run_ids": _live(active_runs, "-",
+                                        "api/control._RUN_ACTIVE（请求时刻直接读）"),
+                "progress_entries": _live(progress_entries, "条",
+                                          "api/control._RUN_PROGRESS（含已结束的终态）"),
+                "last_run_id": _live(last_run_id, "-", "api/control._LAST_RUN_ID",
+                                     note="本进程还没有过执行登记（跑过一次执行后才有值）"
+                                          if last_run_id is None else ""),
+                "queue_len": _live(None, "个", "不适用",
+                                   note="★ 没有队列：/control/run-file 每次执行**直接起守护线程**"
+                                        "（见 api/control.py::api_run_file），不存在排队结构"),
+                "thread_pool_tokens": _live(
+                    int(os.environ.get("EFORT_THREAD_POOL", "96")), "个",
+                    "main.py anyio 线程池上限（env EFORT_THREAD_POOL，与启动配置同源）",
+                    note="启动时设定的值；anyio 版本差异导致设定失败时实际仍是默认 40"
+                         "（以启动日志为准）"),
+            },
+            "vision": {
+                "http_rt_ms": snap["vision.http_rt_ms"],
+                "http_calls": snap["vision.http_calls"],
+                "http_fail": snap["vision.http_fail"],
+                "last_path": snap["vision.last_path"],
+                "last_error": snap["vision.last_error"],
+            },
+            "events": {
+                "writes": snap["event.writes"],
+                "write_fail": snap["event.write_fail"],
+                "write_ms": snap["event.write_ms"],
+                "write_rate": rate,
+                "backlog": _live(None, "条", "不适用",
+                                 note="★ 没有队列：emit 是**同步落库**（见 services/events.py），"
+                                      "写入耗时看 write_ms"),
+            },
+        },
+    }
+
+
+# ---------------------------------------------------------------- ★ E6：机器人自述 · 每天一页现场日报
+@router.get("/daily-report")
+def api_daily_report(date: Optional[str] = Query(
+        None, description="本地日期 YYYY-MM-DD，缺省为今天；时区口径见返回的 timezone 字段")):
+    """★ E6 现场日报（**只读**，不需要控制令牌 —— 与 `/api/twin/residual`、
+    `/api/sorting/cells` 同口径：观测不属于控制）。
+
+    每个数字都由结构化数据代入固定模板（服务/表/端点级的 `source` 逐节标注）；
+    取不到写「无此项数据」，**不塌成 0**；到位自证 / 报警台账 / 一格三证 是
+    **本机本次会话**的进程内数据，日报里如实注明。
+    零 LLM（本轮先出纯模板版）；零下发（生成日报不是控制动作）。
+    返回 `markdown` 为可直接打印的正文，`consistency.inconsistent` 为数字一致性
+    自检结果 —— **不为空就必须显示出来**（将来接 LLM 讲解员时这条钉子继续生效）。
+    """
+    try:
+        return daily_report.build_report(date=date)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+
+
+@router.get("/daily-report.md")
+def api_daily_report_md(date: Optional[str] = Query(None)):
+    """同一份日报的纯 markdown 出口（可打印贴墙 / 可归档）。
+
+    Content-Type 明确为 `text/markdown; charset=utf-8`；inline 展示，
+    浏览器另存为时文件名 `daily-report-<date>.md`。
+    """
+    try:
+        rep = daily_report.build_report(date=date)
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e))
+    return PlainTextResponse(
+        rep["markdown"],
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition":
+                 'inline; filename="daily-report-%s.md"' % rep["date"]},
+    )

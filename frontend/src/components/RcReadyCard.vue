@@ -18,6 +18,8 @@ import { useAuthStore } from "../stores/auth.js";
 import { useRcReadyStore } from "../stores/rcReady.js";
 import { useRobotStore } from "../stores/robot.js";
 import { useExecStore } from "../stores/exec.js";
+import { SPEED_DEV_TOL } from "../core/safetyConst.js";   // ★ C3：速度偏差提示档（唯一出处）
+import ParamQuad from "./ParamQuad.vue";   // ★ C3：当前+目标+偏差+短趋势的唯一实现
 
 const auth = useAuthStore();
 const rc = useRcReadyStore();
@@ -36,22 +38,33 @@ watch(() => rc.readyTick, (n) => {
   if (n > 0) exec.loadPoints();
 });
 
-/** 状态行：ok=true 绿（允许），false 红（阻碍点动）。 */
+/**
+ * 状态行：ok=true 绿（允许），false 红（阻碍点动）。
+ *
+ * ★★ C3（方案 §C3「就绪卡片：四要素逐项各自当前 + 期望」）：每行补 `want`（期望值）。
+ *   原来只有"当前 + 一个红/绿"，红的时候**不告诉操作员应该是什么**，
+ *   于是"程序 ✗"这种行要靠人背口径才知道"期望是 210 且 RUN=1"。
+ *   期望值在**不满足时**才显示（满足时重复一遍"上电：上电"是噪音，不是信息）。
+ *   ★ 判据仍然只有后端那一份（`snapshot_ready` / rc.ready），这里只是把期望写清楚。
+ */
 const rows = computed(() => {
   if (!rc.ok || !rc.bits) return [];
   const b = rc.bits;
+  const svc = rc.snap && rc.snap.service_program;
   return [
-    { k: "双闸", v: rc.realEnabled ? "已开启" : "未开启", ok: rc.realEnabled },
-    { k: "档位", v: rc.modeText, ok: rc.joggable },
-    { k: "伺服", v: b.servo ? "上电" : "未上电", ok: !!b.servo },
-    { k: "报警", v: b.alarm ? ("码 " + rc.snap.alarm1 + "/" + rc.snap.alarm2) : "无", ok: !b.alarm },
-    { k: "急停", v: b.estop ? "按下" : "未按下", ok: !b.estop },
+    { k: "双闸", v: rc.realEnabled ? "已开启" : "未开启", want: "已开启", ok: rc.realEnabled },
+    { k: "档位", v: rc.modeText, want: "AUTO / 远程", ok: rc.joggable },
+    { k: "伺服", v: b.servo ? "上电" : "未上电", want: "上电", ok: !!b.servo },
+    { k: "报警", v: b.alarm ? ("码 " + rc.snap.alarm1 + "/" + rc.snap.alarm2) : "无",
+      want: "无（先停机再清）", ok: !b.alarm },
+    { k: "急停", v: b.estop ? "按下" : "未按下", want: "未按下", ok: !b.estop },
     // ★★ 2026-10-12 修正（真 bug 同源）：原判据 `b.prog_loaded && b.run` 在**正常运行态**
     //   （prog=210 / run=1 / prog_loaded=0）会显示"程序 ✗" —— 与后端 `ready` 的同一处错。
     //   正确：程序号 = 常驻服务程序 且 **运行位 = 1**（"已加载"位 RUN 起来后会落下）。
     { k: "程序", v: rc.progText,
+      want: (svc ? svc : "服务程序") + " 且 RUN=1",
       ok: !!(rc.snap && rc.snap.prog === rc.snap.service_program && b.run) },
-    { k: "点动", v: rc.jogTrig ? "上一发收尾中" : "触发位空闲", ok: !rc.jogTrig },
+    { k: "点动", v: rc.jogTrig ? "上一发收尾中" : "触发位空闲", want: "触发位空闲", ok: !rc.jogTrig },
   ];
 });
 
@@ -190,7 +203,24 @@ function _failedSteps() {
       <div v-for="row in rows" :key="row.k" class="row">
         <span class="k">{{ row.k }}</span>
         <span class="v" :style="{ color: row.ok ? 'var(--ok)' : 'var(--err)' }">{{ row.v }}</span>
+        <!-- ★ C3：不满足时才把"期望值"写出来（满足时再复述一遍是噪音）。
+             红 + 「应为 X」= 不用背口径就知道差在哪一条。 -->
+        <span v-if="!row.ok" class="want">应为 {{ row.want }}</span>
       </div>
+
+      <!-- ★★ C3（方案 §C3 第一行）：速度「设定 ↔ 40003 实读」四元组上屏。
+           ★ 目标一侧 = 右上角滑块（写入 40103），**控制器不回读 40103** —— 来源标签如实写明；
+           ★ 趋势 = 前端 60s 环形缓冲（App 的 1s 时钟采样），不为趋势新增后端存储。 -->
+      <ParamQuad class="pq-speed" label="速度"
+                 :current="rc.snap ? rc.snap.speed_pct : null"
+                 :target="exec.speed"
+                 cur-source="控制器 40003 实读"
+                 tgt-source="滑块设定（写入 40103·无回读）"
+                 unit="%" :decimals="0" :warn-dev="SPEED_DEV_TOL"
+                 trend-key="speed" :trend-window-ms="60000" :trend-domain="[0, 100]"
+                 :as-of-now="rc.clk" :stale="rc.stale" target-null-text="未设定" />
+      <div class="small">偏差 ≥ {{ SPEED_DEV_TOL }} 个百分点时的排查口径：① 常驻程序 210 内
+        `MJOINT` 是否 v100perc；② 示教器全局速度倍率是否 100%。（实读 ≈ 设定 ÷ 2 = 控制器侧乘了 50%）</div>
 
       <div v-if="!rc.realEnabled" class="small" style="margin-top:6px">
         真实下发未开启：后端处于模拟模式，点动只走仿真。开双闸见系统自检 real_write 项。
@@ -279,4 +309,8 @@ function _failedSteps() {
 }
 .link-btn:hover:not(:disabled) { color: var(--fg, #e6edf3); border-color: var(--accent); }
 .link-btn:disabled { opacity: .5; cursor: not-allowed; }
+/* ★ C3：期望值只在**不满足**时出现（红 + 「应为 X」，不用背口径就知道差哪一条）。
+   文字载体优先，颜色只是强化（C5 双编码口径）。 */
+.row .want { font-size: 11px; color: var(--warn, #d48806); margin-left: auto; }
+.pq-speed { display: flex; margin-top: 8px; }
 </style>

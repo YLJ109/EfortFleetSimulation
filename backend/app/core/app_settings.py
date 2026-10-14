@@ -18,6 +18,9 @@ UI 可编辑配置：`config/app_settings.json`（**稀疏覆盖层**）。
   单个字段改回 yaml 原值也会自动从覆盖层消失（这就是"逐字段重置"）。
 - 合并规则：dict 递归合并；**list 整体替换**（关节限位这类数组不能逐元素合，否则删除一项会删不掉）。
 - 写盘：先写 `.tmp` 再 `os.replace`，原子替换，断电不会留下半个文件。
+- 路径可被环境变量 `EFORT_SETTINGS_PATH` 覆盖（**不设就是 `config/app_settings.json`，与历史一致**）；
+  存在的唯一理由是让**测试进程把覆盖层写到临时目录**，不再删生产那个真实文件
+  （AGENTS.md §5.5 的"第四项共享状态"）。
 
 ## schema 是唯一事实来源
 
@@ -57,7 +60,37 @@ from typing import Any, Dict, List, Optional
 
 from app.core.config import CONFIG_PATH, project_root
 
-SETTINGS_PATH = os.path.join(project_root(), "config", "app_settings.json")
+# ★★ 生产口径（改动需负责人点头）：界面改的配置默认落在 <项目根>/config/app_settings.json。
+#    这个相对路径写死在这里，是因为它是"配置覆盖层唯一事实来源的位置"——
+#    改了它，界面保存的是 A 文件、后端读的是 B 文件，现场表现就是"改了没生效"。
+PRODUCTION_SETTINGS_REL = os.path.join("config", "app_settings.json")
+PRODUCTION_SETTINGS_PATH = os.path.join(project_root(), PRODUCTION_SETTINGS_REL)
+
+
+def resolve_settings_path() -> str:
+    """覆盖层文件路径的**唯一解析入口**（由环境变量 `EFORT_SETTINGS_PATH` 覆盖）。
+
+    - **未设该环境变量 → 逐字节等于历史默认值** `project_root()/config/app_settings.json`
+      （生产口径，见 `PRODUCTION_SETTINGS_REL`）。
+    - 设了就用它：绝对路径**原样**使用；相对路径按**项目根**解析（与默认路径同一套解析风格），
+      并做一次 `normpath` —— 免得写出 `D:\root\tmp_overlay/app_settings.json` 这种混合分隔符。
+    - ★ 为什么要这个开关：这个文件过去只是**一个硬编码的模块级常量**，于是它是测试与生产之间的
+      **第四项共享状态**（另三项见 AGENTS.md §5.5：`EFORT_DB_URL` / `EFORT_SIMULATE` /
+      `EFORT_LOGS_DIR`）。测试靠"每个用例前后删掉那个真实文件"来保证干净起点，
+      并发跑两个 pytest 就会同时读写同一个真实文件 → 随机假故障。
+      现在测试进程把覆盖层写到临时目录，**生产文件不再被测试删除**。
+    """
+    env = (os.environ.get("EFORT_SETTINGS_PATH") or "").strip()
+    if env:
+        if os.path.isabs(env):
+            return env
+        return os.path.normpath(os.path.join(project_root(), env))
+    return PRODUCTION_SETTINGS_PATH
+
+
+# ★ 模块级常量保持**可变**：所有读写函数在调用时才读这个全局名，
+#   所以运行期 monkeypatch（`app_settings.SETTINGS_PATH = ...`）依旧有效。
+SETTINGS_PATH = resolve_settings_path()
 SETTINGS_VERSION = 1
 
 _IP_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")

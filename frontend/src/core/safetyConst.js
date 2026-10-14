@@ -25,6 +25,15 @@ export const SPEED_DEFAULT = 10;
 export const JOG_SPEED_MIN = 5; // °/s
 export const JOG_SPEED_MAX = 10; // °/s
 
+/**
+ * ★ C3：速度「设定（40103）↔ 实读（40003）」的**提示容差**，单位 = 百分点。
+ *   ★ 这是**提示档**，不是真机安全限，也不参与任何互锁。
+ *   现场口径（AGENTS.md）：`40103 == 40003` 才是 1:1 直通；偏差到本量级就值得去查
+ *   ① 常驻程序 210 里 `MJOINT` 用的是不是 v100perc、② 示教器全局速度倍率是不是 100%。
+ *   唯一出处：顶栏（App.vue）与真机链路卡（RcReadyCard）都引用这里，不各写一个 5。
+ */
+export const SPEED_DEV_TOL = 5;
+
 export const DEFAULT_LOCKED_JOINTS = Object.freeze([1, 2, 3, 4, 5]);
 export const DEFAULT_ONLY_JOINT = 6;
 export const JOINT_LOCK_TOL_DEG = 0.5;

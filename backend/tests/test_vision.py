@@ -462,7 +462,7 @@ def test_execute_rule_runs_program_when_all_allowed(client, fake_camera, monkeyp
         orig = motion.command
         # ★ 接受 abort_check 关键字：execute_rule 现在会传中止判据
         #   （运行中关闭 auto_execute 开关可立即停下发），mock 必须兼容该签名。
-        motion.command = lambda joints, sp=100, dw=0, abort_check=None: (
+        motion.command = lambda joints, sp=100, dw=0, abort_check=None, **_kw: (
             calls.append(([float(x) for x in joints], sp)), {"ok": True,
                                                              "mode": "simulate"})[1]
         try:

@@ -80,3 +80,93 @@ export function chipTitle(s) {
     : "安全围栏：距围栏内表面的最小余量";
   return (s && s.source === "ghost") ? base + "（按残影预演的目标位姿）" : base;
 }
+
+// =====================================================================
+// A6 评估健康（"这个数现在还可信吗"）—— ★ 三态，绝不塌成布尔
+//
+// 为什么必须有这一块：围栏余量是**渲染循环里**逐帧算的，页面隐藏 / WebGL 上下文
+// 丢失时循环会停（这是"黑屏第一根因"的修法，不能回退）。循环一停，
+// `safety.last` 就**冻在最后一帧**上 —— 于是界面可以继续显示"安全"，
+// 而真实机器人此刻正在撞台面。这属于 §5.5 铁律③「未知不得塌成布尔」。
+//
+// 三态口径（与后端 `safety_guard._freshness` 同一套词表：never / fresh / stale，
+// 前端多一档 stopped 用于"确定已经停摆 >5s"的显式提示）：
+//   never   从没评估过（刚打开页面 / 3D 还没起来）
+//   fresh   < 2s      正常
+//   stale   2–5s      可疑：读数可能过期（后台标签页 timer 被浏览器节流到 ≥1s）
+//   stopped > 5s      评估已停摆：**上一帧的"安全"一律不算数**
+// =====================================================================
+
+export const FRESH_MAX_MS = 2000;
+export const FRESH_STOP_MS = 5000;
+
+export const HEALTH_LABEL = {
+  never: "未开始", fresh: "实时", stale: "延迟", stopped: "已停止",
+};
+
+/** 距离上次评估的毫秒数 → 三态（+ never）。age 为 null/NaN/负数都归 never，不许猜新鲜。 */
+export function freshState(ageMs) {
+  if (ageMs === null || ageMs === undefined || !Number.isFinite(ageMs) || ageMs < 0) {
+    return "never";
+  }
+  if (ageMs < FRESH_MAX_MS) return "fresh";
+  if (ageMs < FRESH_STOP_MS) return "stale";
+  return "stopped";
+}
+
+/**
+ * 评估健康 → 界面话术。
+ * @param {{ageMs:number|null, ticks?:number, dual?:boolean}} h
+ * @returns {{state:string, ok:boolean, label:string, notice:string, title:string}}
+ */
+export function evalHealth(h) {
+  const age = (h && h.ageMs);
+  const state = freshState(age);
+  const sec = Number.isFinite(age) ? Math.round(age / 100) / 10 : null;
+  const notice = {
+    never: "安全评估尚未开始 · 此刻没有可读的余量",
+    stale: `安全评估已延迟 ${sec === null ? "?" : sec}s · 读数可能已过期`,
+    stopped: `安全评估已停止 ${sec === null ? "?" : sec}s · 数据不可信（上一帧的"安全"不算数）`,
+  }[state];
+  return {
+    state,
+    ok: state === "fresh",
+    label: HEALTH_LABEL[state],
+    notice: state === "fresh" ? "" : notice,
+    title: `评估次数 ${h && h.ticks ? h.ticks : 0}${h && h.dual ? " · 后端独立评估已接入" : ""}`,
+  };
+}
+
+// =====================================================================
+// C1 语义映射：状态 → **颜色语义键**（值在 utils/colorSemantics.js，这里只给"是哪一类"）
+//
+// ★ 为什么放这儿：状态片 / 调试面板徽标 / 顶部报警条读的是**同一份**评估结果，
+//   "哪个状态该用哪种语义"也必须只有一份（§5.5 铁律④「同一屏同一结论必须同源」）。
+// ★ 这里**不含任何颜色字面量** —— 颜色只在 colorSemantics.js 里定义一处。
+// ★ `hit` 是 `danger` 的极端形态（同一语义，靠闪烁 + 角标分级），不是第五种颜色。
+// ★ 兜底与 `safetyLabel()` 保持同一条口径：认不得的状态回退"安全"，
+//   绝不回退成空白/回退成"未知色"去乱报（未知走下面 healthSemantic 那一条轴）。
+// =====================================================================
+
+export const STATE_SEMANTIC = { safe: "normal", warn: "warn", danger: "danger", hit: "danger" };
+
+/** 围栏状态 → 语义键（normal / warn / danger）。 */
+export function safetySemantic(s) {
+  const st = (s && s.state) || "safe";
+  return STATE_SEMANTIC[st] || "normal";
+}
+
+/** 评估健康 → 语义键：不新鲜（never / stale / stopped）一律 `unknown`。 */
+export function healthSemantic(h) {
+  return h && h.ok === true ? "" : "unknown";
+}
+
+/**
+ * 这个读数是不是**推断来的**：`source === "ghost"` 表示量的是**残影预演的目标位姿**
+ * （"要去的地方会不会撞"），不是实体机的实测位姿 → 该拿「推断」的冗余编码
+ * （虚线 + 斜纹 + 文字后缀「（流程推断）」），而不是和实测读数长得一模一样。
+ */
+export function isInferredSource(s) {
+  return !!s && s.source === "ghost";
+}
+

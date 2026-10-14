@@ -615,7 +615,7 @@ def api_move(body: MoveIn, tok: str = Depends(require_control)):
                 raise HTTPException(409, detail=_perr)
             for _nm, _jt in _pre0:
                 _rr0 = motion.command([float(v) for v in _jt], clamp_speed(body.speed_pct),
-                                      body.dwell_ms)
+                                      body.dwell_ms, source=_nm)
                 if not _rr0.get("ok"):
                     raise HTTPException(502, detail="原位安全路径「%s」失败：%s"
                                         % (_nm, _rr0.get("error")))
@@ -627,10 +627,12 @@ def api_move(body: MoveIn, tok: str = Depends(require_control)):
                     pass
 
     res = motion.command([float(x) for x in target], clamp_speed(body.speed_pct),
-                         body.dwell_ms)
+                         body.dwell_ms,
+                         source=point_name or ("点位#%s" % body.point_id if body.point_id else "显式目标"))
     # ★ 原位安全路径：`post` 段（只有"原位切面"才有 —— 切完回原位）
     for _nm, _jt in _post0:
-        motion.command([float(v) for v in _jt], clamp_speed(body.speed_pct), body.dwell_ms)
+        motion.command([float(v) for v in _jt], clamp_speed(body.speed_pct), body.dwell_ms,
+                       source=_nm)
     emit_event("control", "info" if res.get("ok") else "warn",
                "control.move",
                f"下发目标到位（{res.get('mode', '?')}）" if res.get("ok")
@@ -2045,7 +2047,8 @@ def _run_file_job(ctx, body: RunFileIn, tok: str, run_id: str, disp_name: str) -
                 except Exception:                      # noqa: BLE001
                     pass
             r = motion.command([float(x) for x in target], sp, dw,
-                               abort_check=lambda: _is_cancelled(run_id))
+                               abort_check=lambda: _is_cancelled(run_id),
+                               source=_mst_nm or "文件步骤")
             total_ms += dw + 300
             results.append({
                 "index": st["index"], "name": st.get("name"),
