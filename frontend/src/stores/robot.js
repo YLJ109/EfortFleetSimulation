@@ -36,6 +36,8 @@ import { connectWs } from "../net/ws.js";
 import { initRobots, loadOfficialModel } from "../three/manager.js";
 import { resolvePose } from "./poseAuthority.js";
 import { useRcReadyStore } from "./rcReady.js";
+import { useFleetStore } from "./fleet.js";
+import { HOME_VIEW } from "../tabs.js";
 
 export const DEFAULT_LIMITS = [
   { name: "J1", min: -170, max: 170 },
@@ -101,7 +103,7 @@ export const useRobotStore = defineStore("robot", {
     telemetryStale: false,
     simQ: zeroQ(),             // 模拟仿真页的本地教学模型（与遥测无关）
     selIdx: 0,
-    activeView: "live",        // live | sim | point | program | ops | settings | about
+    activeView: HOME_VIEW,       // fleet（机房大屏，默认页）| point | program | ops | settings
   }),
 
   getters: {
@@ -265,6 +267,15 @@ export const useRobotStore = defineStore("robot", {
           // 经 WS 注入控制器寄存器快照 → rcReady store（替代 /rc-status 轮询）。
           // 回调内惰性取 store，避免顶部循环依赖。
           try { useRcReadyStore().ingest(rc); } catch (e) { /* 忽略 */ }
+        },
+        // 机房 12 台：合批姿态帧（20Hz）与汇总帧（1Hz）。
+        // ★ 姿态只写 net/fleetBuffer（非响应式），不进 pinia state ——
+        //   12 台 × 6 轴 × 20Hz 写响应式，大屏那 12 张卡片会跟着每帧重算。
+        onFleetPose: (robots) => {
+          try { useFleetStore().ingestPose(robots); } catch (e) { /* 忽略 */ }
+        },
+        onFleetStatus: (s) => {
+          try { useFleetStore().ingestSummary(s); } catch (e) { /* 忽略 */ }
         },
       });
     },

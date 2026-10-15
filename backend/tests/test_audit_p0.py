@@ -228,7 +228,8 @@ def test_guard_stale_danger_fails_safe(client):
     from app.services import safety_guard as g
     g.update("danger", "z1", "主工作区")
     with g._lock:
-        g._latest["ts"] = time.time() - 9999      # 人为制造过期
+        # P6 起状态按台存：单机链路的键是 g.SINGLE_ID（"MAIN"）
+        g._latest[g.SINGLE_ID]["ts"] = time.time() - 9999      # 人为制造过期
     allowed, reason, _snap = g.check()
     assert allowed is False
     assert "过期" in reason and "danger" in reason

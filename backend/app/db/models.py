@@ -24,6 +24,9 @@ class PoseHistory(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    # 机房 12 台后，历史曲线必须按机器人分开存；单机时期（含本列加入前的旧行）
+    # 一律归到 MAIN —— 旧数据不是"不知道是谁"，而是"就是那台 ER8-700H"。
+    robot_id: Mapped[str] = mapped_column(String(16), default="MAIN", index=True)
     j1: Mapped[float] = mapped_column(Float, default=0.0)
     j2: Mapped[float] = mapped_column(Float, default=0.0)
     j3: Mapped[float] = mapped_column(Float, default=0.0)

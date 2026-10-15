@@ -6,6 +6,7 @@ import { onMounted, onBeforeUnmount, ref, computed, watch, nextTick } from "vue"
 import { useRobotStore } from "./stores/robot.js";
 import { useSafetyStore } from "./stores/safety.js";
 import { useUiStore } from "./stores/ui.js";
+<<<<<<< HEAD
 import {
   switchView, renderFrame, resizeView, onSafety, applyRobotPose, disposeAll, onGlState,
   startIdleSafetyEval, stopIdleSafetyEval,
@@ -33,16 +34,29 @@ import GuideBar from "./components/GuideBar.vue";
 import StatusStrip from "./components/StatusStrip.vue";
 import { announce, unlockAudio, annCfg } from "./services/announcer.js";
 import { BRAND, brandSubtitle } from "./brand.js";
+=======
+import { useFleetStore } from "./stores/fleet.js";
+import { switchView, renderFrame, resizeView, onSafety, applyRobotPose, applyFleetPoses, disposeAll, onGlState } from "./three/manager.js";
+import { poseMap } from "./net/fleetBuffer.js";
+import { fleetBanner as fleetBannerOf } from "./utils/fleetCards.js";
+import Icon from "./components/Icon.vue";
+import { useAuthStore } from "./stores/auth.js";
+import FleetView from "./components/FleetView.vue";
+import { announce, unlockAudio, announceOpen } from "./services/announcer.js";
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
 import {
   safetyText as safetyTextOf, safetySub as safetySubOf,
 } from "./utils/safetyLabels.js";
 import { useLinkStore } from "./stores/link.js";
 import { useExecStore } from "./stores/exec.js";
+<<<<<<< HEAD
 import { useRcReadyStore, NOT_READY_HINT } from "./stores/rcReady.js";
 import { useSorting3dStore } from "./stores/sorting3d.js";
 import { useMetricsStore } from "./stores/metrics.js";   // ★ B1：后端进程级指标（只读轮询）
 // ★ C3：关键参数的短趋势 = **纯前端环形缓冲**（不新增后端存储；方案 §C3「不做什么」）。
 import { sample as trendSample } from "./utils/paramTrend.js";
+=======
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
 import {
   resolveKey, isTypingTarget, tabKeyFor, SHORTCUT_BY_ID,
 } from "./shortcuts.js";
@@ -61,6 +75,7 @@ const cam = useCameraStore();   // ★ 2026-10-11 口径：相机/实时捕捉**
 // 链路自检（机器人/摄像头/示教器档位）：★ 由本组件做**唯一**的启停者，
 // 底栏状态灯与引导条都只是它的消费者 —— 两个轮询者必然出现自相矛盾的界面。
 const link = useLinkStore();
+<<<<<<< HEAD
 // ★ B1：后端进程级指标（GET /api/system/metrics，只读、不需令牌）。
 //   启停同样收敛在本组件（与 link 同一个闸门）—— 两个轮询者必然出现自相矛盾的界面。
 const metrics = useMetricsStore();
@@ -69,6 +84,11 @@ const metrics = useMetricsStore();
 //   面板内容仍是 RcReadyCard）—— 原来独立的 showLinkPanel / 切换按钮 / LinkPanel 浮窗已移除。
 //   ★ 同日第二轮：底部原「机器人」片与「真机链路」片**合并为一个「真机链路」片**
 //     （用户原话："底部有两个真机链路两个合并掉"），机器人链路内容迁入其面板。
+=======
+// 机房 12 台阵列（大屏）。★ 与单机层互斥：进大屏时单机那台/那座站台整层让位，
+// 两层同框会重叠成一团（见 three/manager.js 的 setFleetMode）。
+const fleet = useFleetStore();
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
 
 // ★ 权限相关的页面，没拿到权限时**不显示入口**（定义与门控逻辑见 src/tabs.js）：
 //   - needAuth  (点位执行 / 程序执行)：要有控制令牌（管理员或操作员都行）。
@@ -87,8 +107,7 @@ const safety = ref({ state: "safe", ratio: 1, clearance: 0, zoneId: "", zoneName
 //   顶部报警条与视口右下角的状态片读的是**同一份**评估结果，
 //   判据只能有一处 —— 否则两边的"危险/接近"表述会各自漂移。
 //   本组件只留报警条用到的两条；状态片在 components/SafetyChip.vue 里自己取。
-const safetyText = computed(() => safetyTextOf(safety.value));
-const safetySub = computed(() => safetySubOf(safety.value));
+//   两条都经下面的 banner 计算属性出去（机房大屏走另一套文案，见该处注释）。
 
 // ★★ A6 评估健康：三态 never / fresh / stale / stopped（判定见 utils/safetyLabels.js）。
 //   报警条在 stale/stopped 时**必须**改口说"数据不可信"，而不是继续显示上一帧的
@@ -97,16 +116,16 @@ const health = computed(() => safe.health || { state: "never", ok: false, notice
 const healthStalled = computed(() => !health.value.ok && health.value.state !== "never");
 
 // ---------- 控制权限（阶段 1） ----------
+// 登录框留在这里（它是全局遮罩，不属于任何一页）；"请求控制 / 释放"两个按钮
+// 已经搬到大屏标题条里，那边直接调 auth store 的 requestLogin()/logout()。
 const auth = useAuthStore();
 const asr = useAsrStore();
 const pw = ref("");
 const pwInput = ref(null);
-function requestControl() { auth.requestLogin(); }
 watch(() => auth.uiLogin, (v) => { if (v) nextTick(() => pwInput.value && pwInput.value.focus()); });
 async function doLogin() {
   if (await auth.login(pw.value)) { auth.closeLogin(); pw.value = ""; }
 }
-function releaseControl() { auth.logout(); }
 
 // ★★ 2026-10-11 用户口径：相机与「实时捕捉」**默认都关**（不再启动即开相机）；
 //   但**一旦拿到控制权限** → 自动开启「实时捕捉」+ 自动开启相机。
@@ -125,6 +144,7 @@ watch(() => auth.controlActive, (now, was) => {
 //   本组件只负责"取上下文 → 分派动作"，不在这里写任何键位判断 ——
 //   键盘是"按下去就出事"的东西，判据散在组件里没法断言。
 const exec = useExecStore();
+<<<<<<< HEAD
 
 // ★★ 2026-10-11（用户口径「**应该电脑的速度去执行**」）：**拖滑块 → 长流程下一步生效**。
 //   分拣 / 井字棋 / 文件执行 / AI 这类**长流程**原来是"点开始那一刻定速"的，
@@ -179,6 +199,8 @@ const speedDevTitle = computed(() => {
 //   现在装填与状态轮询收敛到本 store，由这里（App 级）驱动：拿到控制令牌即装填，
 //   之后**切页面不再隐藏**，各页共用同一份 3D 显示。
 const s3d = useSorting3dStore();
+=======
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
 
 /** 快捷键反馈提示（一次性，2 秒后自清）。 */
 const keyHint = ref("");
@@ -189,22 +211,22 @@ function flashKeyHint(text) {
   keyHintTimer = setTimeout(() => { keyHint.value = ""; }, 2000);
 }
 
+<<<<<<< HEAD
 /** 有弹层开着时 Esc/Enter 归弹层，不归机器人。
  *  ★ 2026-10-11：底部状态区默认开着「运行日志」（被动读数面板，不算弹层）——
  *    这里用 ui.popoverModal（"log" 除外），保证 Esc 仍能触发急停。 */
 const anyModalOpen = computed(() => !!auth.uiLogin || showAnnounce.value || ui.popoverModal);
+=======
+/** 有弹层开着时 Esc/Enter 归弹层，不归机器人。 */
+const anyModalOpen = computed(() => !!auth.uiLogin || announceOpen.value);
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
 
-/** 动作分派表：id → 处理函数。表里没有的 id 一律忽略（新增快捷键时不会静默失效）。 */
+/** 动作分派表：id → 处理函数。表里没有的 id 一律忽略（新增快捷键时不会静默失效）。
+ *  ★ 单页化后只剩三类动作：切模块（在下面 onKeydown 里）、急停、急停复位。
+ *    E（侧栏）/ Q（摄像头）/ 空格（程序执行）随其宿主页面一起移除，
+ *    判据与键位定义同步从 shortcuts.js 删掉 —— 留一个按下去什么都不发生的键，
+ *    比没有这个键更危险（操作员会在真需要它时怀疑整个键盘）。 */
 const KEY_ACTIONS = {
-  toggle_side() { ui.toggleSide(); },
-  toggle_camera() {
-    ui.toggleCamVisible();
-    flashKeyHint(ui.camVisible ? "摄像头画面：已显示" : "摄像头画面：已隐藏");
-  },
-  program_run_or_stop() {
-    exec.runOrAbort();
-    flashKeyHint(exec.running ? "程序：正在停止" : "程序：已请求运行");
-  },
   estop() {
     exec.doEstop();
     flashKeyHint("急停已下发 · 按 Enter 复位");
@@ -215,12 +237,11 @@ const KEY_ACTIONS = {
   },
   close_modal() {
     if (auth.uiLogin) auth.closeLogin();
-    else if (showAnnounce.value) showAnnounce.value = false;
-    else ui.closeStatusPopover();
+    else if (announceOpen.value) announceOpen.value = false;
   },
   submit_modal() {
     if (auth.uiLogin) doLogin();
-    else if (showAnnounce.value) showAnnounce.value = false;
+    else if (announceOpen.value) announceOpen.value = false;
   },
 };
 
@@ -268,26 +289,50 @@ function onKeydown(ev) {
 }
 
 // 报警条：按配置的 banner_min 决定最低触发级别
+<<<<<<< HEAD
 const showBanner = computed(() => {
   // ★ 停摆提示**不受** alarm.banner 开关影响：那个开关关的是"报警横幅"，
   //   而"此刻读数不可信"是数据完整性问题，操作员没有关掉"被蒙在鼓里"的选项。
   if (healthStalled.value) return true;
+=======
+const showBannerSingle = computed(() => {
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
   const a = safe.config && safe.config.alarm;
   if (!a || !a.banner) return false;
   const min = RANK[a.banner_min] ?? RANK.danger;
   return RANK[safety.value.state] >= min && RANK[safety.value.state] >= RANK.warn;
 });
+<<<<<<< HEAD
 const bannerClass = computed(() => (healthStalled.value ? "stalled" : safety.value.state));
 const bannerText = computed(() => (healthStalled.value ? health.value.notice : safetyText.value));
 const bannerSub = computed(() => (healthStalled.value
   ? `上一帧读数：${safetySub.value}（可能已过期）` : safetySub.value));
+=======
+
+// 报警条最终吃的那一份数据：单机页 = 围栏评估，机房大屏 = 12 台里最严重的那台。
+// ★ 大屏时**不去改 safety.value**：它每秒还要上报后端做下发互锁（见 reportLive），
+//   把 12 台的围栏等级灌进去，等于让别的机器去拦这一台的下发。
+const banner = computed(() => {
+  if (fleet.active) {
+    const f = fleetBannerOf(fleet.cards, fleet.summary);
+    return f ? { show: true, state: f.state, text: f.text, sub: f.sub }
+      : { show: false, state: "safe", text: "", sub: "" };
+  }
+  return {
+    show: showBannerSingle.value,
+    state: safety.value.state,
+    text: safetyTextOf(safety.value),
+    sub: safetySubOf(safety.value),
+  };
+});
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
 // ★ 状态片（chip）的显示开关已随组件一起搬到 components/SafetyChip.vue
 //   （它自己读 safe.config.alarm.chip），这里不再保留第二份。
 
 // ---------- 播报中心（分级音效 + 中文语音） ----------
-const showAnnounce = ref(false);
-const annOff = computed(() => !annCfg.value.enabled || (!annCfg.value.sound && !annCfg.value.voice));
-function toggleAnnounce() { showAnnounce.value = !showAnnounce.value; }
+// 面板与开关按钮搬到大屏标题条（components/FleetView.vue）；
+// 面板的开合状态放在 services/announcer.js 的 announceOpen 里，
+// 因为上面的 Esc 分派也要知道它（弹层开着时按键归弹层，不归急停）。
 
 // 后端事件总线（WS）→ 语音播报：warn 及以上才出声，info 只进历史
 // ★ P1-B6：事件帧已拆到 /ws/events，需带内出示控制令牌；未登录时不建连，
@@ -343,11 +388,38 @@ watch(() => auth.controlActive, (on) => {
 // /api/control/move 就能在危险状态下"服务端兜底"拒绝下发 —— 就算有人绕过界面
 // 直接调 API 也发不下去。断/弱网上报失败不影响使用，只是互锁失效（后端会记 warns）。
 let liveTimer = null;
+/** 围栏等级里只有这四档是"围栏判据"；alarm/offline 是控制器/链路状态，不参与互锁。 */
+const FENCE_STATES = ["safe", "warn", "danger", "hit"];
+
 async function reportLive() {
   // ★ 未登录不上报：POST /safety/live 挂着 require_control，没令牌必然 401。
   //   这里是每秒一次的轮询，不挡住的话控制台会被 401 刷满（登录后自然恢复）。
   if (!auth.controlActive) return;
   const s = safety.value;
+  const body = {
+    state: s.state || "safe",
+    zone_id: s.zoneId || "",
+    zone_name: s.zoneName || "",
+    clearance: +(s.clearance || 0).toFixed(4),
+    ratio: +(s.ratio || 1).toFixed(4),
+  };
+  if (fleet.active) {
+    // ★ 大屏模式：按**台**上报，且不再报单机那份。
+    //   原来这里每秒把单机围栏状态照旧发一次，而单机 3D 层在大屏下根本没在评估
+    //   —— 等于用一份陈旧数据给后端盖了个"刚刚确认过安全"的戳。
+    //   P6 之后互锁按 robot_id 查，单机那份在大屏下没有新鲜来源，就不该装作有。
+    const items = [];
+    for (const [id, st] of Object.entries(fleet.safetyById || {})) {
+      if (FENCE_STATES.includes(st)) items.push({ robot_id: id, state: st });
+    }
+    if (!items.length) return;               // 一台都还没评估出来：宁可不报，也不报"全安全"
+    await postLive({ items });
+    return;
+  }
+  await postLive(body);
+}
+
+async function postLive(payload) {
   try {
     // ★ apiUrl() 会自动补 /api 前缀，这里不要再写一遍，否则变成 /api/api/...（405）
     // ★ 审计修复 P0-3：后端已给 /safety/live 挂上 require_control，
@@ -355,13 +427,7 @@ async function reportLive() {
     await apiControl("/safety/live", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        state: s.state || "safe",
-        zone_id: s.zoneId || "",
-        zone_name: s.zoneName || "",
-        clearance: +(s.clearance || 0).toFixed(4),
-        ratio: +(s.ratio || 1).toFixed(4),
-      }),
+      body: JSON.stringify(payload),
     });
   } catch (e) { /* 后端不可用时静默 */ }
 }
@@ -411,6 +477,11 @@ watch(() => [auth.controlActive, auth.isAdmin], () => {
   if (!allowedKeys.value.includes(robot.activeView)) setView(HOME_VIEW);
 });
 
+// 进出机房大屏：切 3D 层（单机那台整层让位）+ 启停卡片定时器。
+// ★ 交给 store 而不是在这里直接调 setFleetMode：大屏关掉后卡片还每 250ms
+//   重算 12 张卡的话，纯属白烧 CPU（隐藏页照样在跑）。
+watch(() => robot.activeView, (v) => { fleet.setActive(v === "fleet"); });
+
 /** 恢复上次停留的页面（容器已由子组件在 mounted 时登记，此时切换是安全的）。 */
 function restoreView() {
   const v = ui.view;
@@ -432,6 +503,7 @@ function checkTtl() {
   // ★ 审计修复 P1-D8：同一个 1 秒时钟顺带扫一次遥测新鲜度。
   //   后端卡死时 WS 不一定断（TCP 还在），画面会定格但 connected 仍为 true。
   try { robot.sweepTelemetry(); } catch (e) { /* store 未就绪 */ }
+<<<<<<< HEAD
   // ★★ 2026-10-11：同一个 1 秒时钟再推两个"数据新鲜度"水位 —— 必须**无条件**推进，
   //   否则掉线时（link 停轮询 / 控制器 WS 帧停）水位冻结 → `stale` 永远算不出 true
   //   → 底栏挂着"旧绿"（最危险的假正常）。详见 stores/link.js::beat / rcReady.js::beat。
@@ -455,6 +527,11 @@ function sampleTrends() {
   if (!rc.stale && rc.snap) trendSample("speed", rc.snap.speed_pct);
   if (robot.connected && !robot.telemetryStale) trendSample("j6", robot.telemetry.q[5]);
   if (safe.health && safe.health.ok) trendSample("clearance", safe.last.clearance * 1000);
+=======
+  // 机房那 12 台的"帧还在不在来"用同一个 1 秒时钟判定（半开链路 / 后端卡死时，
+  // 大屏不能一直显示"在线·就绪"）。名单没拉到（后端刚起）也在这里补拉。
+  try { fleet.sweep(); } catch (e) { /* store 未就绪 */ }
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
 }
 
 let rafId = null;
@@ -480,6 +557,12 @@ function loop() {
   //   出现 applyRobotPose 调用。
   // ==========================================================================
   applyRobotPose(robot.displayQ);
+  // ==========================================================================
+  // 机房 12 台：姿态从**非响应式**帧缓冲里取（WS 20Hz 写、这里 60Hz 读），
+  // 与单机那条 displayQ 完全分开 —— 12 台的角度不经 pinia，卡片才不会每帧重算。
+  // 缓冲为空（机房没启动 / 还没收到第一帧）时 setPoses 什么都不做，画面停在零位。
+  // ==========================================================================
+  applyFleetPoses(poseMap());
   renderFrame();
 }
 
@@ -565,7 +648,11 @@ onMounted(async () => {
   //   相机与「真实监控」页的「实时捕捉」**默认都关**；两者都由用户手动开启（不需要权限），
   //   或"拿到控制权限"时由上面的 auth.controlActive watch 自动开启（幂等）。
   await safe.load();       // 拉取安全围栏配置并应用到 3D
-  switchView(HOME_VIEW);   // canvas 挂到 live 视图（restoreView 若不动作就停在这里）
+  // ★ 必须排在 safe.load() 之后：机房那 12 套围栏沿用单机层同一份阈值配置，
+  //   先建机房会拿到 null（围栏建得出来但永远不着色）。
+  await fleet.loadFleet();
+  fleet.setActive(robot.activeView === "fleet");
+  switchView(HOME_VIEW);   // canvas 挂到机房大屏（restoreView 若不动作就停在这里）
   restoreView();           // 恢复上次停留的页面：刷新后回到同一页
   startLoop();             // 渲染循环（隐藏页/上下文丢失时自行停帧）
   // ★★ A6：评估与渲染**解耦**。渲染循环隐藏即停（黑屏第一根因的修法，不许回退），
@@ -620,6 +707,8 @@ onBeforeUnmount(() => {
   //   继续在后台空转，连回一个已经销毁的页面，控制台一路红。
   try { robot.disconnect(); } catch (e) { /* 卸载阶段异常不阻塞其他清理 */ }
   try { exec.dispose(); } catch (e) { /* 同上 */ }
+  // 机房大屏的卡片定时器 + 帧缓冲：不关掉的话 HMR / 卸载后仍每 250ms 重算 12 张卡。
+  try { fleet.dispose(); } catch (e) { /* 同上 */ }
   link.stop();
   metrics.stop();      // ★ B1：指标轮询的 setInterval 也必须随组件卸载清掉（模块级句柄）
   s3d.stop();          // ★ 分拣 3D 的状态轮询同样必须停（否则卸载后仍在打后端）
@@ -635,6 +724,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div id="app">
+<<<<<<< HEAD
     <header id="topbar">
       <!-- 左侧 tab（由 tabs.js 的 side:"left" 决定） -->
       <div class="tabs-left">
@@ -731,6 +821,19 @@ onBeforeUnmount(() => {
            它们也走 v-show 保活（设置页填了一半切走再切回来，草稿不能丢）。 -->
       <SettingsView v-show="robot.activeView === 'settings'" />
       <AboutView v-show="robot.activeView === 'about'" />
+=======
+    <!-- ★ 2026-10-06 单页化：全局顶栏（品牌 / tab 导航 / 全局速度）、底栏三盏状态灯、
+         连接引导条**整体删除**。这个应用现在就是机房大屏一块屏，
+         标题条与 KPI 条由 FleetView 自己承载（见 components/FleetView.vue）。
+         被删掉的能力没有丢：控制授权与播报入口搬到大屏标题条右侧；
+         执行速度档位将随"作用域控制台"回来（P4），不再常驻顶栏。 -->
+    <div v-if="banner.show" id="safety-banner" :class="banner.state">
+      <span>{{ banner.text }}</span>
+      <span class="sa-sub">{{ banner.sub }}</span>
+    </div>
+    <div id="main">
+      <FleetView />
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
     </div>
 
     <!-- WebGL 上下文丢失：明确告知"正在恢复"，而不是让用户对着黑屏猜。
@@ -741,6 +844,7 @@ onBeforeUnmount(() => {
       </div>
     </transition>
 
+<<<<<<< HEAD
     <!-- 连接自检 / 操作引导：浮在 3D 视口底部上方（absolute 浮层，不占底栏、
          不挤 3D 视口高度，见 index.html #guide-zone 样式）。只报最高优先级一条。
          ★ B1 避让：底部「五选一」面板打开时（默认开「运行日志」），面板从底栏向上弹出，
@@ -751,12 +855,16 @@ onBeforeUnmount(() => {
 
     <!-- 快捷键反馈：只在按了键之后出现 2 秒。
          位置固定在 3D 视口底部居中偏上，不遮底栏状态灯，也不进主布局流。 -->
+=======
+    <!-- 快捷键反馈：只在按了键之后出现 2 秒，不常驻、不占布局。 -->
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
     <transition name="kh-fade">
       <div v-if="keyHint" id="key-hint" :class="{ lifted: !!ui.statusPopover }">
         <Icon name="keyboard" :size="13" /> {{ keyHint }}
       </div>
     </transition>
 
+<<<<<<< HEAD
     <!-- 底部状态区：状态片条（运行日志 / 摄像头 / 示教器 / 真机链路）+ 连接引导 + 控制区。
          ★ 顺序（左→右）：
              ① StatusStrip：状态片条 —— **任何情况都在**；点片开面板，点外部收起
@@ -828,6 +936,8 @@ onBeforeUnmount(() => {
     <!-- 播报中心设置面板 -->
     <AnnouncePanel :open="showAnnounce" @close="showAnnounce = false" />
 
+=======
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
     <!-- 控制权限登录（阶段 1） -->
     <div v-if="auth.uiLogin" class="modal-mask" @click.self="auth.closeLogin()">
       <div class="modal">

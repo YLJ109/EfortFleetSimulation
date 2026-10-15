@@ -179,19 +179,40 @@ ok("D exec.js 保留 P0-1 修复：invalidateTeach 存在且 applyTeach 无条�
   /invalidateTeach\s*\(/.test(execJs) &&
   /async\s+applyTeach\(\)[\s\S]*?await\s+this\.previewTeach\(\)/.test(execJs));
 
-// ---------- E. 沙盘迁移 ----------
-const simVue = read(rel("components/SimMonitor.vue"));
-ok("E SimMonitor 登记 override(owner=sim)", /setOverride\(\s*["']sim["']/.test(simVue));
-ok("E SimMonitor 离开时 clearOverride(sim)",
-  /clearOverride\(\s*["']sim["']\s*\)/.test(simVue));
-ok("E SimMonitor 无 applyRobotPose", !/applyRobotPose/.test(simVue.replace(/\/\/[^\n]*/g, "")));
+// ---------- E. 机房读数不走优先级仲裁 ----------
+// 单机那套"谁拥有显示姿态"的仲裁（demo / override / telemetry）是为三视图共用一张
+// 画布设计的。机房大屏不是：12 台的读数与 3D 一律直接读 net/fleetBuffer 的同一份
+// 帧缓冲。这里钉住"卡片/控制台没有偷偷去碰 poseAuthority"——一旦有人图省事让卡片
+// 读 robot.readoutQ，12 张卡就会全部显示**单机那台**的角度，而且画面看着还挺正常。
+const fleetCard = read(rel("components/FleetCard.vue"));
+const fleetConsole = read(rel("components/FleetConsole.vue"));
+ok("E FleetCard 不读 poseAuthority / readoutQ（单机仲裁与它无关）",
+  !/readoutQ|readoutTcp|poseAuthority/.test(fleetCard));
+ok("E FleetConsole 不读 poseAuthority（目标角自己算，读数来自卡片）",
+  !/readoutQ|readoutTcp|poseAuthority/.test(fleetConsole));
+ok("E FleetCard 的数值来自 fleetCards 的格式化函数", /fmtNum/.test(fleetCard));
 
-// ---------- F. RobotParamsCard ----------
-const cardVue = read(rel("components/RobotParamsCard.vue"));
-ok("F 卡片读 readoutQ/readoutTcp", /readoutQ/.test(cardVue) && /readoutTcp/.test(cardVue));
-ok("F 卡片定义 sourceLabel（模板引用的标签）", /sourceLabel/.test(cardVue));
-ok("F 卡片无直接姿态计算（不写优先级）",
-  !/telemetry\.|demo\.|override\./.test(cardVue.replace(/\/\/[^\n]*/g, "").replace(/\*[^\n]*/g, "")));
+// ---------- F. 机房姿态的唯一写者 ----------
+// 与 B 段同一套做法，只是对象换成机房层：全 src 只允许 App.vue 的渲染循环调
+// applyFleetPoses。别处再调一次，就会出现"卡片数字与画面分家"或"两台互相拽"。
+const fleetOffenders = [];
+(function walkFleet(dir) {
+  for (const name of readdirSync(dir)) {
+    const full = path.join(dir, name);
+    if (statSync(full).isDirectory()) { walkFleet(full); continue; }
+    if (!/\.(js|vue)$/.test(name)) continue;
+    const text = readFileSync(full, "utf8");
+    const isDef = /export\s+function\s+applyFleetPoses/.test(text);
+    const calls = countCodeOccurrences(text, /applyFleetPoses\s*\(/g);
+    const base = path.relative(SRC, full);
+    if (isDef && calls !== 1) fleetOffenders.push(`${base}: 定义处调用了 ${calls} 次`);
+    if (!isDef && calls > 0 && base !== "App.vue") fleetOffenders.push(`${base}: 调用了 ${calls} 次`);
+  }
+})(SRC);
+ok("F applyFleetPoses 只在 App.vue 的渲染循环里被调用一次",
+  countCodeOccurrences(read(rel("App.vue")), /applyFleetPoses\s*\(/g) === 1);
+ok("F 全 src 无第二处 applyFleetPoses 调用" + (fleetOffenders.length ? "：" + fleetOffenders.join("; ") : ""),
+  fleetOffenders.length === 0);
 
 // ---------- G. JointHud 已删除 ----------
 ok("G JointHud.vue 已删除", !existsSync(rel("components/JointHud.vue")));

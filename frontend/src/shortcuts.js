@@ -16,40 +16,28 @@
 //   复位（Enter）反过来要先确认当前**确实**处于急停锁定，避免在正常运行时误按。
 // =====================================================================
 
-/** 分组（「关于」页按这个顺序展示）。 */
-export const SHORTCUT_GROUPS = ["导航", "视图", "执行", "安全"];
+/** 分组（快捷键面板按这个顺序展示）。 */
+export const SHORTCUT_GROUPS = ["导航", "安全"];
 
 /**
- * 快捷键清单（唯一事实来源：解析表 + 「关于」页的说明都读它）。
+ * 快捷键清单（唯一事实来源：解析表 + 界面上的说明都读它）。
  *   id     —— 动作标识，App.vue 按它分派
- *   keys   —— 触发键（KeyboardEvent.key 的小写形式；数字键用 1~9，范围见 TAB_KEY_COUNT）
+ *   keys   —— 触发键（KeyboardEvent.key 的小写形式；数字键用 1~N）
  *   label  —— 界面上显示的键帽文字
  *   group  —— 分组
  *   desc   —— 一句话说明
  *   needAuth —— 需要控制令牌（没令牌时按下给提示，不静默失效）
  *   danger —— 危险动作：界面上用警示色，且要出提示
  *   when   —— 生效条件说明（给用户看）
+ *
+ * ★ 2026-10-06 单页化：E（侧栏）/ Q（摄像头）/ 空格（程序执行）三个键位随其宿主页面
+ *   一起移除 —— 留着它们只会让操作员按出一个"什么都没发生"的键，那比没有键更糟。
  */
 export const SHORTCUTS = [
   {
-    id: "tab", keys: ["1", "2", "3", "4", "5", "6", "7", "8", "9"], label: "1 ~ 9",
-    group: "导航", desc: "从左到右切到第 N 个模块（没有权限的模块不显示，序号顺延）",
+    id: "tab", keys: ["1"], label: "1",
+    group: "导航", desc: "切到第 N 个模块（当前只有一个：机房大屏）",
     needAuth: false, danger: false, when: "任何页面",
-  },
-  {
-    id: "toggle_side", keys: ["e"], label: "E",
-    group: "视图", desc: "展开 / 收起侧面板（给 3D 视口让出宽度）",
-    needAuth: false, danger: false, when: "任何页面",
-  },
-  {
-    id: "toggle_camera", keys: ["q"], label: "Q",
-    group: "视图", desc: "显示 / 隐藏摄像头画面",
-    needAuth: false, danger: false, when: "任何页面",
-  },
-  {
-    id: "program_run_or_stop", keys: [" "], label: "空格",
-    group: "执行", desc: "运行 / 停止程序（空闲时重复运行上一次跑过的那一个，不会替你挑）",
-    needAuth: true, danger: false, when: "仅在「程序执行」页",
   },
   {
     id: "estop", keys: ["escape"], label: "Esc",
@@ -63,11 +51,11 @@ export const SHORTCUTS = [
   },
 ];
 
-/** id → 定义（供「关于」页与提示文案取描述）。 */
+/** id → 定义（供说明面板与提示文案取描述）。 */
 export const SHORTCUT_BY_ID = Object.fromEntries(SHORTCUTS.map((s) => [s.id, s]));
 
-/** 数值键位数（= 顶栏可直达模块数，与 src/tabs.js 的 TAB_KEY_COUNT 必须一致）。 */
-export const TAB_KEY_COUNT = 9;
+/** 数值键位数（= 最大可直达模块数）。 */
+export const TAB_KEY_COUNT = 1;
 
 const IGNORE_TAGS = { INPUT: 1, TEXTAREA: 1, SELECT: 1, OPTION: 1 };
 
@@ -108,15 +96,8 @@ export function resolveKey(ev, ctx = {}) {
 
   const k = String(ev.key || "");
 
-  // ---- 数字键切模块：范围由 TAB_KEY_COUNT **推导**，不再写死 ----
-  //   ★ 踩过的坑：模块数从 7 加到 8 时忘了改这里的 [1-7]，按 8 完全没反应
-  //     （由 tools/verify_shortcuts.mjs 的 D1/K3 抓到）。用长度 + 区间判断，
-  //     既避开 "12" / "3abc" 这类多字符边界，又永远跟模块数一致。
-  if (k.length === 1 && k >= "1" && k <= String(TAB_KEY_COUNT)) return "tab:" + k;
-
-  const low = k.toLowerCase();
-  if (low === "e") return ev.repeat ? "" : "toggle_side";
-  if (low === "q") return ev.repeat ? "" : "toggle_camera";
+  // ---- 数字键：切模块。位数从 TAB_KEY_COUNT 推导，避免"改了 tabs.js 忘了改正则" ----
+  if (TAB_KEY_COUNT > 0 && new RegExp(`^[1-${TAB_KEY_COUNT}]$`).test(k)) return "tab:" + k;
 
   if (k === "Escape") {
     // ★ 优先级：弹层开着 → 关弹层。这是所有界面的通用预期；
@@ -131,25 +112,13 @@ export function resolveKey(ev, ctx = {}) {
     return ctx.stopped ? "estop_reset" : "";
   }
 
-  if (k === " ") {
-    // 空格在别处是"向下翻页"，只在程序执行页才接管。
-    return ctx.view === "program" ? "program_run_or_stop" : "";
-  }
-
   return "";
 }
 
 /** 从 `tab:N` 取序号（1 起）；不是切模块动作返回 0。 */
 export function tabIndexOf(action) {
-  // ★ 范围由 TAB_KEY_COUNT 推导，不写死数字 —— 原先这里是 `/^tab:([1-7])$/`，
-  //   模块加到 8 后 `tab:8` 解不出来（verify_shortcuts K3 抓到）。
-  //   同一个坑在 resolveKey 里也有一份，两处都已改成推导。
-  const s = String(action || "");
-  if (s.slice(0, 4) !== "tab:") return 0;
-  const body = s.slice(4);
-  if (!/^\d+$/.test(body)) return 0;
-  const n = Number(body);
-  return n >= 1 && n <= TAB_KEY_COUNT ? n : 0;
+  const m = new RegExp(`^tab:([1-${TAB_KEY_COUNT || 0}])$`).exec(String(action || ""));
+  return m ? Number(m[1]) : 0;
 }
 
 /**

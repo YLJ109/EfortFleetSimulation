@@ -10,7 +10,7 @@
 // 所有写入都做 try/catch：无痕模式 / 禁用 localStorage 时不能整个页面崩掉。
 // =====================================================================
 import { defineStore } from "pinia";
-import { setHiPerfMode } from "../utils/colorSemantics.js";
+import { HOME_VIEW } from "../tabs.js";
 
 export const LS_KEY = "efort.ui.v1";
 
@@ -77,46 +77,19 @@ export const useUiStore = defineStore("ui", {
     return {
       sideWidth: resolveSideWidth(s.sideWidth, s.defW),
       sideCollapsed: s.sideCollapsed === true,
-      /** 当前页面 key（由 App.vue 校验是否在已知 tab 里，非法值回落到 live） */
-      view: typeof s.view === "string" ? s.view : "live",
-      /**
-       * ★ 摄像头浮层的显隐（Q 键「显示 / 隐藏摄像头画面」）。
-       *   `CameraPanel` 根节点 `v-show="ui.camVisible"`（**v-show 保活**取流与拖拽/尺寸状态）。
-       *   ★★ 2026-10-11 修复：此前 `camVisible` **只有读写、没有任何组件消费** ——
-       *     按 Q 只弹一句"已隐藏"而画面照旧（假功能/编故事）。现在它真的生效。
-       *   默认 true（未持久化；`s.camVisible !== false`）。
-       */
+      /** 当前页面 key（由 App.vue 校验是否在已知 tab 里，非法值回落到 HOME_VIEW） */
+      view: typeof s.view === "string" ? s.view : HOME_VIEW,
+      /** 执行页叠加的摄像头窗口是否展开（点位执行 / 程序执行共用） */
       camVisible: s.camVisible !== false,
       /**
-       * 底栏状态区（多选一）当前展开的片 key（"" = 全部收起）。
-       * 片顺序：log(运行日志) / camera(摄像头) / run_mode(示教器) / link(真机链路)。
-       * ★ 2026-10-11 第二轮：原 robot(机器人) 片已并入 link(真机链路) 片（"两个真机链路合并"）。
+       * 底栏状态灯当前展开的浮层 key（"" = 全部收起）。
        *
        * ★ 放在 store 而不是 StatusStrip 的局部 ref：App.vue 的全局键盘处理要知道
-       *   "现在有没有**用户主动打开的**浮层"，才能在按 Esc 时先关浮层而不是直接急停。
-       * ★ **不持久化**：这是瞬时状态，刷新后回到默认（见初值 "log"）。
-       * ★★ 2026-10-11 用户口径：**进入页面默认开「运行日志」**（运行日志在最左侧）。
+       *   "现在有没有浮层开着"，才能在按 Esc 时先关浮层而不是直接急停。
+       * ★ **不持久化**：浮层是瞬时状态，刷新后自动重开一个浮层只会让人莫名其妙。
        */
-      statusPopover: "log",
-      /**
-       * ★ C1「高性能画面模式」（ISA-101 灰阶底 + 颜色只给异常 + 非颜色冗余）。
-       *   默认**关**：关掉时渲染层外观与今天逐字一致（所有灰阶样式都挂在 `.hmi-hi-perf`
-       *   底下，模式不开一条都不命中 —— 非破坏式）。
-       *   ★ 这是**本机界面偏好**，存 localStorage，**不写后端配置**：
-       *     同一台控制器上不同操作员可以各看各的，不该互相影响。
-       *   ★ 真正的开关在 `utils/colorSemantics.js`（全站唯一 ref），这里只是持久化外壳。
-       */
-      hiPerf: s.hiPerf === true,
+      statusPopover: "",
     };
-  },
-  getters: {
-    /**
-     * 当前展开的是否算"弹层"（Esc 应先关它，而不是急停）。
-     * ★★ "log" 不算：它是**默认常开**的被动读数面板，不是用户主动打开的浮层 ——
-     *   若把它也算弹层，则 Esc 会被永久吃掉、再也触发不了急停（安全回归）。
-     *   其余三片（camera/run_mode/link）是用户主动点开的 → 算弹层。
-     */
-    popoverModal: (s) => !!s.statusPopover && s.statusPopover !== "log",
   },
   actions: {
     _persist() {
@@ -128,7 +101,6 @@ export const useUiStore = defineStore("ui", {
           sideCollapsed: this.sideCollapsed,
           view: this.view,
           camVisible: this.camVisible,
-          hiPerf: this.hiPerf,
         }));
       } catch (e) { /* 忽略：无痕模式等场景下存不了也不影响使用 */ }
     },
@@ -156,17 +128,6 @@ export const useUiStore = defineStore("ui", {
       this._persist();
     },
     toggleCamVisible() { this.setCamVisible(!this.camVisible); },
-    /** ★ C1：设置/切换"高性能画面模式"（同时改全站唯一 ref 与 <html data-hmi>）。 */
-    setHiPerf(v) {
-      const on = !!v;
-      this.hiPerf = on;
-      setHiPerfMode(on);          // ← 真正的开关在这里（colorSemantics 里那一个 ref）
-      this._persist();
-      return on;
-    },
-    toggleHiPerf() { return this.setHiPerf(!this.hiPerf); },
-    /** App 启动时把持久化偏好**应用**到渲染层（读得到但没应用 = 假开关）。 */
-    applyHiPerf() { return setHiPerfMode(this.hiPerf); },
     /** 底栏状态灯浮层：同一时刻只允许开一个（三个并排弹会挡住整个底栏）。 */
     setStatusPopover(k) { this.statusPopover = typeof k === "string" ? k : ""; },
     toggleStatusPopover(k) { this.statusPopover = this.statusPopover === k ? "" : k; },

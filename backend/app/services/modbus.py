@@ -132,7 +132,7 @@ def _float_to_words(f: float) -> Tuple[int, int]:
 
 
 class ModbusRobot:
-    def __init__(self) -> None:
+    def __init__(self, conn_override: Optional[Dict[str, Any]] = None) -> None:
         cfg = get_config()
         conn = cfg.connection
         mb = cfg.modbus
@@ -143,6 +143,15 @@ class ModbusRobot:
         self.func = int(mb.get("func", 3))
         self.base_addr = int(mb.get("base_addr", 10))
         self.count = int(mb.get("count", 12))
+        # ★ fleet 场景：6 台同机型埃夫特共用同一张寄存器表，只是 IP 不同。
+        #   override 只允许覆盖连接三元组(+超时)，寄存器地址仍走 robot.yaml，
+        #   避免"给某台改错基址"这种只能在现场才发现的事故。
+        self._conn_override = dict(conn_override or {})
+        if self._conn_override:
+            self.host = self._conn_override.get("host", self.host)
+            self.port = int(self._conn_override.get("port", self.port))
+            self.uid = int(self._conn_override.get("unit_id", self.uid))
+            self.timeout = float(self._conn_override.get("timeout_s", self.timeout))
         self._sock: Optional[socket.socket] = None    # P1-1: 复用长连接
         # ★ 采集线程（read_pose）与执行线程（点动链路多条 FC6/FC3）共用同一 socket，
         #   TCP 是纯字节流，并发 send/recv 会串帧 —— 所有 IO 必须持锁整帧完成。
@@ -182,6 +191,18 @@ class ModbusRobot:
             "base_addr": int(mb.get("base_addr", 10)),
             "count": int(mb.get("count", 12)),
         }
+        # ★ 带 conn_override 的实例（fleet 里的某一台）不允许被全局 connection.host 顶掉，
+        #   否则界面上点一次"重连"，6 台埃夫特会齐刷刷指向 robot.yaml 里那台。
+        ov = getattr(self, "_conn_override", None)
+        if ov:
+            if "host" in ov:
+                new["host"] = ov["host"]
+            if "port" in ov:
+                new["port"] = int(ov["port"])
+            if "unit_id" in ov:
+                new["uid"] = int(ov["unit_id"])
+            if "timeout_s" in ov:
+                new["timeout"] = float(ov["timeout_s"])
         with self._io_lock:
             changed = any(getattr(self, k) != v for k, v in new.items())
             if changed:

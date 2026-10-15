@@ -1,7 +1,12 @@
 // WebSocket 客户端: 断线指数退避重连 + 消息看门狗 + 心跳。
 //
 // onPose：姿态帧（type==="pose"）；onRcStatus：控制器寄存器快照帧（type==="rc_status"）；
+// onFleetPose / onFleetStatus：机房 12 台的合批姿态帧与 1Hz 汇总帧（后端
+//   services/fleet.py::_batch_loop 推，走的是同一条 /ws/pose 流，hub 按 type 分流）；
 // onStatus：连接通断回调。rc-status 经此通道后，前端不再单独轮询 /api/rc-status。
+//
+// ★ 机房帧**不复用** onPose：单机那条帧是 j1..j6 平铺的一台，机房帧是 robots[] 的 12 台，
+//   两者字段口径不同，混在一个回调里就要靠"猜有没有 robots 字段"分派。
 //
 // ★ 全维度审查 F-06：原实现**没有任何存活探测**。
 //   当 TCP 处于「半开」状态（服务端进程死了、但客户端 TCP 还没收到 FIN/RST）时，
@@ -18,7 +23,7 @@ const WS_STALE_MS = 8000;
 const WATCHDOG_MS = 2000;
 const PING_MS = 15000;
 
-export function connectWs({ onPose, onStatus, onRcStatus }) {
+export function connectWs({ onPose, onStatus, onRcStatus, onFleetPose, onFleetStatus }) {
   let ws = null;
   let retry = 0;
   let closed = false;
@@ -63,6 +68,8 @@ export function connectWs({ onPose, onStatus, onRcStatus }) {
         if (msg.type === "pong") return;   // 心跳回应，不进业务分发
         if (msg.type === "pose") { onPose && onPose(msg); }
         else if (msg.type === "rc_status") { onRcStatus && onRcStatus(msg); }
+        else if (msg.type === "fleet_pose") { onFleetPose && onFleetPose(msg.robots); }
+        else if (msg.type === "fleet_status") { onFleetStatus && onFleetStatus(msg.summary); }
       } catch (e) {
         /* 忽略坏帧 */
       }

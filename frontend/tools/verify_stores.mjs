@@ -104,11 +104,9 @@ if (names.length) {
 ok("B. 无 `xxx.<getter>( )` 空括号误用（getter 按值访问）", misuse === 0);
 
 // ---- C. 真机链路卡按钮精简 ----
-const card = read("src/components/RcReadyCard.vue");
-ok("C1. 已移除「声明 AUTO」按钮（无 claimMode('AUTO')）", !card.includes("claimMode(\"AUTO\")"));
-ok("C2. 已移除「声明远程」按钮（无 claimMode('REMOTE')）", !card.includes("claimMode(\"REMOTE\")"));
-ok("C3. 仍保留绿/红就绪切换按钮", card.includes("ready-toggle") && card.includes("一键就绪")
-  && card.includes("取消就绪"));
+// （原 C1~C3 断言的是 RcReadyCard.vue 的按钮构成；该组件随单机执行页一起删除，
+//   就绪切换改由机房控制台承载时再按新形态重写守卫。留着读一个不存在的文件只会让
+//   整条 verify 链在 ENOENT 上崩掉，比少三条断言危险得多。）
 
 // ---- D. 程序执行：`/run-file` 已**异步化**（B1），结果必须从 run-state 取 ----
 //   后端 POST /control/run-file 现在只回 {started, run_id, kind}（不再带逐步结果）；

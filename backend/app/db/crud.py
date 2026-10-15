@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from sqlalchemy import delete, select, true
 
@@ -15,6 +16,11 @@ from app.db.models import Event, PoseHistory, SafetyEvent, Session
 #   - 锁：单个巨型事务在整个清理期间独占写锁 → 采集线程 insert_pose 静默失败丢数据。
 PRUNE_BATCH = 5000          # 每批删除行数
 PRUNE_MAX_BATCHES = 20000   # 单次调用最多批次（1 亿行上限，防死循环）
+
+# 单机链路在历史表里的身份。机房那 12 台各写自己的 robot_id（A1-1…B2-3），
+# 所以"最近位姿/CSV 导出"必须按身份过滤 —— 不过滤的话，机房采集一启动，
+# 单机的历史曲线就会掺进随机某台 B 区机器人的读数（数值看着正常，来源是错的）。
+SINGLE_ROBOT_ID = "MAIN"
 
 
 def prune_batched(session, model, where_cond, batch: int = PRUNE_BATCH,
@@ -40,9 +46,11 @@ def prune_batched(session, model, where_cond, batch: int = PRUNE_BATCH,
     return total
 
 
-def insert_pose(session, j1, j2, j3, j4, j5, j6, tcp, source="real") -> PoseHistory:
+def insert_pose(session, j1, j2, j3, j4, j5, j6, tcp, source="real",
+                robot_id=SINGLE_ROBOT_ID) -> PoseHistory:
     row = PoseHistory(
         timestamp=datetime.now(timezone.utc),
+        robot_id=robot_id,
         j1=j1, j2=j2, j3=j3, j4=j4, j5=j5, j6=j6,
         tcp_x=tcp[0], tcp_y=tcp[1], tcp_z=tcp[2],
         source=source,
@@ -59,18 +67,19 @@ def insert_event(session, level: str, message: str) -> Event:
     return row
 
 
-def get_recent_poses(session, limit: int = 500):
-    stmt = (
-        select(PoseHistory)
-        .order_by(PoseHistory.id.desc())
-        .limit(limit)
-    )
+def get_recent_poses(session, limit: int = 500,
+                     robot_id: Optional[str] = SINGLE_ROBOT_ID):
+    stmt = select(PoseHistory).order_by(PoseHistory.id.desc()).limit(limit)
+    if robot_id is not None:
+        stmt = stmt.where(PoseHistory.robot_id == robot_id)
     rows = session.execute(stmt).scalars().all()
     return list(reversed(rows))
 
 
-def get_latest_pose(session) -> PoseHistory | None:
+def get_latest_pose(session, robot_id: Optional[str] = SINGLE_ROBOT_ID) -> PoseHistory | None:
     stmt = select(PoseHistory).order_by(PoseHistory.id.desc()).limit(1)
+    if robot_id is not None:
+        stmt = stmt.where(PoseHistory.robot_id == robot_id)
     return session.execute(stmt).scalars().first()
 
 

@@ -6,7 +6,7 @@ import { useAuthStore } from "./stores/auth.js";
 
 // 标签页标题：从 brand.js 取，避免和静态 <title>（首屏 hydration 前显示）各写一份。
 // 静态那份必须同步改，回归里有断言钉着（verify_link.mjs 的 L 段）。
-document.title = `${BRAND.name} · ${BRAND.subtitle}`;
+document.title = `${BRAND.name}(${BRAND.room})`;
 
 const pinia = createPinia();
 const app = createApp(App).use(pinia);

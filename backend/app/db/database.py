@@ -89,12 +89,22 @@ def engine_url() -> str:
 def _migrate(eng) -> None:
     """轻量迁移: create_all 不会给已存在的表加列, 这里按需补列(幂等)。"""
     insp = inspect(eng)
-    if "recordings" not in insp.get_table_names():
-        return
-    cols = {c["name"] for c in insp.get_columns("recordings")}
-    if "source" not in cols:
-        with eng.begin() as conn:
-            conn.execute(text("ALTER TABLE recordings ADD COLUMN source VARCHAR(16) DEFAULT 'sim'"))
+    names = insp.get_table_names()
+    if "recordings" in names:
+        cols = {c["name"] for c in insp.get_columns("recordings")}
+        if "source" not in cols:
+            with eng.begin() as conn:
+                conn.execute(text("ALTER TABLE recordings ADD COLUMN source VARCHAR(16) DEFAULT 'sim'"))
+    if "pose_history" in names:
+        cols = {c["name"] for c in insp.get_columns("pose_history")}
+        if "robot_id" not in cols:
+            # 机房 12 台后历史曲线必须按机器人分开；旧库里已有的都是那台 ER8-700H，
+            # 回填 MAIN 而不是留 NULL —— 否则"历史"页按 robot_id 过滤时旧数据会凭空消失。
+            with eng.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE pose_history ADD COLUMN robot_id VARCHAR(16) DEFAULT 'MAIN'"))
+                conn.execute(text("UPDATE pose_history SET robot_id='MAIN' "
+                                  "WHERE robot_id IS NULL"))
 
 
 def init_db() -> None:

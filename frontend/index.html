@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<<<<<<< HEAD
     <title>擎云制造 · 工业机器人远程智控与数字孪生系统</title>
     <!-- 内联 SVG 图标：青色主题 -->
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%2304070d'/><path d='M9 23V9h9a5 5 0 0 1 0 10h-6' stroke='%232fd6f0' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>" />
@@ -101,16 +102,137 @@
         --amb-top: rgba(47, 214, 240, 0.07);
         --amb-bottom: rgba(59, 130, 246, 0.06);
         --amb-cool: rgba(122, 162, 220, 0.04);
+=======
+    <title>FIT机器人机房智能运维平台(6-303)</title>
+    <!-- 内联 SVG 图标：避免浏览器自动请求 /favicon.ico 产生 404 -->
+    <!-- 圆形校徽 logo（用户指定）：favicon 与大屏标题条共用 public/logo.png 一份。
+         内联 SVG 那版留着会请求 /favicon.ico 产生 404，所以仍走显式 link。 -->
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <style>
+      /* =================================================================
+         设计令牌（全站唯一取色来源）
+         ★ 规矩：组件里**只准**引用这里的变量，不准写 #hex / rgba()。
+           理由：同一个界面里出现两套强调色，看着像两个产品拼起来的。
+           现在强调色只有 --accent 一系（--accent / --accent2 / --accent-soft*），
+           语义色只有 ok / warn / err 三系（各带 -soft 底与 -fg 前景）。
+         ★ 2026-10-06 全站换肤：用户指定按 IDC 智能运维大屏参考图执行 ——
+           深海军蓝底 + 青绿强调 + 钢蓝描边 + 切角/角括号（旧的橙色系整体移除）。
+           取色实测采样见记忆 user-idc-hud-dashboard-style。
+           守卫：tools/verify_fleet_cards.mjs 的 I 段扫描大屏组件的硬编码色。
+         ================================================================= */
+      :root {
+        /* ---- 底色阶（深海军蓝：IDC 数字孪生大屏，用户指定 2026-10-06 全站换肤） ---- */
+        --bg: #0b1a2a;
+        --panel: #0f2437;
+        --panel2: #143248;
+        --panel3: #1b405e;            /* 三级面板：内嵌区块 / hover 底 */
+        --line: #305274;              /* 钢蓝描边 / 分隔线 */
+        --line2: #3f6a94;             /* 强调分隔线（比 --line 亮一档） */
+        /* ---- 文字 ---- */
+        --txt: #dfe4f7;
+        --txt2: #b9c6da;              /* 次级正文 */
+        --muted: #7f98ab;             /* 敢压暗，不抢数据 */
+        /* ---- 主色（青绿）：一系三阶 + 三档透明底 ---- */
+        --accent: #48b7af;
+        --accent2: #77b7c4;           /* 亮阶：渐变高光 / 高亮文字 */
+        --accent-deep: #2f8c86;       /* 暗阶：渐变收尾 */
+        --accent-soft: rgba(72, 183, 175, .10);   /* 悬停底 */
+        --accent-soft2: rgba(72, 183, 175, .18);  /* 选中底 */
+        --accent-soft3: rgba(72, 183, 175, .07);  /* 极淡底（大面积） */
+        --accent-line: rgba(72, 183, 175, .50);   /* 强调描边 */
+        --accent-btn: #10333a;                    /* 主按钮实底 */
+        --glow: rgba(72, 183, 175, .45);          /* 强调外发光（低饱和：发光但不糊） */
+        --glow-soft: rgba(72, 183, 175, .16);
+        --cap: #203852;               /* 未激活胶囊底 */
+        --kpi: #000f1b;               /* 底部 KPI 条：近乎全黑，压住画面重心 */
+        /* ---- 语义色 ---- */
+        --ok: #2ee6a8;
+        --ok-soft: rgba(46, 230, 168, .14);
+        --ok-soft2: rgba(46, 230, 168, .30);
+        --ok-line: rgba(46, 230, 168, .50);
+        --ok-btn: #0c2b23;
+        --warn: #f0a840;
+        --warn-fg: #ffd58a;           /* 深底上的警示文字 */
+        --warn-soft: rgba(240, 168, 64, .14);
+        --warn-line: rgba(240, 168, 64, .50);
+        --err: #ff4d5e;
+        --err-fg: #ff9aa5;            /* 深底上的错误文字 */
+        --err-soft: rgba(255, 77, 94, .14);
+        --err-btn: #3a1218;
+        --err-line: rgba(255, 77, 94, .45);
+        /* 撞击态（比 --err 更硬的红，报警时要求"刺眼"） */
+        --hit: #ff2020;
+        --hit-bg: rgba(255, 32, 32, .85);
+        --hit-bg-strong: rgba(255, 32, 32, .88);
+        --hit-bg-soft: rgba(255, 32, 32, .60);
+        /* ---- 分类色（审计/日志类别、模拟物体三原色） ---- */
+        --c-auth: #d2a8ff;
+        --c-config: #58a6ff;
+        --c-conn: #39c5cf;
+        --c-pose: #d29922;
+        --c-suck: #f85149;
+        --c-release: #3fb950;
+        --c-wait: #8b949e;
+        --c-red: #c0392b;
+        --c-green: #27ae60;
+        --c-blue: #2e6fdc;
+        --c-none: #6b7280;
+        /* 分类色的"描边档"：徽标/标签边框用它，避免又冒出一堆 rgba 手写值 */
+        --c-auth-line: rgba(210, 168, 255, .40);
+        --c-config-line: rgba(88, 166, 255, .40);
+        --c-config-soft: rgba(88, 166, 255, .14);
+        --c-conn-line: rgba(57, 197, 207, .40);
+        /* ---- 浮层 / 玻璃 / 遮罩 ----
+           浮在 3D 视口上的卡片（关节 HUD、摄像头面板、安全状态片、机房卡片）都用这一组：
+           底色统一"半透明海军蓝 + 高斯模糊"，描边统一钢蓝纱（深色底上唯一能读清的细线）。 */
+        --glass: rgba(15, 36, 55, .74);          /* 玻璃底（HUD 常驻） */
+        --glass-solid: rgba(11, 26, 42, .92);    /* 近实心玻璃（悬浮面板） */
+        --glass-line: rgba(48, 82, 116, .60);    /* 玻璃描边（钢蓝） */
+        --glass-line2: rgba(72, 183, 175, .40);  /* 玻璃描边（按钮/可点元素） */
+        --veil: rgba(119, 167, 214, .08);        /* 纱底：玻璃上的 hover */
+        --veil2: rgba(119, 167, 214, .14);       /* 纱底：hover 加强 */
+        --scrim: rgba(0, 0, 0, .35);             /* 弹窗遮罩 */
+        --scrim2: rgba(0, 0, 0, .55);            /* 遮罩加强 / 大投影 */
+        --ink: #fff;                             /* 深底上的纯白字（撞击/危险标签） */
+        /* ---- 形状 / 阴影 / 字体 ----
+           ★ 这套风格的辨识度是**切角多边形 + 角括号**，不是圆角：radius 全部归 0，
+             斜切由组件用 clip-path 自己切（卡片/按钮/胶囊各切各的角）。 */
+        --radius: 0px;
+        --radius-sm: 0px;
+        --radius-pill: 999px;
+        --shadow: 0 4px 14px rgba(0, 0, 0, .32);
+        --shadow-lg: 0 0 0 1px var(--glow-soft), 0 12px 34px rgba(0, 0, 0, .46);
+        --shadow-hud: 0 8px 28px rgba(0, 0, 0, .45);
+        --screen: #000;               /* 视频画面底色（必须纯黑，不能跟着主题变） */
+        --font: "Microsoft YaHei UI", "Segoe UI", system-ui, -apple-system, sans-serif;
+        --mono: Consolas, "Cascadia Mono", ui-monospace, monospace;
+        /* 技术读数专用字：Bahnschrift 是 Windows 自带的 DIN 风格窄体，数字 / 关节角 /
+           TCP / 速度百分比用它更有「工业仪表」的锐利感；缺失时回落等宽。 */
+        --num: "Bahnschrift", "DIN Alternate", "Segoe UI", Consolas, ui-monospace, monospace;
+        /* 环境氛围：背景不是死黑，而是中心提亮的深海军蓝（下方 body 用径向渐变叠出来）。 */
+        --amb-top: rgba(38, 74, 110, .30);
+        --amb-bottom: rgba(72, 183, 175, .05);
+        --amb-cool: rgba(24, 32, 40, .35);
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
       }
       * { box-sizing: border-box; }
       html, body { margin: 0; height: 100%; background: var(--bg); color: var(--txt);
         font-family: var(--font); -webkit-font-smoothing: antialiased;
+<<<<<<< HEAD
         text-rendering: optimizeLegibility; font-size: 14px; line-height: 1.55; }
       /* 大气氛围：青色光晕 + 蓝色光晕 + 极淡网格 */
       body {
         background:
           radial-gradient(1000px 520px at 12% -8%, var(--amb-top), transparent 62%),
           radial-gradient(880px 460px at 108% 108%, var(--amb-bottom), transparent 60%),
+=======
+        text-rendering: optimizeLegibility; }
+      /* 大气氛围：中心提亮的深海军蓝 + 底部一点青绿环境光，让深色界面有纵深而非一片死黑。 */
+      body {
+        background:
+          radial-gradient(1400px 760px at 50% 30%, var(--amb-top), transparent 68%),
+          radial-gradient(1000px 560px at 88% 112%, var(--amb-bottom), transparent 58%),
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
           radial-gradient(840px 480px at 50% 124%, var(--amb-cool), transparent 60%),
           linear-gradient(rgba(122, 162, 220, 0.025) 1px, transparent 1px),
           linear-gradient(90deg, rgba(122, 162, 220, 0.025) 1px, transparent 1px),
@@ -258,6 +380,7 @@
 
       /* ---- 卡片：面板顶部发光线 + 角标装饰 ---- */
       .card { position: relative; background: linear-gradient(180deg, var(--panel2), var(--panel));
+<<<<<<< HEAD
         border: 1px solid var(--line); border-radius: var(--radius); padding: 10px;
         box-shadow: var(--shadow); overflow: hidden;
         transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease; }
@@ -266,6 +389,21 @@
         opacity: 0.5; pointer-events: none; }
       .card:hover { border-color: rgba(122,162,220,0.2); box-shadow: var(--shadow-lg); transform: translateY(-1px); }
       .card:hover::before { opacity: 0.8; }
+=======
+        border: 1px solid var(--line); border-radius: var(--radius); padding: 12px;
+        box-shadow: var(--shadow);
+        transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+      /* 角括号 HUD 描边：这套风格的辨识度所在（左上 + 右下两枚 L 形亮角标）。
+         只画两角而不是四角 —— 四角会把卡片框成"表格"，两角才像取景器。 */
+      .card::before, .card::after { content: ""; position: absolute; width: 9px; height: 9px;
+        pointer-events: none; opacity: .85; transition: opacity .16s ease; }
+      .card::before { left: -1px; top: -1px;
+        border-left: 2px solid var(--accent-line); border-top: 2px solid var(--accent-line); }
+      .card::after { right: -1px; bottom: -1px;
+        border-right: 2px solid var(--accent-line); border-bottom: 2px solid var(--accent-line); }
+      .card:hover { border-color: var(--line2); box-shadow: var(--shadow-lg); transform: translateY(-1px); }
+      .card:hover::before, .card:hover::after { opacity: 1; }
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
       .card h3 { margin: 0 0 10px; padding-bottom: 8px; font-size: 13px; font-weight: 700;
         color: var(--txt); letter-spacing: .03em; font-family: 'Chakra Petch', var(--font);
         border-bottom: 1px solid var(--line);

@@ -32,9 +32,22 @@ STALE_SEC = 5.0           # 超过这个时间没有上报，认为状态失效
 SERVER_STALE_SEC = 2.0    # 服务端自己算的，节拍 0.2s ⇒ 2s 没更新就是采集/评估断了
 UNSAFE = ("danger", "hit")
 
+<<<<<<< HEAD
 _latest: Optional[Dict[str, Any]] = None
 _server: Optional[Dict[str, Any]] = None
 _server_prev: Optional[Dict[str, Any]] = None     # 上一条服务端结论（判"变严重/恢复"用）
+=======
+# 单机链路的状态存在这个键下。★ 与 db.crud.SINGLE_ROBOT_ID 同一个口径（"MAIN"），
+#   但这里不 import 过去：安全守卫不该依赖数据库层。两处若分家，
+#   tests/test_safety_api.py 会红。
+SINGLE_ID = "MAIN"
+
+# ★ P6 按台化：机房 12 台各有各的围栏，**不能**共用一份全局状态。
+#   原来只有一份 `_latest`，后果是"B 区某台撞了围栏 → A 区那台也被拦"，
+#   而反过来（大屏只在机房模式下上报全场最严重的一档）会拦错机器。
+#   字典键 = robot_id，单机用 SINGLE_ID。
+_latest: Dict[str, Dict[str, Any]] = {}
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
 _lock = Lock()
 
 def _freshness(ts: Optional[float], stale_sec: float) -> str:
@@ -44,10 +57,15 @@ def _freshness(ts: Optional[float], stale_sec: float) -> str:
     return "fresh" if (time.time() - ts) <= stale_sec else "stale"
 
 
+def _key(robot_id: Optional[str]) -> str:
+    rid = str(robot_id or "").strip()
+    return rid or SINGLE_ID
+
+
 def update(state: str, zone_id: str = "", zone_name: str = "",
-           clearance: float = 0.0, ratio: float = 1.0) -> Dict[str, Any]:
-    """上报当前围栏状态（前端每帧评估后节流调用）。"""
-    global _latest
+           clearance: float = 0.0, ratio: float = 1.0,
+           robot_id: str = "") -> Dict[str, Any]:
+    """上报当前围栏状态（前端每帧评估后节流调用）。按台存，见 _latest 注释。"""
     # ★ 审计修复 P3：clearance/ratio 可能是 NaN —— `float('nan') or 0.0` 是
     #   truthy，`or` 拦不住，NaN 会一路进快照再进 JSON（前端 JSON.parse 抛错）。
     try:
@@ -63,6 +81,7 @@ def update(state: str, zone_id: str = "", zone_name: str = "",
     if r != r or r in (float("inf"), float("-inf")):
         r = 1.0
     rec = {
+        "robot_id": _key(robot_id),
         "state": str(state or "safe"),
         "zone_id": str(zone_id or ""),
         "zone_name": str(zone_name or ""),
@@ -71,6 +90,7 @@ def update(state: str, zone_id: str = "", zone_name: str = "",
         "ts": time.time(),
     }
     with _lock:
+<<<<<<< HEAD
         prev = (_latest or {}).get("state")
         _latest = rec
     # ★ A5：前端那一路的 danger/hit 上升沿同样出取证包（浏览器停帧时后端那一路还会补上）
@@ -99,6 +119,40 @@ def snapshot() -> Dict[str, Any]:
         "zone_name": (rec or {}).get("zone_name", ""),
         "clearance": (rec or {}).get("clearance", 0.0),
         "ratio": (rec or {}).get("ratio", 1.0),
+=======
+        _latest[rec["robot_id"]] = rec
+        # 键由上报方给，必须封顶：认证客户端刷随机 id 就能把内存吃光
+        if len(_latest) > 64:
+            for k in sorted(_latest, key=lambda x: _latest[x]["ts"])[:len(_latest) - 64]:
+                _latest.pop(k, None)
+    return snapshot(robot_id)
+
+
+def snapshot(robot_id: str = "") -> Dict[str, Any]:
+    """返回某一台的快照 + 是否新鲜（供 API/前端诊断互锁是否生效）。
+
+    robot_id 省略 = 单机链路（"MAIN"）。**不会**回落到"最近上报的那台"——
+    把隔壁机器的围栏状态当成本机的判据，正是 P6 要根除的那类错。
+    """
+    key = _key(robot_id)
+    with _lock:
+        rec = _latest.get(key)
+    if not rec:
+        return {"reported": False, "fresh": False, "state": "unknown",
+                "age_sec": None, "robot_id": key}
+    age = time.time() - rec["ts"]
+    return {
+        "reported": True,
+        "fresh": age <= STALE_SEC,
+        "age_sec": round(age, 2),
+        "robot_id": key,
+        "state": rec["state"],
+        "zone_id": rec["zone_id"],
+        "zone_name": rec["zone_name"],
+        "clearance": rec["clearance"],
+        "ratio": rec["ratio"],
+        "interlocked": _interlocked_from_config(),
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
     }
     server = {
         "evaluated": bool(srv),
@@ -278,6 +332,18 @@ def reset_server() -> None:
         _server, _server_prev = None, None
 
 
+def reported_ids() -> list:
+    """现在有几台在上报（诊断用：大屏开着应该是 12 + 单机 1）。"""
+    with _lock:
+        return sorted(_latest)
+
+
+def reset() -> None:
+    """清空全部上报记录（测试与"配置变更后重建采集"用）。"""
+    with _lock:
+        _latest.clear()
+
+
 def _interlocked_from_config() -> bool:
     """是否强制要求"必须有实时围栏状态"才允许下发。"""
     try:
@@ -286,6 +352,7 @@ def _interlocked_from_config() -> bool:
         return False
 
 
+<<<<<<< HEAD
 def check() -> Tuple[bool, str, Dict[str, Any]]:
     """下发前的安全校验。@return (是否允许, 原因, 快照)
 
@@ -328,6 +395,15 @@ def _check_client(snap: Dict[str, Any]) -> Tuple[bool, str]:
         if snap.get("interlocked"):
             return False, "围栏互锁已启用，但尚未收到前端实时状态，拒绝下发"
         return True, "未收到围栏实时状态（互锁未生效）"
+=======
+def check(robot_id: str = "") -> Tuple[bool, str, Dict[str, Any]]:
+    """下发前的安全校验。**只看这一台**的围栏状态。@return (是否允许, 原因, 快照)"""
+    snap = snapshot(robot_id)
+    if not snap["reported"]:
+        if snap.get("interlocked"):
+            return False, "围栏互锁已启用，但尚未收到该台的实时状态，拒绝下发", snap
+        return True, "未收到围栏实时状态（互锁未生效）", snap
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
 
     if not snap["fresh"]:
         # ★ 审计修复 P2：过期时必须**保留最后状态的方向性**。

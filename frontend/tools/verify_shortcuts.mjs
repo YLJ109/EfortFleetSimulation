@@ -23,18 +23,6 @@ const {
   isTypingTarget, resolveKey, tabIndexOf, tabKeyFor, shortcutRows,
 } = await import(pathToFileURL(path.join(ROOT, "src", "shortcuts.js")).href);
 
-// ★ 模块清单的唯一事实来源是 src/tabs.js —— 这里**直接读它**算可见集合，
-//   不再在测试里手抄一份 TABS 顺序/权限。
-//   ★ 2026-10-10：数字键走**顶栏实际显示**的那些（navTabs）——
-//     hidden 的「程序执行」不占顶栏位置、也就不该被数字键直接点到。
-const { TABS, visibleTabs, navTabs } = await import(pathToFileURL(path.join(ROOT, "src", "tabs.js")).href);
-const AUTH_NONE = { controlActive: false, isAdmin: false };
-const AUTH_OP = { controlActive: true, isAdmin: false };
-const AUTH_ADMIN = { controlActive: true, isAdmin: true };
-const VISIBLE_NONE = navTabs(AUTH_NONE).map((t) => t.key);   // 无权限：只读页 + 关于
-const VISIBLE_OP = navTabs(AUTH_OP).map((t) => t.key);       // 操作员
-const VISIBLE_ADMIN = navTabs(AUTH_ADMIN).map((t) => t.key); // 管理员
-
 let pass = 0, fail = 0;
 function ok(cond, msg) {
   if (cond) { pass++; console.log("  PASS  " + msg); }
@@ -73,7 +61,7 @@ eq(SHORTCUT_GROUPS.filter((g) => !shortcutRows().some((r) => r.group === g)), []
    "A5 每个分组都至少有一个动作（空分组会在「关于」页留下空白块）");
 ok(shortcutRows().reduce((n, r) => n + r.items.length, 0) === SHORTCUTS.length,
    "A6 分组后条目总数 == 定义总数（没有动作被漏掉）");
-eq(TAB_KEY_COUNT, 9, "A7 数字键位数 = 9（= 顶栏可直达模块数，见 K1）");
+eq(TAB_KEY_COUNT, 1, "A7 数字键位数 = 1（单页化：只剩机房大屏一个模块）");
 // 每个按键只能属于一个动作，否则"按 e 到底干什么"就变成看代码顺序了
 {
   const seen = new Map();
@@ -100,7 +88,7 @@ for (const k of ["e", "q", "1", " ", "Escape", "Enter"]) {
 section("C. 打字优先：焦点在输入控件里时，所有快捷键整体失效");
 // ---------------------------------------------------------------------
 // ★ 这一节是整套快捷键里最重要的一条：它是"打字打成急停/打成程序运行"的唯一防线。
-for (const k of ["e", "q", "1", "2", "9", " ", "Escape", "Enter"]) {
+for (const k of ["e", "q", "1", "2", "8", " ", "Escape", "Enter"]) {
   eq(resolveKey(key(k), ctx({ typing: true })), "", `C1 打字中按 ${JSON.stringify(k)} → 不触发任何动作`);
 }
 // 即使同时满足其它触发条件（程序页 + 空格 / 急停锁定 + Enter）也必须失效
@@ -119,28 +107,30 @@ ok(isTypingTarget(null) === false && isTypingTarget(undefined) === false, "C11 �
 ok(isTypingTarget({ tagName: "input" }) === true, "C12 小写 tagName 也认（大小写不敏感）");
 
 // ---------------------------------------------------------------------
-section("D. 数字键 1~9：切模块");
+section("D. 数字键：只有 1 有效（单页化后只有一个模块）");
 // ---------------------------------------------------------------------
-for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9]) {
-  eq(resolveKey(key(String(n)), ctx()), "tab:" + n, `D1 按 ${n} → tab:${n}`);
+eq(resolveKey(key("1"), ctx()), "tab:1", "D1 按 1 → tab:1");
+for (const bad of ["0", "2", "5", "9", "12", "3abc", "abc", "", "  "]) {
+  eq(resolveKey(key(bad), ctx()), "", `D2 越界输入 ${JSON.stringify(bad)} 不当作切模块（不能回落到第 1 个）`);
 }
-for (const bad of ["0", "10", "12", "3abc", "abc", "", "  "]) {
-  eq(resolveKey(key(bad), ctx()), "", `D2 非 1~9 的输入 ${JSON.stringify(bad)} 不当作切模块`);
-}
-eq(resolveKey(key("1", { repeat: true }), ctx()), "tab:1", "D3 数字键允许长按重复（连续切页是有意为之）");
+eq(resolveKey(key("1", { repeat: true }), ctx()), "tab:1", "D3 数字键允许长按重复");
 
 // ---------------------------------------------------------------------
-section("E. E / Q：视图开合");
+section("E. 已移除的键位必须真的什么都不做（E / Q / 空格）");
 // ---------------------------------------------------------------------
-eq(resolveKey(key("e"), ctx()), "toggle_side", "E1 e → 开合侧栏");
-eq(resolveKey(key("E"), ctx()), "toggle_side", "E2 大写 E 同样生效（Shift+e 的情况）");
-eq(resolveKey(key("q"), ctx()), "toggle_camera", "E3 q → 开合摄像头画面");
-eq(resolveKey(key("Q"), ctx()), "toggle_camera", "E4 大写 Q 同样生效");
-eq(resolveKey(key("e", { repeat: true }), ctx()), "", "E5 长按 e 不重复触发（按住会疯狂开合）");
-eq(resolveKey(key("q", { repeat: true }), ctx()), "", "E6 长按 q 不重复触发");
-// 其它无关字母不该被吞掉
+// ★ 为什么留着这段"反向断言"：单页化把侧栏(E)、摄像头(Q)、程序执行(空格)三个键位
+//   连同宿主页面一起删了。如果解析表里漏掉一处没删干净，按下去会静默命中一个
+//   已经不存在的动作 —— 用户看到的是"按了没反应"，然后开始怀疑整个键盘。
+//   所以这里钉死：这些键现在**必须**返回空动作。
+for (const k of ["e", "E", "q", "Q"]) {
+  eq(resolveKey(key(k), ctx()), "", `E1 ${k} 已随宿主页面移除，不该触发任何动作`);
+}
+for (const v of ["fleet", "point", "program", "live", "about", undefined]) {
+  eq(resolveKey(key(" "), ctx({ view: v })), "", `E2 页面 ${String(v)} 空格都不接管（留给浏览器翻页）`);
+}
+eq(resolveKey(key(" "), ctx()), "", "E3 空格在默认上下文也不接管");
 for (const k of ["a", "s", "d", "w", "r", "z", "x"]) {
-  eq(resolveKey(key(k), ctx()), "", `E7 无关字母 ${k} 不触发任何动作`);
+  eq(resolveKey(key(k), ctx()), "", `E4 无关字母 ${k} 不触发任何动作`);
 }
 
 // ---------------------------------------------------------------------
@@ -153,7 +143,7 @@ eq(resolveKey(key("Escape"), ctx({ modalOpen: true, view: "program" })), "close_
 ok(resolveKey(key("Escape"), ctx({ modalOpen: true })) !== "estop",
    "F4 反证：弹层开着时 Esc 绝不能是急停");
 // 急停不因页面/输入权限而失效 —— 任何页面都能停
-for (const v of ["live", "sim", "point", "program", "ops", "settings", "about"]) {
+for (const v of ["live", "fleet", "sim", "point", "program", "ops", "settings", "about"]) {
   eq(resolveKey(key("Escape"), ctx({ view: v })), "estop", `F5 ${v} 页按 Esc 都是急停`);
 }
 
@@ -167,14 +157,9 @@ eq(resolveKey(key("Enter"), ctx({ modalOpen: true, stopped: true })), "submit_mo
    "G4 弹层 + 已急停 → 仍然优先提交表单（避免「填口令时误复位急停」）");
 
 // ---------------------------------------------------------------------
-section("H. 空格：只在「程序执行」页接管，别处是翻页");
+section("H. 组标题占位（空格相关断言已并入 E 段）");
 // ---------------------------------------------------------------------
-eq(resolveKey(key(" "), ctx({ view: "program" })), "program_run_or_stop", "H1 程序执行页空格 = 运行/停止");
-for (const v of ["live", "sim", "point", "ops", "settings", "about"]) {
-  eq(resolveKey(key(" "), ctx({ view: v })), "", `H2 ${v} 页空格不接管（留给浏览器翻页）`);
-}
-eq(resolveKey(key(" "), ctx({ view: undefined })), "", "H3 页面未知时保守不接管");
-eq(resolveKey(key("Spacebar"), ctx({ view: "program" })), "", "H4 只认标准的 \" \"，不认旧别名 Spacebar（避免双重触发）");
+ok(true, "H1 空格不再被任何页面接管（见 E2/E3）");
 
 // ---------------------------------------------------------------------
 section("I. 空/异常输入：一律不动作，且不抛异常");
@@ -185,44 +170,36 @@ eq(resolveKey({}, ctx()), "", "I3 没有 key 字段的事件 → 空动作");
 eq(resolveKey(key("F5"), ctx()), "", "I4 F5（刷新）不抢");
 eq(resolveKey(key("Tab"), ctx()), "", "I5 Tab（焦点移动）不抢");
 eq(resolveKey(key("ArrowUp"), ctx()), "", "I6 方向键不抢（3D 视口自己要用）");
-ok(resolveKey(key("e"), {}) === "toggle_side", "I7 上下文缺字段时按默认值走（typing 视为 false）");
+ok(resolveKey(key("Escape"), {}) === "estop", "I7 上下文缺字段时按默认值走（typing 视为 false）");
 
 // ---------------------------------------------------------------------
 section("J. tab:N 的解码：越界必须返回空，不能回落到第一个");
 // ---------------------------------------------------------------------
-eq(tabIndexOf("tab:3"), 3, "J1 tab:3 → 3");
+eq(tabIndexOf("tab:1"), 1, "J1 tab:1 → 1");
+eq(tabIndexOf("tab:2"), 0, "J1a tab:2 → 0（超出 1 个模块，解不出序号）");
 eq(tabIndexOf("tab:0"), 0, "J2 tab:0 → 0（非法）");
-eq(tabIndexOf("tab:8"), 8, "J3 tab:8 → 8（第 8 位：系统设置）");
-eq(tabIndexOf("tab:9"), 9, "J3c tab:9 → 9（第 9 位：关于，末位）");
-eq(tabIndexOf("tab:10"), 0, "J3b tab:10 → 0（超出 1~9）");
+eq(tabIndexOf("tab:9"), 0, "J3 tab:9 → 0（超出 1~1）");
 eq(tabIndexOf("toggle_side"), 0, "J4 非 tab 动作 → 0");
 eq(tabIndexOf(""), 0, "J5 空串 → 0");
 eq(tabIndexOf(null), 0, "J6 null → 0");
 
-// ★ 可见集合由 tabs.js 的 navTabs(auth) 现算（见文件顶部）—— 顺序/权限/顶栏分组改了都不会漏改这里。
-eq(tabKeyFor("tab:1", VISIBLE_NONE), "live", "J7 无权限时按 1 → live");
-eq(tabKeyFor("tab:3", VISIBLE_NONE), "about", "J8 无权限时按 3 → about（序号按可见集合顺延）");
-eq(tabKeyFor("tab:4", VISIBLE_NONE), "", "J9 无权限时按 4 → 空（不能回落到 live）");
-eq(tabKeyFor("tab:3", VISIBLE_OP), "sort", "J10 操作员按 3 → sort（智能分拣）");
-eq(tabKeyFor("tab:" + VISIBLE_OP.length, VISIBLE_OP), "about",
-   "J11 操作员按最后一个数字 → about");
-eq(tabKeyFor("tab:" + (VISIBLE_OP.length + 1), VISIBLE_OP), "",
-   "J11b 操作员按超出可见数的键 → 空（不是绕回第一个）");
-eq(tabKeyFor("tab:7", VISIBLE_ADMIN), "ops", "J12 管理员按 7 → ops（运维审计）");
-eq(tabKeyFor("tab:6", VISIBLE_ADMIN), "sim", "J12c 管理员按 6 → sim（模拟仿真）");
-eq(tabKeyFor("tab:5", VISIBLE_ADMIN), "pad", "J12e 管理员按 5 → pad（手柄执行）");
-eq(tabKeyFor("tab:4", VISIBLE_ADMIN), "ai", "J12d 管理员按 4 → ai（AI 执行）");
-eq(tabKeyFor("tab:" + VISIBLE_ADMIN.length, VISIBLE_ADMIN), "about",
-   "J12b 管理员按最后一键 → about（最后一位）");
-eq(tabKeyFor("tab:1", []), "", "J13 可见集合为空 → 空");
-eq(tabKeyFor("tab:1", null), "", "J14 可见集合为 null → 空");
+// 单页化后三种权限看到的模块集合完全一样：只有机房大屏。
+// ★ 这组断言现在钉的是"序号不会顺延到别的页"——按 2 必须解出空，
+//   而不是悄悄回到第 1 个模块（那会让用户以为按错了键，其实是被回落了）。
+const VISIBLE_NONE = ["fleet"];
+const VISIBLE_OP = ["fleet"];
+const VISIBLE_ADMIN = ["fleet"];
+eq(tabKeyFor("tab:1", VISIBLE_NONE), "fleet", "J7 按 1 → fleet（默认页，不要令牌）");
+for (const [n, list] of [[2, VISIBLE_NONE], [2, VISIBLE_OP], [2, VISIBLE_ADMIN], [5, VISIBLE_ADMIN]]) {
+  eq(tabKeyFor("tab:" + n, list), "", `J8 按 ${n} → 空（只有 1 个模块，越界不许回落到第 1 个）`);
+}
 eq(tabKeyFor("nonsense", VISIBLE_ADMIN), "", "J15 非 tab 动作 → 空");
 
 // 反向钉子：只要序号在范围内，解出的 key 必须真的在可见集合里
 {
   let bad = "";
   for (const list of [VISIBLE_NONE, VISIBLE_OP, VISIBLE_ADMIN]) {
-    for (let i = 1; i <= TABS.length; i++) {
+    for (let i = 1; i <= 1; i++) {
       const k = tabKeyFor("tab:" + i, list);
       if (k && !list.includes(k)) bad = `tab:${i} → ${k}`;
     }
@@ -231,18 +208,15 @@ eq(tabKeyFor("nonsense", VISIBLE_ADMIN), "", "J15 非 tab 动作 → 空");
 }
 
 // ---------------------------------------------------------------------
-section("K. 与 tabs.js 的**顶栏**对齐（hidden 的不占位）");
+section("K. 与 tabs.js 的真实模块对齐");
 // ---------------------------------------------------------------------
 {
-  const list = navTabs(AUTH_ADMIN).map((t) => t.key);
-  eq(TAB_KEY_COUNT, list.length, `K1 数字键位数(${TAB_KEY_COUNT}) == 顶栏模块数(${list.length})`);
+  const { TABS } = await import(pathToFileURL(path.join(ROOT, "src", "tabs.js")).href);
+  eq(TAB_KEY_COUNT, TABS.length, `K1 数字键位数(${TAB_KEY_COUNT}) == 真实模块数(${TABS.length})`);
+  const list = TABS.map((t) => t.key);
   eq(tabKeyFor("tab:1", list), list[0], "K2 按 1 → 第一个模块");
   eq(tabKeyFor("tab:" + list.length, list), list[list.length - 1], "K3 按最后一个数字 → 最后一个模块");
   ok(list.length >= TAB_KEY_COUNT, "K4 模块数不少于键位数（否则有键位是死的）");
-  // ★ 2026-10-10：hidden 的「程序执行」不占顶栏位置（与「点位执行」合并成一个入口），
-  //   但仍是**合法页面**（刷新能恢复、右栏 tab 能切过去）。
-  ok(!list.includes("program"), "K5 hidden 的「程序执行」不进顶栏、不被数字键点到");
-  ok(TABS.some((t) => t.key === "program"), "K6 但它仍在 TABS 里（合法页面，权限/safeView 照旧认）");
 }
 
 // ---------------------------------------------------------------------
@@ -254,9 +228,14 @@ ok(SHORTCUT_BY_ID.estop_reset.needAuth === true, "L3 estop_reset 需要授权");
 ok(SHORTCUT_BY_ID.estop_reset.danger === false, "L4 estop_reset 不是危险动作（复位是恢复）");
 eq(SHORTCUT_BY_ID.estop.keys, ["escape"], "L5 急停绑在 Esc 上");
 ok(SHORTCUT_BY_ID.estop.when.includes("弹层"), "L6 急停的 when 说明了弹层优先规则（界面说明与实现对得上）");
-eq(SHORTCUT_BY_ID.program_run_or_stop.needAuth, true, "L7 空格运行程序需要授权");
-ok(!SHORTCUT_BY_ID.toggle_side.needAuth && !SHORTCUT_BY_ID.toggle_camera.needAuth,
-   "L8 视图开合不需要授权（这两个动作不碰机器人）");
+// 单页化后只剩三个动作：切模块 / 急停 / 急停复位。
+// ★ 这条钉的是"表里不许混进按了没反应的死键"：E / Q / 空格已随宿主页面一起删除，
+//   如果哪天有人只加了处理函数忘了加定义（或反过来），这里会直接红。
+eq(Object.keys(SHORTCUT_BY_ID).sort(), ["estop", "estop_reset", "tab"],
+   "L7 动作表只剩：切模块 / 急停 / 急停复位");
+ok(SHORTCUT_BY_ID.tab.needAuth === false && SHORTCUT_BY_ID.tab.danger === false,
+   "L8 切模块不需要授权、不是危险动作（它不碰机器人）");
+eq(SHORTCUT_GROUPS, ["导航", "安全"], "L9 分组与剩下的动作一致（不留空分组）");
 
 console.log(`\n结果: ${pass} passed / ${fail} failed  → ${fail ? "FAIL" : "PASS"}`);
 process.exit(fail ? 1 : 0);

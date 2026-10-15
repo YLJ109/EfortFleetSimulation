@@ -44,6 +44,14 @@ function loadCfg() {
 }
 export const annCfg = ref(loadCfg());
 
+/**
+ * 播报中心面板是否开着。
+ * 放在服务层而不是组件里，是因为**两个地方要知道它**：大屏标题条上的按钮要开它，
+ * App 的全局 Esc/Enter 分派要判断"弹层开着时按键归弹层、不归急停"。
+ * 用 provide/inject 也能做，但 Esc 的判据是安全相关的，不该依赖组件树形状。
+ */
+export const announceOpen = ref(false);
+
 export function setConfig(patch) {
   annCfg.value = { ...annCfg.value, ...patch, quiet: { ...annCfg.value.quiet, ...(patch.quiet || {}) } };
   try { localStorage.setItem(LS_KEY, JSON.stringify(annCfg.value)); } catch (e) { /* 忽略 */ }

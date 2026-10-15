@@ -21,6 +21,7 @@ from app.api import (
     asr,
     auth,
     control,
+    fleet as fleet_api,
     events,
     frames,
     gamepad,
@@ -50,6 +51,7 @@ from app.db.crud import prune_old_poses, prune_system_events
 from app.db.database import SessionLocal, engine_url, init_db
 from starlette.middleware.base import BaseHTTPMiddleware
 from app.services.collector import collector
+from app.services.fleet import fleet
 from app.services.events import emit as emit_event
 from app.services.vision_ingest import ingest
 
@@ -159,11 +161,22 @@ async def lifespan(_app: FastAPI):
     # ★ P0-4：prune 已改为分批 + 短事务，启动不再可能因欠账 OOM/长锁。
     #   为避免"启动即做大量 IO 拖慢就绪"，启动只清理一次，后续交给周期任务。
     await asyncio.to_thread(_prune_all)
-    collector.start()
+    # ★ 机房模式与单机采集**二选一**（不是开关方便，是链路安全）：
+    #   collector 与 fleet 里的 A1-1 说的是同一台控制器的同一条 Modbus 长连接语义，
+    #   两边同时启动 = 同一控制器被两路并发读写。Robox 对短连接连打会回异常，
+    #   真机上更可能出现"采集与点动互相串帧"。所以 fleet 起来时单机采集必须停。
+    fleet_started = fleet.start()
+    if not fleet_started:
+        collector.start()
     ingest.start()          # 视觉事件摄入（相机服务没起时会自动重试, 不影响后端启动）
-    emit_event("system", "info", "system.start",
-               f"服务已启动（{'模拟' if collector.simulated else '真实'}链路）",
-               {"simulated": collector.simulated, "connected": collector.connected})
+    if fleet_started:
+        emit_event("system", "info", "system.start",
+                   f"服务已启动（机房模式：{len(fleet.stations)} 台只读采集）",
+                   {"fleet": True, "stations": len(fleet.stations)})
+    else:
+        emit_event("system", "info", "system.start",
+                   f"服务已启动（{'模拟' if collector.simulated else '真实'}链路）",
+                   {"simulated": collector.simulated, "connected": collector.connected})
     # ★ P0-5：周期清理任务（必须在 finally 里 cancel，否则关闭时留下悬挂任务）
     prune_task = asyncio.create_task(_prune_loop())
     try:
@@ -176,6 +189,7 @@ async def lifespan(_app: FastAPI):
             pass
         emit_event("system", "info", "system.stop", "服务正在关闭")
         ingest.stop()
+        fleet.stop()
         collector.stop()
         log.info("采集器已停止")
 
@@ -248,6 +262,7 @@ app.add_middleware(RequestLogMiddleware)
 register_exception_handlers(app)
 
 app.include_router(robot.router)
+app.include_router(fleet_api.router)
 app.include_router(ws.router)
 app.include_router(recordings.router)
 app.include_router(control.router)

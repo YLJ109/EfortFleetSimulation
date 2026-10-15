@@ -36,9 +36,13 @@ from app.db.crud import (
     prune_safety_versions,
 )
 from app.services.events import emit as emit_event
+<<<<<<< HEAD
 from app.services import safety_evidence
 from app.services.safety_eval import ssm_advice
 from app.services.safety_eval import sweep as safety_sweep
+=======
+from app.services.safety_guard import reported_ids
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
 from app.services.safety_guard import snapshot as guard_snapshot
 from app.services.safety_guard import update as guard_update
 
@@ -204,12 +208,35 @@ def api_clear_events(tok: str = Depends(require_admin), db: Session = Depends(ge
 # =====================================================================
 # 围栏实时状态上报（阶段 4：把"前端算出来的余量"喂给后端做下发互锁）
 # =====================================================================
-class LiveIn(BaseModel):
-    state: str = "safe"                  # safe | warn | danger | hit
+class LiveItem(BaseModel):
+    """一台的围栏状态（机房大屏每秒把 12 台一起报上来，见 P6 按台化互锁）。"""
+    robot_id: str = ""
+    state: str = "safe"
     zone_id: str = ""
     zone_name: str = ""
     clearance: float = 0.0
     ratio: float = 1.0
+
+
+class LiveIn(BaseModel):
+    state: str = "safe"                  # safe | warn | danger | hit
+    robot_id: str = ""                   # 省略 = 单机链路（"MAIN"）
+    zone_id: str = ""
+    zone_name: str = ""
+    clearance: float = 0.0
+    ratio: float = 1.0
+    # ★ 一次请求带全场，而不是 12 次请求：上报是每秒一次的常驻负载，
+    #   逐台发会让大屏在弱网下自己把带宽吃满，然后互锁数据反而最先掉线。
+    items: List[LiveItem] = Field(default_factory=list)
+
+
+_OK_STATES = ("safe", "warn", "danger", "hit")
+
+
+def _check_numbers(clearance: float, ratio: float) -> None:
+    import math
+    if not math.isfinite(float(clearance)) or not math.isfinite(float(ratio)):
+        raise AppError("clearance/ratio 必须是有限数值", 400, "BAD_SAFETY_NUMBER")
 
 
 @router.post("/safety/live")
@@ -220,18 +247,34 @@ def api_report_live(body: LiveIn, tok: str = Depends(require_control)):
       持续上报 state="safe" 来**架空围栏互锁**，或伪造 danger 让产线停摆。
       由于下发侧 /api/control/* 本来就要求控制令牌，上报侧挂同一把钥匙是自洽的：
       能下发的人才有资格告诉后端"围栏安全"。
+
+    ★ P6 按台化：robot_id 必须是机房登记过的机器。不认的 id 直接 400 ——
+      否则客户端可以凭空造出一台"永远 safe"的机器人，或者把内存键刷爆。
     """
-    if body.state not in ("safe", "warn", "danger", "hit"):
-        raise AppError("state 必须是 safe / warn / danger / hit",
-                       400, "BAD_SAFETY_STATE")
-    import math
-    if not math.isfinite(float(body.clearance)) or not math.isfinite(float(body.ratio)):
-        raise AppError("clearance/ratio 必须是有限数值", 400, "BAD_SAFETY_NUMBER")
-    return guard_update(body.state, body.zone_id, body.zone_name,
-                        body.clearance, body.ratio)
+    from app.core.fleet_config import get_fleet
+
+    rows = list(body.items) or [LiveItem(robot_id=body.robot_id, state=body.state,
+                                        zone_id=body.zone_id,
+                                        zone_name=body.zone_name,
+                                        clearance=body.clearance, ratio=body.ratio)]
+    known = {r["id"] for r in get_fleet().robots}
+    out: List[Dict[str, Any]] = []
+    for it in rows:
+        if it.state not in _OK_STATES:
+            raise AppError("state 必须是 safe / warn / danger / hit",
+                           400, "BAD_SAFETY_STATE")
+        _check_numbers(it.clearance, it.ratio)
+        rid = str(it.robot_id or "").strip()
+        if rid and rid not in known:
+            raise AppError("robot_id %s 不在机房名单里" % rid, 400, "UNKNOWN_ROBOT")
+        out.append(guard_update(it.state, it.zone_id, it.zone_name,
+                               it.clearance, it.ratio, rid))
+    # 单台上报时保持原来的响应形状（前端/测试都直接读顶层字段）
+    return out[0] if len(out) == 1 else {"ok": True, "count": len(out), "snapshots": out}
 
 
 @router.get("/safety/live")
+<<<<<<< HEAD
 def api_get_live():
     """查看互锁状态是否有效。
 
@@ -241,6 +284,17 @@ def api_get_live():
       要写"没有实时数据"（§5.5 铁律③：不知道就说不知道）。
     """
     return guard_snapshot()
+=======
+def api_get_live(robot_id: str = Query("", max_length=16)):
+    """查看互锁状态是否有效（排障用：reported/fresh 为 false 说明前端没在上报）。
+
+    带 robot_id 就查那一台（机房口径）；不带 = 单机链路。
+    **不会**回落到"最近上报的另一台"，那是 P6 要根除的错法。
+    """
+    snap = guard_snapshot(robot_id)
+    snap["reporting"] = reported_ids()        # 现在有几台在上报，排障时一眼看得全
+    return snap
+>>>>>>> 5481859 (feat: add fleet simulation and project interface)
 
 
 # =====================================================================

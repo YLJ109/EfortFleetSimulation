@@ -258,32 +258,8 @@ ok(/runmode\.observe\(/.test(collectorPy), "I'7 feed_run_mode 真的调到了 ru
 const robotPy = fs.readFileSync(path.join(REPO, "backend", "app", "api", "robot.py"), "utf8");
 ok(/feed_run_mode/.test(robotPy), "I'8 /rc-status 也喂一次（用户手动刷新真机链路时灯要立刻更新）");
 
-// ---------------------------------------------------------------------
-section("J. 浮层唯一性：v-for 里的门控必须带循环变量（否则一次点开渲染 N 份）");
-// ---------------------------------------------------------------------
-// ★ 真实现场 bug：底栏三盏灯的浮层写在 v-for **内部**，但条件只写 `open === 'robot'`，
-//   没带循环变量 —— v-for 每一轮都会对同一条件求值一次，于是点任意一盏灯，
-//   三盏灯的容器里各渲染一份**完全相同**的浮层（症状："点一个开了三个"，三层叠在一起）。
-//   这类问题编译期不报错、linkview 纯函数全绿也照样发生，只能在**源码结构**上钉死：
-//   浮层容器只允许声明一次，且它的门控必须引用 v-for 的循环变量。
-const stripPath = path.join(ROOT, "src", "components", "StatusStrip.vue");
-const stripRaw = fs.readFileSync(stripPath, "utf8");
-// 先剥掉 HTML 注释：本文件里就有一段说明文字含 `v-if="open === 'robot'"`，
-// 不剥会被 J5 当成真代码，变成一个自己给自己制造的假失败。
-const stripSrc = stripRaw.replace(/<!--[\s\S]*?-->/g, "");
-const loopM = stripSrc.match(/v-for="\s*([A-Za-z_$][\w$]*)\s+in\s+[^"]+"/);
-ok(!!loopM, "J1 能在模板里定位到灯的 v-for 循环");
-const alias = loopM ? loopM[1] : "p";
-eq((stripSrc.match(/class="link-pop/g) || []).length, 1,
-  "J2 ★ 浮层容器只声明一次（>1 就会被 v-for 复制成多份）");
-const gateM = stripSrc.match(/v-if="open === ([^"]+)"/);
-ok(!!gateM, "J3 找到浮层门控条件");
-ok(!!gateM && gateM[1].startsWith(alias + "."),
-  `J4 ★ 门控必须引用循环变量（open === ${alias}.key），不能只判字面量`);
-ok(!/v-if="open === ['"]/.test(stripSrc),
-  "J5 不存在「只判字面量」的浮层门控（这正是点一个开三个的成因）");
-ok(stripSrc.includes("open === p.key") && stripSrc.includes("{ wide: p.key === 'run_mode' }"),
-  "J6 三个灯共用同一个浮层容器、按 p.key 分派内容（结构不会被再次拆成三份）");
+// （原 J 段"底栏三盏灯的浮层唯一性"随 StatusStrip.vue 一起删除 —— 单页化后底栏不存在了，
+//   链路状态改由大屏底部 KPI 条承载。这段守卫盯的是组件模板结构，组件没了它就没有对象。
 
 // ---------------------------------------------------------------------
 section("K. 连接反馈文案：成功只说结论");
@@ -315,23 +291,18 @@ ok(!!nameM, "L3 能在 brand.py 里定位 SERVICE_NAME");
 eq(nameM ? nameM[1] : null, BRAND.name, "L4 ★ 前后端项目名完全一致");
 ok(!/FIT 机器人远程监控与操控平台/.test(htmlSrc + brandPy),
   "L5 已弃用的旧名不再出现在静态标题与后端");
-// ★ 2026-10-10 定名改版：顶栏改成**品牌名（主标题）+ 描述性全名（副标题）**两行 ——
-//   主标题 = BRAND.name「擎云制造」；副标题 = BRAND.subtitle「工业机器人远程智控与数字孪生系统」。
-//   厂商归属由 device（EFORT ER8-700H）承担，这里钉"厂商身份没有彻底丢"
-//   （品牌名 / 机型 / 英文名里至少一处带 EFORT 或 埃夫特）。
-ok(/埃夫特|EFORT/i.test(BRAND.name + BRAND.device + BRAND.en),
-  "L6 厂商身份仍可见（品牌名 / 机型 / 英文名里至少一处带 EFORT/埃夫特）");
-// ★ 品牌名不含 AI（改名要两边同步，防止单边残留）。
-ok(!/AI/.test(BRAND.name), "L6b 品牌名不含 AI");
+// ★ 2026-10-06 定名调整：产品从"管一台埃夫特"变成"一块屏看一整个机房（埃夫特 + 华沿）"，
+//   所以全名里**不能**再出现单一厂商名 —— 挂"埃夫特"会让华沿那 6 台在标题上不存在。
+//   厂商/型号口径挪到 BRAND.device（顶栏副标题），这里钉住它仍然说清两个牌子。
+ok(!/埃夫特|EFORT|华沿|ELFIN/.test(BRAND.name),
+  "L6 全名不含单一厂商名（机房里两个牌子，标题只写'机房'）");
+ok(/机房/.test(BRAND.name), "L6a 全名点明'机房'口径（一块屏管一屋子，不是单台）");
+ok(/埃夫特/.test(BRAND.device) && /华沿/.test(BRAND.device),
+  "L6d 厂商混编仍在副标题 device 里可见（顶栏要能看出管的是哪两种机器）");
+// ★ 阶段 7 定名调整：应用户要求全名**去掉 AI**（「FIT 埃夫特智能机器人远程控制与监控系统」）。
+//   钉两件事：中英文名都不再含 AI（改名要两边同步，防止单边残留），且禁用名不回流。
+ok(!/AI/.test(BRAND.name), "L6b 中文全名不含 AI（应用户要求的定名）");
 ok(!/\bAI\b/.test(BRAND.en), "L6c 英文全名不含 AI");
-// ★ 副标题 = 描述性全名（显示在品牌名下方、小一号）。必须非空且真的被顶栏渲染出来。
-ok(typeof BRAND.subtitle === "string" && BRAND.subtitle.trim().length > 0,
-  "L6d 副标题 BRAND.subtitle 已定义（描述性全名，不再硬编码在模板里）");
-{
-  const appSrc = fs.readFileSync(path.join(ROOT, "src", "App.vue"), "utf8");
-  ok(appSrc.includes("BRAND.subtitle"),
-    "L6e 顶栏（App.vue）在品牌名下方渲染 BRAND.subtitle 副标题");
-}
 ok(BRAND.abbr === BRAND.exportPrefix, "L7 缩写与导出前缀同源（避免导出文件名用另一套缩写）");
 // 缩写刻意不含 AI：它是导出文件名前缀，现场已有带该前缀的导出文件，改了会让新旧对不上。
 eq(BRAND.abbr, "FIT-RCMS", "L8 缩写保持 FIT-RCMS 不变（导出文件名兼容性）");

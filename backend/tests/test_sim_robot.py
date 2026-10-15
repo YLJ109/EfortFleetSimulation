@@ -55,10 +55,12 @@ def test_second_command_starts_from_reached_pose():
     r.on_command([10, 0, 0, 0, 0, 0], 100)
     time.sleep(0.8)
     r.on_command([20, 0, 0, 0, 0, 0], 100)
+    # step() 按"距上次 step 的 dt"推进；紧跟在 on_command 后面步进时 dt≈0，
+    # 拿到的就是新轨迹的起点本身，看不出"有没有往前走"。让时间先流一秒再步一次。
+    time.sleep(0.1)
     q_mid, tr = r.step()
     assert tr is True
-    assert 9.0 < q_mid[0] < 20.0        # 起点≈10，正在向 20 走
-    assert q_mid[0] > 10.0
+    assert 10.0 < q_mid[0] < 20.0        # 起点≈10（上一目标已到），正在向 20 走
 
 
 def test_min_duration_and_speed_scaling():

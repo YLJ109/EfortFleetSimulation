@@ -11,18 +11,18 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { STLLoader } from "three/addons/loaders/STLLoader.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { buildRobot } from "../robot/robotModel.js";
 import { FALLBACK_DH } from "../config.js";
 import { buildCell, PLATFORM_H, PLATFORM_TOP_SIZE } from "./cell.js";
-// lab.js 已移除：场景改为开放科技感背景（网格 + 粒子光晕）
 import { SafetyFence, STATE_RANK } from "./safety.js";
-import { createGhost, GHOST_COLOR_B } from "./ghost.js";
+import { createGhost } from "./ghost.js";
 import { buildOwnerMap } from "./jointOwner.js";
+import { buildElfChain } from "./armChain.js";
+import { buildFleet } from "./fleet.js";
 import { SKIN_BODY, SKIN_HARD, SKIN_JOINT, SKIN_LOGO, SKIN_METAL, skinMat } from "./materials.js";
-import { samplerEnabled, recordFrame, ingestRendererInfo } from "../utils/perfSampler.js";
-import { buildEndEffector, suckerLocalMm } from "./endEffector.js";
-import { createSortingBlocks } from "./sortingBlocks.js";
+import { buildEndEffector } from "./endEffector.js";
 
 // ---- 单例资源 ----
 let renderer = null;
@@ -30,6 +30,9 @@ let scene = null;
 let camera = null;
 let controls = null;
 let envTex = null;
+let hemiLight = null;      // 机房大屏进出要调光比，三盏灯必须留引用
+let keyLight = null;
+let fillLight = null;
 
 const containers = {};   // view -> HTMLElement（canvas 的落点）
 let activeView = "live";
@@ -38,16 +41,10 @@ let robot = null;        // 程序化模型（兜底） ×1
 let official = null;     // 官方数模（可动） ×1
 let fence = null;        // 安全围栏
 let cell = null;         // 地板 + 网格 + 阴影 + 地标线
-let techBg = null;       // 科技感背景（网格 + 粒子）
-let ghost = null;        // 残影 A(预演分身)：程序化模型半透明版，负责回答"要去的地方会不会撞"
-// ★ 残影 B（对比用）：让"两个点位同时看"成为可能（如 正上位 vs 原料位、A槽 vs B槽）。
-//   它与 A **同源同构**（同一个 createGhost，只换颜色），但**不参与围栏判定** ——
-//   安全结论永远只反映 A（= 当前正在评估的那个目标），避免两个残影把结论搅混。
-let ghostB = null;
-let sim = null;          // 模拟摆放物体沙盒
-// ★ 分拣 3D 可视化（18 槽位方块 + C 区摄像头）：按需创建（只有分拣页会拉它），
-//   与残影/围栏**互不影响** —— 它只是"把 state 画出来"，不参与任何安全判定。
-let sorting = null;
+let ghost = null;        // 残影(预演分身)：程序化模型半透明版，负责回答"要去的地方会不会撞"
+let fleetLayer = null;   // 机房 12 台阵列层（与上面的单机层互斥显示）
+let fleetActive = false;
+let lastFleetData = null;  // 上一次 initFleet 的数据：官方数模到货后据此重建身体
 let activeDh = null;
 let activeMounting = "floor";
 
@@ -184,25 +181,13 @@ function ensureRenderer() {
   return renderer;
 }
 
-/** 科技感背景：大范围地面网格 */
-function buildTechBackground(scene) {
-  // 大范围地面网格（青色，向外渐隐）
-  const gridHelper = new THREE.GridHelper(20, 40, 0x2fd6f0, 0x1a5f6f);
-  gridHelper.position.y = -0.001;
-  gridHelper.material.opacity = 0.12;
-  gridHelper.material.transparent = true;
-  scene.add(gridHelper);
-
-  techBg = { grid: gridHelper };
-}
-
 /** 懒创建唯一场景（不依赖容器，容器只用于 canvas 落点）。 */
 function ensureScene() {
   if (scene) return scene;
   const r = ensureRenderer();
   scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x04070d);  // Sentinel 主题深蓝黑背景
-  scene.fog = new THREE.Fog(0x04070d, 6, 18);   // 开放场景：远处渐隐入深蓝黑
+  scene.background = new THREE.Color(0x141920);
+  scene.fog = new THREE.Fog(0x141920, 9, 24);   // 大房间远处柔和收进背景
 
   camera = new THREE.PerspectiveCamera(50, 1, 0.01, 120);
   camera.position.set(1.7, 1.35, 1.75);
@@ -227,19 +212,16 @@ function ensureScene() {
     scene.environment = envTex;
     scene.environmentIntensity = 0.65;
   }
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x2a323c, 0.85));
-  const dir = new THREE.DirectionalLight(0xfff6e8, 0.95);   // 略暖的主光
-  dir.position.set(1.5, 2.5, 1.0);
-  scene.add(dir);
-  const fill = new THREE.DirectionalLight(0xdde8ff, 0.3);   // 略冷的补光（让金属/地坪有层次）
-  fill.position.set(-2.0, 1.8, -1.5);
-  scene.add(fill);
+  scene.add(hemiLight = new THREE.HemisphereLight(0xffffff, 0x2a323c, 0.85));
+  keyLight = new THREE.DirectionalLight(0xfff6e8, 0.95);   // 略暖的主光
+  keyLight.position.set(1.5, 2.5, 1.0);
+  scene.add(keyLight);
+  fillLight = new THREE.DirectionalLight(0xdde8ff, 0.3);   // 略冷的补光（让金属/地坪有层次）
+  fillLight.position.set(-2.0, 1.8, -1.5);
+  scene.add(fillLight);
 
   cell = buildCell();
   scene.add(cell.group);
-
-  // 科技感背景：大范围地面网格 + 氛围粒子
-  buildTechBackground(scene);
 
   fence = new SafetyFence(scene);
   // 机器人站在站台上 → 报警垫改铺到**台面**上（否则会被站台本体整块盖住）。
@@ -255,41 +237,7 @@ function ensureScene() {
 let safetyCb = null;
 let lastSafetyKey = "";
 
-// ★ A6 评估健康：ticks/at 描述的是**评估跑了几次、最近一次在什么时候**，
-//   与"结论有没有变化"无关 —— lastSafetyKey 会把同结论的连续帧吞掉，
-//   拿它当新鲜度就会出现"页面卡住但计数照样涨/结论没变就永远不说停摆"两种错。
-let safetyTicks = 0;
-let safetyTickAt = 0;          // performance.now()（与调用方同一时钟）
-let idleSafetyTimer = 0;
-
 export function onSafety(cb) { safetyCb = cb; }
-
-/** 评估健康读数（供 store 用**外部时钟**判定三态，绝不在这里自己说"安全"）。 */
-export function getSafetyHealth() {
-  return { ticks: safetyTicks, at: safetyTickAt };
-}
-
-/**
- * 渲染循环停帧时的**低频评估**（不 render，只量围栏）。
- *
- * ★ 为什么需要：渲染循环在 `document.hidden` / WebGL 上下文丢失时**彻底停帧**
- *   （黑屏第一根因的修法，不许回退）。以前一停帧就连评估一起停 ——
- *   后台标签页里机器人真的撞了台面，界面还挂着上一帧的"安全"。
- * ★ 浏览器会把后台 timer 节流到 ≥1s，所以阈值按 1s 口径定（见 utils/safetyLabels.js）。
- */
-export function startIdleSafetyEval(periodMs = 250) {
-  if (idleSafetyTimer) return;
-  idleSafetyTimer = setInterval(() => {
-    // 前台渲染循环正在量（<200ms 内有过评估）就不重复量一次 AABB
-    if (safetyTickAt && performance.now() - safetyTickAt < 200) return;
-    updateSafety(performance.now() / 1000);
-  }, periodMs);
-}
-export function stopIdleSafetyEval() {
-  if (!idleSafetyTimer) return;
-  clearInterval(idleSafetyTimer);
-  idleSafetyTimer = 0;
-}
 
 /**
  * 热更新围栏配置（不需要重建场景）。
@@ -323,7 +271,6 @@ function sizePlatformToFence(cfg) {
   const plat = cell.group.getObjectByName("platform");
   if (plat) plat.scale.set(f, 1, f);
   fence.setPadPlane({ y: PLATFORM_H + 0.004, size: half * 2 });
-  if (sim) sim.setBase(PLATFORM_H, half);   // 沙盒盒/摄像头/落点吸合跟随站台
 }
 
 /** 当前生效的机器人根节点（围栏包围盒与可见性都用它）。 */
@@ -368,6 +315,9 @@ function baseLiftY() {
 export function evalSafety(tSec = performance.now() / 1000) {
   ensureScene();
   if (!fence) return null;
+  // 机房模式下单机身体整层是隐藏的，而隐藏的身体量出来只会是"围栏没判它" → 假安全。
+  // 与其报一个凭空的红/绿，不如明确回答"量不了"：这里返回 null，调用方按无判据处理。
+  if (fleetActive) return null;
   const previewing = !!(ghost && ghost.visible);
   // ★ 残影测量走 withTarget：临时摆到**目标姿态**量完立刻还原，视觉上无跳变。
   //   地面检测同样只取 J1 以上子树（与实体机口径一致），否则贴地底座会永远"碰撞"。
@@ -382,8 +332,6 @@ function updateSafety(tSec) {
   if (!fence) return;
   const r = evalSafety(tSec);
   if (!r) return;
-  safetyTicks += 1;                    // ★ 单调递增，只加不减（§5.5 铁律①）
-  safetyTickAt = performance.now();
   // 残影泛红：预演终点危险/碰撞 → 整体变红，一眼看出"这个点位不能去"。
   // 量的是实体机时一律解除（泛红只表达预演结论，不表达实时读数）。
   if (ghost) ghost.setAlarm(r.source === "ghost" && STATE_RANK[r.state] >= STATE_RANK.danger);
@@ -412,20 +360,376 @@ export function initRobots(dh, mounting = "floor") {
     robot = buildRobot(dhOk, activeMounting);
     robot.root.position.y = baseLiftY();   // 站到站台台面上
     scene.add(robot.root);
-    // ★ 程序化模型是"米"坐标系 → 局部数值 /1000（官方那条是 0.001 缩放链，用 mm）
-    attachPieceAnchor(robot.flangeNode, 0.001);
   }
   if (!ghost) {
     // ★ 残影走程序化模型（绝不 clone 官方 GLB 单 mesh，那会放大 1000 倍）
     ghost = createGhost(dhOk, activeMounting, baseLiftY());
     scene.add(ghost.root);
   }
-  if (!ghostB) {
-    ghostB = createGhost(dhOk, activeMounting, baseLiftY(), GHOST_COLOR_B);
-    ghostB.setVisible(false);           // 默认藏着，需要对比时才由界面打开
-    scene.add(ghostB.root);
-  }
   applyAppearance();
+}
+
+// =====================================================================
+// 机房 12 台（fleet 层）
+//
+// 与单机层的分工：单机层是"一台看得清"，fleet 层是"12 台都在动、谁在报警"。
+// 两层共用同一个 scene / camera / controls / 几何，切模式只切可见性与相机，
+// 不重建场景 —— 重建 WebGL 资源才是现场黑屏的元凶。
+//
+// ★ 为什么 fleet 里的埃夫特用**程序化模型**而不是官方 GLB：
+//   GLB 是异步加载的，用它会变成"模型先到就高配、后到就低配"，
+//   同一个机房两次打开长得不一样，现场没法比对照片排查。
+//   程序化 ER8 与官方数模同一条 DH 链，姿态一致；俯视 12 台时几何量还少一半。
+// =====================================================================
+
+/**
+ * 机房总览机位：2.5D 等轴（axonometric）。
+ * 用户给的参考图是"数字孪生大屏"的等轴观感 —— 不是人眼透视。做法不换正交相机
+ * （OrbitControls / resize / 取姿全围着透视相机写的），而是**窄 FOV + 拉远**：
+ * fov 从 50° 收到 20° 后透视收敛极弱，看起来就是等轴，交互代码一行不用改。
+ * 方向固定 (1, .82, 1)：斜 45° 俯视，12 台阵列的左右两区在画面上正好左/右分开。
+ */
+const ISO_DIR = [0.64, 0.525, 0.64];      // 已归一化的等轴方向
+const FLEET_FOV = 20;
+const SINGLE_FOV = 50;
+const IDC_BG = 0x0b1a2a;                  // 与 index.html --idc-bg 同值（3D 底色和面板同一家）
+const SINGLE_BG = 0x141920;
+const FLEET_MAX_DIST = 160;   // 窄 FOV 要拉得远才框得下 9.3m 纵深；单机层是 9
+const SINGLE_MAX_DIST = 9;
+/** 阵列包围（initFleet 量出来）：机位距离按它算，改 fleet.yaml 间距不用改代码。 */
+let fleetBounds = { cx: 0, cz: 0, r: 6 };
+
+function fleetOverviewPose() {
+  const d = Math.max(18, fleetBounds.r * 3.4);
+  return {
+    position: [fleetBounds.cx + ISO_DIR[0] * d, ISO_DIR[1] * d, fleetBounds.cz + ISO_DIR[2] * d],
+    target: [fleetBounds.cx, 0.5, fleetBounds.cz],
+  };
+}
+
+let fleetCb = null;
+let lastFleetKey = "";
+
+/** 订阅机房安全状态（每台一条，只在**等级变化**时回调，不是每帧）。 */
+export function onFleetSafety(cb) { fleetCb = cb; }
+
+/**
+ * 按 /api/fleet 的数据建/重建机房阵列。
+ * @param {{robots: object[], layout: object, kinematics: object, safetyCfg?: object}} data
+ * @returns {{stations: number, unbuilt: object[]}} 建了几台 + 哪些台没建成（原因要显示给人看）
+ */
+export function initFleet(data) {
+  ensureScene();
+  const { robots = [], layout = {}, kinematics = {} } = data || {};
+  const cfg = (data && data.safetyCfg) || (fence && fence.cfg) || null;
+  lastFleetData = data;
+
+  // 每个**型号**一个模板：12 台只是模板的 clone（geometry/material 按引用共享）。
+  const bodies = {};
+  const errors = [];
+  Object.keys(kinematics).forEach((model) => {
+    const k = kinematics[model] || {};
+    try {
+      if (k.chain === "urdf") {
+        const c = buildElfChain(k.urdf);
+        const entry = { root: c.root, offsets: [0, 0, 0, 0, 0, 0] };
+        if (elfinMeshes) {
+          const mr = buildElfChain(k.urdf, null, elfinMeshes);
+          entry.real = { root: mr.root, offsets: [0, 0, 0, 0, 0, 0] };
+        }
+        bodies[model] = entry;
+      } else if (k.chain === "dh" && k.dh && k.dh.joints && k.dh.joints.length === 6) {
+        const offsets = k.dh.joints.map((j) => j.theta_offset || 0);
+        // ★ 用户口径：机房里要**官方数模**，不是程序化近似 —— 但官方 GLB 一台 13.8 万面，
+        //   6 台就是 83 万面（实测占整个场景三角面的 99%），操作员的手感是"卡"。
+        //   所以与华沿同一套 LOD：默认用程序化骨架，**被选中那台**换官方原件
+        //   （相机也正推在它面前，看得清细节）。两者是同一条 DH 链，姿态一致。
+        const skel = buildRobot({ joints: k.dh.joints }, "floor");
+        const entry = { root: skel.root, offsets };
+        if (official) {
+          entry.real = { root: official.root, offsets };
+          entry.realOfficial = true;      // 母本是单机层正在用的那台，不能被顺手 hide
+        }
+        bodies[model] = entry;
+      } else {
+        errors.push({ model, reason: `运动学口径不认识: chain=${k.chain}（既不是六轴 dh 也不是 urdf）` });
+      }
+    } catch (e) {
+      errors.push({ model, reason: String((e && e.message) || e) });
+    }
+  });
+
+  if (fleetLayer) { fleetLayer.dispose(); fleetLayer = null; }
+  fleetLayer = buildFleet({ scene, robots, layout, safetyCfg: cfg, bodies });
+  fleetLayer.setVisible(fleetActive);
+
+  // 量阵列包围：等轴机位的距离 / 聚焦距离都按它算（改 fleet.yaml 间距不用改代码）。
+  {
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    for (const s of fleetLayer.stations) {
+      const p = s.group.position;
+      x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x);
+      z0 = Math.min(z0, p.z); z1 = Math.max(z1, p.z);
+    }
+    if (x0 <= x1) {
+      const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+      fleetBounds = { cx, cz, r: Math.max(3, Math.hypot(x1 - x0, z1 - z0) / 2 + 1.2) };
+    }
+  }
+  // 模板根节点只是 clone 的母本，自己不参与显示、也不进场景。
+  // ★ 官方数模那份**例外**：它的母本就是单机视图正在显示的那台，
+  //   顺手 hide 会让"回到真实监控"时机器人凭空消失。
+  Object.keys(bodies).forEach((m) => {
+    if (bodies[m].official) return;
+    if (bodies[m].real && bodies[m].realOfficial) bodies[m].real.root.visible = true;
+    bodies[m].root.visible = false;
+  });
+  return { stations: fleetLayer.stations.length, unbuilt: fleetLayer.unbuilt.concat(errors) };
+}
+
+/**
+ * 用上次那份数据重建机房阵列。
+ * 存在的理由只有一个：官方数模是异步加载的，到货后要把手上那 6 台埃夫特的
+ * "程序化占位身体"换成官方身体 —— 否则用户看到的永远是近似模型。
+ */
+export function rebuildFleet() {
+  if (!lastFleetData) return { stations: 0, unbuilt: [] };
+  return initFleet(lastFleetData);
+}
+
+// ---------------------------------------------------------------------
+// 华沿 ELFIN 官方网格（厂商 STL，1:1）
+// ---------------------------------------------------------------------
+/** 几何缓存：加载一次，12 台共用同一批 BufferGeometry（clone 共享几何）。 */
+let elfinMeshes = null;
+let elfinMeshJob = null;
+
+/**
+ * 拉取并解析官方 STL 网格。
+ * @param {string} dir  静态目录，如 "models/elfin5"
+ * @param {{base:string, links:string[]}} files 相对 dir 的文件名
+ * @returns {Promise<boolean>} 成功与否（失败就继续用关节链骨架画，不影响读数）
+ *
+ * ★ 为什么不转 GLB：本机没有任何网格转换工具，而手写转换等于在"厂商原始几何"
+ *   和"屏幕上那台"之间插一个没人复核过的步骤。STLLoader 直接吃原件，
+ *   1:1 是可证明的；代价是 18MB 与约 23 万三角面，所以只在真的需要时才加载。
+ */
+export function loadElfMeshes(dir, files) {
+  if (elfinMeshes) return Promise.resolve(true);
+  if (elfinMeshJob) return elfinMeshJob;
+  const want = [["base", files.base]].concat(
+    (files.links || []).slice(0, 6).map((f, i) => ["link" + (i + 1), f]));
+  const loader = new STLLoader();
+  elfinMeshJob = Promise.all(want.map(([name, f]) =>
+    loader.loadAsync(`${dir}/${f}`).then((geo) => {
+      // STL 只带顶点位置：不重算法线，整台会像平涂塑料片
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+      return [name, geo];
+    }))).then((pairs) => {
+    let base = null;
+    const links = [];
+    for (const [name, geo] of pairs) {
+      if (name === "base") base = geo;
+      else links[Number(name.slice(4)) - 1] = geo;
+    }
+    if (!base || links.filter(Boolean).length !== 6) { elfinMeshes = null; return false; }
+    elfinMeshes = { base, links };
+    // 网格到货前建好的阵列是骨架版 → 重建一次换成真身体（与官方 GLB 同一套做法）
+    if (lastFleetData) rebuildFleet();
+    return true;
+  }).catch((e) => {
+    console.warn("华沿官方网格加载失败，继续用关节链骨架渲染:", e);
+    elfinMeshes = null;
+    return false;
+  });
+  return elfinMeshJob;
+}
+
+/**
+ * 让某一台启用/停用真网格身体（LOD 开关，见 three/fleet.js 的 setReal）。
+ * @returns {boolean} false = 这台没有真网格可用
+ */
+export function fleetRealModel(id, on) {
+  return !!(fleetLayer && fleetLayer.setReal(id, on));
+}
+
+/**
+ * 仅开发模式：把渲染器挂到 window，方便在浏览器里直接读
+ * `__efortRenderer.info.render`（triangles / calls）与 `.info.memory`。
+ * 帧率问题必须先分清"JS 每帧算多了"还是"GPU 画多了"，靠猜会一直绕。
+ */
+if (import.meta.env && import.meta.env.DEV) {
+  const w = typeof window !== "undefined" ? window : null;
+  if (w) {
+    Object.defineProperty(w, "__efortRenderer", { get: () => renderer });
+    Object.defineProperty(w, "__efortScene", { get: () => scene });
+  }
+}
+
+/** 机房阵列是否正在显示。 */
+export function fleetModeOn() { return fleetActive; }
+
+/**
+ * 进/出机房视图。
+ * ★ 单机层整层让位：阵列以原点为中心铺开，而单机那台机器人、那座站台正好站在原点，
+ *   两层同框会重叠成一团（站台还会从阵列中间顶出来）。
+ * ★ 进出各配一次相机：进机房给总览机位，出机房回到操作员存过的视角。
+ */
+export function setFleetMode(on) {
+  ensureScene();
+  const want = !!on && !!fleetLayer && fleetLayer.stations.length > 0;
+  if (want === fleetActive) return want;
+  fleetActive = want;
+  if (fleetLayer) {
+    fleetLayer.setVisible(want);
+    // 进出机房都清一次残影：残影属于"某一台的工位"，换了层还挂着就是幽灵姿态
+    fleetLayer.ghostClear();
+  }
+  // ★ 换层就作废"上次广播过的状态键"：两层各自去重，切换后若状态恰好与上次的键相同，
+  //   回调不会重发，顶部报警条会一直挂着**另一层**的旧结论（机房红条留在单机页上）。
+  lastSafetyKey = "";
+  lastFleetKey = "";
+
+  if (robot) robot.root.visible = !want;
+  if (official) official.root.visible = !want;
+  if (ghost && want) ghost.setVisible(false);
+  if (fence) {
+    fence.group.visible = !want && (!fence.cfg || fence.cfg.enabled !== false);
+    // 单机层的报警垫铺在站台台面上，机房那 12 块垫子铺各自地坪上的区域多边形。
+    // padPlane 存在实例上、applyConfig 不会重置它，所以退出机房时把它补回来。
+    if (!want) {
+      fence.setPadPlane(baseLiftY() > 0
+        ? { y: PLATFORM_H + 0.004, size: PLATFORM_TOP_SIZE } : null);
+    }
+  }
+  if (cell) cell.group.visible = !want;    // 单机那块 3.6m 地坪 + 站台
+  setHallLighting(want);
+
+  controls.maxDistance = want ? FLEET_MAX_DIST : SINGLE_MAX_DIST;
+  if (want) {
+    const p = fleetOverviewPose();
+    applyCameraPose(p.position, p.target);
+  } else if (fence && fence.cfg && fence.cfg.camera) {
+    applyCameraPose(fence.cfg.camera.position, fence.cfg.camera.target);
+  }
+  return want;
+}
+
+/**
+ * 机房 = 深色数字孪生空腔；单机 = 亮实验室。两套光比/底色/雾距各记各的，
+ * 进出成对还原 —— 漏还原任何一项，单机页就会"变暗"或机房页"发灰"。
+ */
+function setHallLighting(dark) {
+  if (camera) {
+    camera.fov = dark ? FLEET_FOV : SINGLE_FOV;
+    camera.updateProjectionMatrix();
+  }
+  if (scene) {
+    scene.background = new THREE.Color(dark ? IDC_BG : SINGLE_BG);
+    // 等轴机位离阵列 20~60m，单机那套 9/24 的雾会把整个机房糊进背景色里。
+    scene.fog = dark ? new THREE.Fog(IDC_BG, 40, 160) : new THREE.Fog(SINGLE_BG, 9, 24);
+    if (envTex) scene.environmentIntensity = dark ? 0.28 : 0.65;
+  }
+  if (hemiLight) hemiLight.intensity = dark ? 0.42 : 0.85;
+  if (keyLight) keyLight.intensity = dark ? 0.5 : 0.95;
+  if (fillLight) fillLight.intensity = dark ? 0.16 : 0.3;
+}
+
+/** 一帧机房姿态：{ robot_id: [J1..J6 度] }。来自 WS 的 fleet_pose 合批帧。 */
+export function applyFleetPoses(map) {
+  if (fleetLayer) fleetLayer.setPoses(map);
+}
+
+/**
+ * 相机推到某一台工位前（大屏点卡片 = 总览↔单机推拉）。
+ * ★ 只改相机，不改任何机器人 —— 大屏是只读的。
+ * @returns {boolean} false = 机房层还没建好 / 没这台
+ */
+export function fleetFocus(id) {
+  ensureScene();
+  if (!fleetLayer || !fleetActive) return false;
+  const st = fleetLayer.stations.find((s) => s.id === id);
+  if (!st) return false;
+  const p = st.group.position;
+  // 聚焦也保持等轴方向（只改距离/目标）：2.5D 大屏里"推近"不该变成透视特写
+  const d = 7.5;
+  applyCameraPose([p.x + ISO_DIR[0] * d, ISO_DIR[1] * d, p.z + ISO_DIR[2] * d],
+    [p.x, 0.7, p.z]);
+  return true;
+}
+
+/** 回到机房总览机位。 */
+export function fleetOverview() {
+  ensureScene();
+  if (!fleetLayer || !fleetActive) return false;
+  const p = fleetOverviewPose();
+  applyCameraPose(p.position, p.target);
+  return true;
+}
+
+/**
+ * 仿真驱动：直接把某台的**显示姿态**设成给定角度。
+ * 用于"这台没连真机"时的沙盘操作 —— 滑块推多少，画面就动多少，不需要执行按钮。
+ * ★ 它只改前端自己的显示，不发任何请求、不碰任何链路；真机是否在线由调用方判断。
+ */
+export function fleetDrive(id, qDeg) {
+  if (!fleetLayer) return false;
+  fleetLayer.setPose(id, qDeg);
+  return true;
+}
+
+/**
+ * 把等轴相机框到"这一页的这几台"上（作用域换页 = 相机推拉，不是重新布局）。
+ * @param {string[]} ids 工位 id 列表；空数组 = 回到整间机房
+ */
+export function fleetFit(ids) {
+  ensureScene();
+  if (!fleetLayer || !fleetActive) return false;
+  const list = Array.isArray(ids) && ids.length
+    ? fleetLayer.stations.filter((st) => ids.includes(st.id))
+    : fleetLayer.stations;
+  if (!list.length) return false;
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+  for (const st of list) {
+    const p = st.group.position;
+    x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x);
+    z0 = Math.min(z0, p.z); z1 = Math.max(z1, p.z);
+  }
+  const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+  const span = Math.max(3.2, Math.hypot(x1 - x0, z1 - z0) + 2.6);
+  const d = span / 2 / Math.tan(deg2rad(FLEET_FOV / 2));
+  applyCameraPose([cx + ISO_DIR[0] * d, ISO_DIR[1] * d, cz + ISO_DIR[2] * d], [cx, 0.5, cz]);
+  return true;
+}
+
+/**
+ * 大屏控制台的残影：把某一台的**目标姿态**画成半透明副本，并回答"这个位置会不会撞"。
+ * @param {string} id 工位 id
+ * @param {number[]|null} qDeg 目标六轴角（度）；传 null 等于清除残影
+ * @returns {{state:string, clearance:number}|null}
+ * ★ 这里只画不写：残影不碰任何真实关节，也不产生任何下发。
+ *   真正的执行要走带 robot_id 的写接口，并且过"授权 + 写闸 + 残影安全"三道关。
+ */
+export function fleetGhost(id, qDeg) {
+  if (!fleetLayer) return null;
+  if (!qDeg) { fleetLayer.ghostClear(); return null; }
+  return fleetLayer.ghostEval(id, qDeg);
+}
+
+/**
+ * 机房安全状态广播。
+ * ★ 回调键**只含等级**，不含净空数值：12 台同时在动时净空每帧都在变，
+ *   按净空建键等于 60Hz × 12 次写响应式 store —— 那才是真会掉帧的地方。
+ *   HUD 要显示净空可以自己去位姿帧里取，颜色只需要等级。
+ */
+function updateFleetSafety(tSec) {
+  const r = fleetLayer.update(tSec);
+  const key = r.list.map((x) => `${x.id}:${x.state}`).join("|");
+  if (key !== lastFleetKey) {
+    lastFleetKey = key;
+    if (fleetCb) fleetCb(r);
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -438,7 +742,6 @@ const qTarget = [0, 0, 0, 0, 0, 0];
 const qCurrent = [0, 0, 0, 0, 0, 0];
 let qReady = false;
 let lastFrameMs = 0;
-let infoTick = 0;              // ★ B1：renderer.info 读取节拍（每 30 帧一次，不逐帧读）
 
 function pushPose(q) {
   if (robot) robot.applyJoints(q);
@@ -485,46 +788,6 @@ export function getTcp() {
   const t = r.getTcp();
   pushPose(qCurrent);
   return t;
-}
-
-// =====================================================================
-// ★★ 工件锚点（piece-anchor）：挂在 J6 末端工具的**吸盘口**上，供分拣 3D
-//    把"手上那块料"贴到吸盘上（2026-10-09 用户反馈："吸气的时候 3D 物体贴着
-//    机器人的 J6 那个工具的红色吸盘一起走，不要消失"）。
-//
-//    为什么不能挂在法兰中心：本工具从法兰沿 z 伸出 132mm、两个红色吸盘装在
-//    左右立板外侧（开口朝 ±x）—— 法兰中心那个位置**在腕部实体内部**，
-//    工件放那儿会被腕筒挡住，看起来就是"一吸气工件就消失"。
-//    锚点位置由 endEffector.suckerLocalMm() 给（与建模几何同源，改几何自动跟着走）。
-//
-//    ★ 单位坑：官方模型挂在 `root.scale = 0.001` 的链里，局部数值用 **mm**；
-//      程序化模型本身是**米**，局部数值必须 /1000。两边差别 1000 倍，写错就是灾难。
-// =====================================================================
-let eeAnchor = null;
-
-function attachPieceAnchor(node, localUnitPerMm) {
-  if (!node) return;
-  const [x, y, z] = suckerLocalMm(0);          // 吸盘口（不含料厚）
-  const a = new THREE.Object3D();
-  a.name = "piece-anchor";
-  a.position.set(x * localUnitPerMm, y * localUnitPerMm, z * localUnitPerMm);
-  node.add(a);
-  eeAnchor = a;
-}
-
-/**
- * 吸盘口锚点的世界位置(mm, 场景系) + 世界朝向。
- * 每帧由 renderFrame 喂给分拣 3D —— 料因此**贴着吸盘、随 J6 姿态一起走**。
- * @returns {{x:number,y:number,z:number,q:[number,number,number,number]}|null}
- */
-export function getPieceAnchor() {
-  if (!eeAnchor) return null;
-  eeAnchor.updateMatrixWorld(true);
-  const p = new THREE.Vector3();
-  const q = new THREE.Quaternion();
-  const s = new THREE.Vector3();
-  eeAnchor.matrixWorld.decompose(p, q, s);
-  return { x: p.x * 1000, y: p.y * 1000, z: p.z * 1000, q: [q.x, q.y, q.z, q.w] };
 }
 
 /** 切换活动视图：把 canvas 搬到该视图容器 + resize。场景与模型不动。 */
@@ -596,26 +859,18 @@ export function renderFrame() {
   const now = performance.now();
   const dt = lastFrameMs ? Math.min(0.1, (now - lastFrameMs) / 1000) : 1 / 60;
   lastFrameMs = now;
-  stepSmoothing(dt);                 // 姿态平滑逼近 → 动作丝滑
-  if (ghost) ghost.step(dt);         // 残影预演：把自己的姿态"飘"到目标点位
-  if (ghostB) ghostB.step(dt);        // 对比残影同理（平滑飘过去）
+  if (fleetActive) {
+    // 机房模式：12 台各自平滑 + 各自评估自己的围栏。
+    // 单机层的残影/沙盒/姿态平滑都不跑 —— 它们量的是"那一台"，在机房里既看不见也无意义。
+    fleetLayer.step(dt);
+    updateFleetSafety(now / 1000);
+  } else {
+    stepSmoothing(dt);                 // 姿态平滑逼近 → 动作丝滑
+    if (ghost) ghost.step(dt);         // 残影预演：把自己的姿态"飘"到目标点位
+    updateSafety(now / 1000);
+  }
   controls.update();
-  // 实验室已移除，无智能剖切
-  updateSafety(now / 1000);
-  if (sim) {
-    const t = getTcp();                        // mm → 米，喂给模拟沙盒
-    sim.tick({ x: t.x / 1000, y: t.y / 1000, z: t.z / 1000 });
-  }
-  // 分拣：摄像头闪烁 + 手上方块**贴着吸盘**跟随末端（用吸盘口锚点，不是法兰中心）
-  if (sorting) sorting.step(dt, getTcp(), getPieceAnchor());
   renderer.render(scene, camera);
-  // ★ B1：渲染侧指标。**默认关闭**（samplerEnabled() 为假时这两行什么都不做），
-  //   renderer.info 每 30 帧读一次 —— 每帧读就是往热路径加活。
-  if (samplerEnabled()) {
-    recordFrame(now, dt);
-    infoTick = (infoTick + 1) % 30;
-    if (infoTick === 0) ingestRendererInfo(renderer.info);
-  }
 }
 
 // ---------------------------------------------------------------------
@@ -630,62 +885,11 @@ export function setGhostPose(qDeg) {
 }
 
 /** 显隐残影。 */
-export function setGhostPoseB(qDeg) {
-  if (ghostB) ghostB.setPose(qDeg);
-}
-export function showGhostB(v) {
-  if (ghostB) ghostB.setVisible(v);
-}
-export function ghostBVisible() { return !!(ghostB && ghostB.visible); }
-
 export function showGhost(v) {
   if (ghost) ghost.setVisible(v);
 }
 
 export function ghostVisible() { return !!(ghost && ghost.visible); }
-
-// ---------------------------------------------------------------------
-// 分拣 3D 可视化（方块/空槽/摄像头）—— 由分拣页驱动。
-// ★ 位置全部来自后端 FK（示教点位），**不是相机识别的实际位置**；
-//   坐标换算唯一入口见 three/sceneCoords.js（有 headless 对拍钉死）。
-// ---------------------------------------------------------------------
-/** 灌入槽位数据（来自 /api/sorting/blocks）。首次调用时按需建对象。 */
-export function setSortingSlots(payload) {
-  ensureScene();
-  if (!sorting) {
-    sorting = createSortingBlocks(baseLiftY());
-    scene.add(sorting.root);
-  }
-  sorting.setSlots(payload);
-  return sorting.info();
-}
-
-/** 按 /api/sorting/state 更新方块（幂等；同状态不重复改场景）。 */
-export function updateSortingState(state) {
-  if (!sorting) return;
-  sorting.update(state);
-}
-
-/**
- * 井字棋棋盘覆盖：B 区按格子显隐方块、A 区按已取用隐藏料（方案 §6.3）。
- * ★ 3D 未装填时空操作；传 null 清除覆盖（回到分拣显示）。
- * @param {{board?:Array, used?:Array, holding?:boolean}|null} o
- */
-export function setTttBoardState(o) {
-  if (!sorting) return;
-  sorting.setTtt(o);
-}
-
-/** 分拣可视化的显隐（离开分拣页就藏起来，避免在别的视图里"多出一堆方块"）。 */
-export function showSortingBlocks(v) {
-  if (sorting) sorting.setVisible(v);
-}
-
-/** 分拣可视化是否已建（供页面判断要不要先拉 /blocks）。 */
-export function sortingBlocksReady() { return !!sorting; }
-
-/** 分拣可视化自检信息（回归用）。 */
-export function sortingBlocksInfo() { return sorting ? sorting.info() : null; }
 
 // ---------------------------------------------------------------------
 // 关节高亮：悬停某个关节读数时，把 3D 里对应的关节段打上蓝色自发光。
@@ -807,8 +1011,6 @@ function buildArticulatedOfficial(parts, dh, mounting) {
 
   const ee = buildEndEffector();
   tcpNode.add(ee.group);
-  // ★ 工件锚点：挂在与末端工具**同一个**法兰节点上（官方链局部数值用 mm）
-  attachPieceAnchor(tcpNode, 1);
 
   function applyJoints(qDeg) {
     for (let i = 0; i < joints.length; i++) {
@@ -942,6 +1144,9 @@ export async function loadOfficialModel(url = "/models/robot_full.glb") {
     official = null;
   }
   applyAppearance();
+  // ★ 机房那 6 台埃夫特可能已经用"程序化占位身体"建好了 —— 官方数模到货后换掉，
+  //   否则用户会在大屏上看到一套近似模型，而单机页看到的是官方模型（同一台两种长相）。
+  if (official && lastFleetData) rebuildFleet();
 }
 
 /**
@@ -1024,7 +1229,7 @@ export function disposeAll() {
   // 审计修复 P0-ui-3：撤掉切视图遗留的尺寸补救 rAF，避免单例置空后仍去渲染
   if (sizeFixRaf) { cancelAnimationFrame(sizeFixRaf); sizeFixRaf = 0; }
   // 1) 各子模块自清（从场景摘除自己的 group，并释放自有资源）
-  [sim, fence, ghost, ghostB, cell, sorting].forEach((m) => {
+  [fence, ghost, cell, fleetLayer].forEach((m) => {
     try { if (m && m.dispose) m.dispose(); } catch (e) { /* 忽略 */ }
   });
   // 2) 兜底清扫场景内残留的几何/材质/贴图
@@ -1046,11 +1251,9 @@ export function disposeAll() {
   // 4) 单例引用全部置空
   renderer = null; scene = null; camera = null; controls = null; envTex = null;
   robot = null; official = null; fence = null; cell = null;
-  ghost = null; ghostB = null; sim = null; activeDh = null;
-  // ★ 工件锚点必须一起置空：它挂在被 dispose 的模型节点上，
-  //   不置空就会指向"已从场景摘掉的旧节点"—— 重挂后料会贴在旧位置上。
-  eeAnchor = null;
-  sorting = null;
+  ghost = null; activeDh = null;
+  // 机房层随场景一起作废：回调也清掉，否则下一个页面实例收不到任何机房状态
+  fleetLayer = null; fleetActive = false; fleetCb = null; lastFleetKey = "";
   qReady = false; lastFrameMs = 0; lastSafetyKey = "";
   lastPixelRatio = 0;
   glState = "ok";

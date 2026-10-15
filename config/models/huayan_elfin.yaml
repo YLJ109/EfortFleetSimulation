@@ -1,0 +1,200 @@
+# =====================================================================
+# 华沿 ELFIN 协作臂机型档案
+#
+# ★ 数据来源：华沿官方模型仓库 huayan-robotics/elfin_model
+#     commit 84baf18d37eefa46b6f092c7fa1f105f81f70ecb (2023-05-06)
+#     文件 urdf/ROS2/ethercat/elfin{3,5,5_l,10,10_l,15}.urdf.xacro
+#     已原样存到 vendor/elfin_model/urdf/ 下，本表是从那些 xacro 里逐条抄出来的，
+#     **不是反推、不是估算、不是猜**。
+#   工作范围/负载/自重来自《中文_UL_Elfin机械说明书_(ver3.0)》第 5 章技术规格。
+#
+# ★ 交叉验证（两条独立来源对得上，才敢用）：
+#     xacro 里 L2+L3 = 0.38+0.42 = 0.80m  ←→  机械说明书 E05 常规臂 工作范围 800mm
+#     0.266+0.324 = 0.59m  ←→  E03 590mm      0.48+0.52 = 1.00m  ←→  E10 1000mm
+#     0.6+0.7     = 1.30m  ←→  E10L 加长臂    0.455+0.495= 0.95m ←→  E05L 加长臂
+#
+# ★ 为什么这里不用 DH 参数（和埃夫特那边不一样）：
+#   官方给的是 URDF 关节链，形如  T_i = Translate(xyz) · Rz(yaw)Ry(pitch)Rx(roll) · Rz(θ_i)。
+#   硬转成标准 DH 会引入转换错误，而机器人一旦画错姿态就是安全问题。
+#   所以正解直接按上面这条链算，并且**用控制器自己报的坐标校验**：
+#   DataSheet 的 PosAndVel.Actual_PCS_Base 就是控制器算好的笛卡尔坐标，
+#   本地 FK 结果和它一比，误差超阈值就说明机型选错或关节方向反了（见 verify 脚本）。
+#
+# ★ 本轮只读：本文件里的运动学只用来「把真机角度画成 3D 姿态」，
+#   不做逆解、不下发、不进任何写路径。
+# =====================================================================
+
+model:
+  brand: "HUAYAN"
+  family: "ELFIN"
+  axes: 6
+  joint_dtype: "deg"          # DataSheet 的 Actual_Position 单位就是度
+  # 官方仓库里 485 末端 / 总线(ethercat)末端两套模型高度差 1~11mm，
+  # 这里统一取 ethercat 那套的 xacro；若现场是 485 末端，只换 urdf_source 里的目录名。
+  urdf_source: "vendor/elfin_model/urdf"
+  upstream_pinned_commit: "84baf18d37eefa46b6f092c7fa1f105f81f70ecb"
+
+# ---------------------------------------------------------------------
+# 现场到底是哪台？铭牌没核对之前，这只是显示用的默认值。
+#   · 选错机型不影响采集：关节角、IP、使能/报错状态全都照样读得到。
+#   · 影响的只有 3D 里手臂的长短和高度。
+#   · 核对方法：看本体铭牌 E03/E05/E05L/E10/E10L/E15，
+#     或者拿 DataSheet 的 Actual_PCS_Base 跟下表各机型的可达范围比一比。
+# ---------------------------------------------------------------------
+variant: "elfin5"
+
+variants:
+  elfin3:
+    display_name: "ELFIN E03 常规臂"
+    payload_kg: 3
+    reach_mm: 590
+    self_weight_kg: 18
+    # 关节链：每轴一个 {xyz, rpy}，单位 m / rad，来自 xacro 原文
+    #   含义 = 从父连杆坐标系先平移到 xyz，再转固定角，之后关节角 θ 绕该坐标系的 z 轴转。
+    #   ★ rpy 三个数的顺序照 xacro 原文 = [roll, pitch, yaw]（URDF 规范第一个数是 roll），
+    #     固定角矩阵 R = Rz(yaw)·Ry(pitch)·Rx(roll)。
+    #     早期注释在这里写成 (yaw,pitch,roll)，是错的注释、对的数值 —— 已更正。
+    #     判据（frontend/tools/verify_armchain.mjs，六个机型逐一比对）：按 [roll,pitch,yaw]
+    #     读，零位 TCP 高 = 官方站立高度（E05: 1176.5mm，误差 0.00mm）；
+    #     按 (yaw,pitch,roll) 读，E05 末端躺到 220mm —— 现场一眼就能看出手臂是横着的。
+    joints:
+      - { name: "J1", xyz: [0, 0, 0.1925], rpy: [0, 0, 0],           lower: -3.14, upper: 3.14, effort: 200, velocity: 1.57 }
+      - { name: "J2", xyz: [0, 0, 0],       rpy: [1.5708, 0, 0],     lower: -2.35, upper: 2.35, effort: 200, velocity: 1.57 }
+      - { name: "J3", xyz: [0, 0.266, 0],   rpy: [3.1416, 0, 1.5708],lower: -2.61, upper: 2.61, effort: 200, velocity: 1.57 }
+      - { name: "J4", xyz: [0, 0, 0],       rpy: [1.5708, 0, 1.5708],lower: -3.14, upper: 3.14, effort: 104, velocity: 1.57 }
+      - { name: "J5", xyz: [0, 0, 0.324],   rpy: [-1.5708, 0, 0],    lower: -2.56, upper: 2.56, effort: 34,  velocity: 1.57 }
+      - { name: "J6", xyz: [0, 0, 0],       rpy: [1.5708, 0, 0],     lower: -3.14, upper: 3.14, effort: 34,  velocity: 1.57 }
+    # 法兰 → 末端 TCP（elfin_end_joint），未装工具时 TCP 就在此处
+    end_fixed: { xyz: [0, 0, 0.1565], rpy: [0, 0, 0] }
+    standing_height_mm: 939          # 官方 README 机型表（总线末端）
+
+  elfin5:
+    display_name: "ELFIN E05 常规臂"
+    payload_kg: 5
+    reach_mm: 800
+    self_weight_kg: 25
+    joints:
+      - { name: "J1", xyz: [0, 0, 0.22],   rpy: [0, 0, 0],            lower: -3.14, upper: 3.14, effort: 420, velocity: 1.57 }
+      - { name: "J2", xyz: [0, 0, 0],       rpy: [1.5708, 0, 0],      lower: -2.35, upper: 2.35, effort: 420, velocity: 1.57 }
+      - { name: "J3", xyz: [0, 0.38, 0],    rpy: [3.1416, 0, 1.5708], lower: -2.61, upper: 2.61, effort: 200, velocity: 1.57 }
+      - { name: "J4", xyz: [0, 0, 0],       rpy: [1.5708, 0, 1.5708], lower: -3.14, upper: 3.14, effort: 200, velocity: 1.57 }
+      - { name: "J5", xyz: [0, 0, 0.42],    rpy: [-1.5708, 0, 0],     lower: -2.56, upper: 2.56, effort: 69,  velocity: 1.57 }
+      - { name: "J6", xyz: [0, 0, 0],       rpy: [1.5708, 0, 0],      lower: -3.14, upper: 3.14, effort: 69,  velocity: 1.57 }
+    end_fixed: { xyz: [0, 0, 0.1565], rpy: [0, 0, 0] }
+    standing_height_mm: 1176.5
+
+  elfin5_l:
+    display_name: "ELFIN E05L 加长臂"
+    payload_kg: 3.5
+    reach_mm: 950
+    joints:
+      - { name: "J1", xyz: [0, 0, 0.22],   rpy: [0, 0, 0],             lower: -3.14, upper: 3.14, effort: 420, velocity: 1.57 }
+      - { name: "J2", xyz: [0, 0, 0],       rpy: [1.5708, 0, 0],       lower: -2.35, upper: 2.35, effort: 420, velocity: 1.57 }
+      - { name: "J3", xyz: [0, 0.455, 0],   rpy: [-3.1416, 0, 1.5708], lower: -2.61, upper: 2.61, effort: 200, velocity: 1.57 }
+      - { name: "J4", xyz: [0, 0, 0],       rpy: [1.5708, 0, 1.5708],  lower: -3.14, upper: 3.14, effort: 200, velocity: 1.57 }
+      - { name: "J5", xyz: [0, 0, 0.495],   rpy: [-1.5708, 0, 0],      lower: -2.56, upper: 2.56, effort: 69,  velocity: 1.57 }
+      - { name: "J6", xyz: [0, 0, 0],       rpy: [1.5708, 0, 0],       lower: -3.14, upper: 3.14, effort: 69,  velocity: 1.57 }
+    end_fixed: { xyz: [0, 0, 0.1565], rpy: [0, 0, 0] }
+    standing_height_mm: 1326.5
+
+  elfin10:
+    display_name: "ELFIN E10 常规臂"
+    payload_kg: 10
+    reach_mm: 1000
+    joints:
+      - { name: "J1", xyz: [0, 0, 0.26],   rpy: [0, 0, 0],             lower: -3.14, upper: 3.14, effort: 420, velocity: 1.57 }
+      - { name: "J2", xyz: [0, 0, 0],       rpy: [1.5708, 0, 0],       lower: -2.35, upper: 2.35, effort: 420, velocity: 1.57 }
+      - { name: "J3", xyz: [0, 0.48, 0],    rpy: [-3.1416, 0, 1.5708], lower: -2.61, upper: 2.61, effort: 200, velocity: 1.57 }
+      - { name: "J4", xyz: [0, 0, 0],       rpy: [1.5708, 0, 1.5708],  lower: -3.14, upper: 3.14, effort: 200, velocity: 1.57 }
+      - { name: "J5", xyz: [0, 0, 0.52],    rpy: [-1.5708, 0, 0],      lower: -2.56, upper: 2.56, effort: 69,  velocity: 1.57 }
+      - { name: "J6", xyz: [0, 0, 0],       rpy: [1.5708, 0, 0],       lower: -3.14, upper: 3.14, effort: 69,  velocity: 1.57 }
+    end_fixed: { xyz: [0, 0.0, 0.1735], rpy: [0, 0, 0] }
+    standing_height_mm: 1433.5
+
+  elfin10_l:
+    display_name: "ELFIN E10L 加长臂"
+    payload_kg: 8
+    reach_mm: 1300
+    joints:
+      - { name: "J1", xyz: [0, 0, 0.26],   rpy: [0, 0, 0],           lower: -3.14, upper: 3.14, effort: 420, velocity: 1.57 }
+      - { name: "J2", xyz: [0, 0, 0],       rpy: [1.5708, 0, 0],     lower: -2.35, upper: 2.35, effort: 420, velocity: 1.57 }
+      - { name: "J3", xyz: [0, 0.6, 0],     rpy: [3.1416, 0, 1.5708],lower: -2.61, upper: 2.61, effort: 200, velocity: 1.57 }
+      - { name: "J4", xyz: [0, 0, 0],       rpy: [1.5708, 0, 1.5708],lower: -3.14, upper: 3.14, effort: 200, velocity: 1.57 }
+      - { name: "J5", xyz: [0, 0, 0.7],     rpy: [-1.5708, 0, 0],    lower: -2.56, upper: 2.56, effort: 69,  velocity: 1.57 }
+      - { name: "J6", xyz: [0, 0, 0],       rpy: [1.5708, 0, 0],     lower: -3.14, upper: 3.14, effort: 69,  velocity: 1.57 }
+    end_fixed: { xyz: [0, 0.0, 0.1735], rpy: [0, 0, 0] }
+    standing_height_mm: 1733.5
+
+  elfin15:
+    display_name: "ELFIN E15 常规臂"
+    payload_kg: 15
+    reach_mm: 1300
+    joints:
+      - { name: "J1", xyz: [0, 0, 0.262],  rpy: [0, 0, 0],            lower: -3.14, upper: 3.14, effort: 420, velocity: 1.57 }
+      - { name: "J2", xyz: [0, 0, 0],       rpy: [1.5708, 0, 0],      lower: -2.35, upper: 2.35, effort: 420, velocity: 1.57 }
+      - { name: "J3", xyz: [0, 0.73, 0],    rpy: [3.1416, 0, 1.5708], lower: -2.61, upper: 2.61, effort: 200, velocity: 1.57 }
+      - { name: "J4", xyz: [0, 0, 0],       rpy: [1.5708, 0, 1.5708], lower: -3.14, upper: 3.14, effort: 200, velocity: 1.57 }
+      - { name: "J5", xyz: [0, 0, 0.57],    rpy: [1.5708, 0, 3.1416], lower: -2.56, upper: 2.56, effort: 69,  velocity: 1.57 }
+      - { name: "J6", xyz: [0, 0, 0],       rpy: [1.5708, 0, 3.1416], lower: -3.14, upper: 3.14, effort: 69,  velocity: 1.57 }
+    end_fixed: { xyz: [0, 0, 0.1735], rpy: [0, 0, 0] }
+    standing_height_mm: 1735.5
+
+# ---------------------------------------------------------------------
+# 限位口径冲突：这条必须留字，免得后人以为数据抄错了
+#   · 机械说明书第 5 章「关节范围」写的是 ±360°（对所有轴）；
+#   · 官方 xacro 的 <limit> 是 J1/J4/J6 ±180°、J2 ±134.6°、J3 ±149.5°、J5 ±146.7°。
+# 处理：3D 显示与 clamp 一律采用 xacro 那套（厂商自己拿它做仿真和碰撞检查，更可信）；
+#       说明书的 ±360° 理解为「J1/J4/J6 可连续旋转」的笼统写法。
+#       只读阶段两种口径都不会让机器人动，冲突不影响安全，但**别拿来当运动学的许可范围**。
+# ---------------------------------------------------------------------
+limit_source_note: "见上；显示用 xacro limits，不用说明书 ±360"
+
+# ---------------------------------------------------------------------
+# 界面显示量程（deg）—— 由上面的弧度限位换算而来，供 HUD 画刻度
+# ---------------------------------------------------------------------
+joint_limits_display:
+  - { name: "J1", min: -180.0, max: 180.0 }
+  - { name: "J2", min: -134.6, max: 134.6 }
+  - { name: "J3", min: -149.6, max: 149.6 }
+  - { name: "J4", min: -180.0, max: 180.0 }
+  - { name: "J5", min: -146.7, max: 146.7 }
+  - { name: "J6", min: -180.0, max: 180.0 }
+
+# ---------------------------------------------------------------------
+# 3D 网格：官方仓库按连杆给了 STL（model/ethercat/elfin5/elfin_link1..6.STL + base + end）
+# 与埃夫特那条 STEP→GLB 流程同构，等机型确认后一次性转成 GLB；
+# 12 台共用一份几何（见 docs 里 fleet 方案的 clone() 一节），所以网格只搬一次。
+# ★ 没转出来之前，前端对华沿用「关节链 + 圆角胶囊体」的骨架画法，
+#   尺寸直接取上面的 joints —— 宁可简陋，也不要一个来路不明的模型。
+# ---------------------------------------------------------------------
+mesh:
+  source_dir: "vendor/elfin_model/model/ethercat"
+  glb: ""                  # 空 = 用 STL 原件；两条都没有时退回关节链骨架渲染
+  # 官方 STL 直接进前端静态目录（1:1 原件，**没有**经过任何转换步骤）。
+  # 为什么不转 GLB：本机没有网格转换工具，手写转换等于在厂商几何和屏幕之间
+  # 插一个没人复核过的环节；STLLoader 吃原件，1:1 是可证明的。
+  dir: "models/elfin5"
+  files:
+    base: "elfin_base.STL"
+    links: ["elfin_link1.STL", "elfin_link2.STL", "elfin_link3.STL",
+            "elfin_link4.STL", "elfin_link5.STL", "elfin_link6.STL"]
+  fallback: "joint_chain"
+
+# ---------------------------------------------------------------------
+# 上机后必做的自校验（这是唯一能证明「机型选对了、关节方向没反」的办法）：
+#   本地 FK(6 个关节角) 算出的 TCP，对比 DataSheet 里控制器自己给的
+#   PosAndVel.Actual_PCS_Base（单位 mm，姿态为度）。
+#   §5.2 字段释义（原文）：Actual_PCS_Base = 基于**基座坐标系**下的笛卡尔坐标位置；
+#   Actual_PCS_TCP = 当前**工具坐标系**下的 —— 自校验要比的是基座系那一路，
+#   与 fleet.yaml 的 cartesian_path 保持同一个字段，别一边 Base 一边 TCP。
+#   两者一致 → 机型与关节链正确；不一致 → 要么 variant 选错，要么某轴符号相反。
+#   校验期间机器人保持静止，不下发任何指令。
+# ---------------------------------------------------------------------
+self_check:
+  enabled: true
+  against_path: "PosAndVel.Actual_PCS_Base"
+  position_tolerance_mm: 5.0
+  # PCS_Base 的姿态字段口径（XYZ + Rx/Ry/Rz 度）—— 首台联调时确认欧拉序，
+  # 若对不上先试 ZYX / XYZ 两种展开，别改机器人参数。
+  orientation_convention: "unknown_until_first_connection"
+
